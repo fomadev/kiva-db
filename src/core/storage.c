@@ -93,3 +93,55 @@ void kiva_close(KivaDB* db) {
     fclose(db->file);
     free(db->path); free(db);
 }
+
+KivaStatus kiva_compact(KivaDB* db) {
+    if (!db) return KIVA_ERR_NOT_FOUND;
+
+    char temp_path[256];
+    snprintf(temp_path, sizeof(temp_path), "%s.tmp", db->path);
+    FILE* temp_file = fopen(temp_path, "wb");
+    if (!temp_file) return FILE_ERR_WRITE;
+
+    printf("Compacting database...\n");
+
+    // Parcourir toute la Hash Map
+    for (int i = 0; i < HASH_SIZE; i++) {
+        HashNode* node = db->index[i];
+        while (node) {
+            // Lire la valeur actuelle dans l'ancien fichier
+            char* val = malloc(node->entry.v_size + 1);
+            fseek(db->file, node->entry.offset, SEEK_SET);
+            fread(val, 1, node->entry.v_size, db->file);
+
+            // Écrire dans le nouveau fichier (format binaire classique)
+            uint32_t k_size = (uint32_t)strlen(node->key);
+            uint32_t v_size = node->entry.v_size;
+            
+            long new_offset_start = ftell(temp_file);
+            fwrite(&k_size, sizeof(uint32_t), 1, temp_file);
+            fwrite(&v_size, sizeof(uint32_t), 1, temp_file);
+            fwrite(node->key, 1, k_size, temp_file);
+            fwrite(val, 1, v_size, temp_file);
+
+            // Mettre à jour l'index en RAM avec la nouvelle position
+            node->entry.offset = new_offset_start + (sizeof(uint32_t) * 2) + k_size;
+
+            free(val);
+            node = node->next;
+        }
+    }
+
+    // Fermer et remplacer les fichiers
+    fclose(db->file);
+    fclose(temp_file);
+
+    remove(db->path);           // Supprime l'ancien gros fichier
+    rename(temp_path, db->path); // Renomme le petit fichier propre
+
+    // Réouvrir le fichier proprement
+    db->file = fopen(db->path, "ab+");
+    kiva_lock_file(db->file);
+
+    printf("Compaction finished successfully.\n");
+    return KIVA_OK;
+}

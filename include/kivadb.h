@@ -44,4 +44,6 @@ KivaStatus kiva_delete(KivaDB* db, const char* key);
  */
 void kiva_close(KivaDB* db);
 
+KivaStatus kiva_compact(KivaDB* db);
+
 #endif // KIVADB_H
