@@ -28,11 +28,11 @@ struct KivaDB {
 unsigned long hash_function(const char* str);
 void index_set(KivaDB* db, const char* key, long offset, uint32_t v_size);
 void index_remove(KivaDB* db, const char* key);
+void index_scan(KivaDB* db);
 
 // --- Fonctions de transaction.c ---
 int kiva_lock_file(FILE* file);
 void kiva_unlock_file(FILE* file);
 
-void index_scan(KivaDB* db);
 
 #endif

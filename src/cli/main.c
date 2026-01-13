@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h> // Pour mesurer le temps
 #include "../../include/kivadb.h"
+#include "../core/kivadb_internal.h"
 
 void print_help() {
     printf("Commands: \n");
