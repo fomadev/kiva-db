@@ -75,6 +75,33 @@ int main() {
             printf("Scan completed in %.6f sec\n", time_spent);
             executed = 0; // On évite le double affichage du temps dans le shell
         }
+        else if (strcmp(cmd, "stats") == 0) {
+            int count = 0;
+            // On compte les clés dans l'index
+            for (int i = 0; i < HASH_SIZE; i++) {
+                HashNode* node = db->index[i];
+                while (node) {
+                    count++;
+                    node = node->next;
+                }
+            }
+            
+            long f_size = kiva_get_file_size(db->path);
+            
+            printf("\n--- KivaDB Health Stats ---\n");
+            printf("  Keys in RAM:       %d\n", count);
+            printf("  File size on disk: %ld bytes\n", f_size);
+            
+            // Calcul de l'efficacité simple
+            // Si la taille dépasse 100 octets par clé (arbitraire), on suggère de compacter
+            if (count > 0 && f_size > (count * 150)) {
+                printf("  Status:            Fragmentation high. Run 'compact'.\n");
+            } else {
+                printf("  Status:            Optimal\n");
+            }
+            printf("---------------------------\n");
+            executed = 0;
+        }
         else if (strcmp(cmd, "exit") == 0) {
             break;
         }

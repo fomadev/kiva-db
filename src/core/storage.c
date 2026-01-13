@@ -151,3 +151,12 @@ KivaStatus kiva_compact(KivaDB* db) {
     printf("Compaction finished successfully.\n");
     return KIVA_OK;
 }
+
+long kiva_get_file_size(const char* path) {
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return 0;
+    fseek(fp, 0L, SEEK_END);
+    long size = ftell(fp);
+    fclose(fp);
+    return size;
+}

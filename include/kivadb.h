@@ -46,4 +46,6 @@ void kiva_close(KivaDB* db);
 
 KivaStatus kiva_compact(KivaDB* db);
 
+long kiva_get_file_size(const char* path);
+
 #endif // KIVADB_H
