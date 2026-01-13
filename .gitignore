@@ -1,0 +1,36 @@
+# --- Compilations et Binaires ---
+*.o
+*.obj
+*.exe
+*.out
+*.app
+
+# --- Exécutables spécifiques au projet ---
+# On ignore l'outil CLI et les fichiers de build
+kivadb
+kivadb_cli
+build/
+bin/
+
+# --- Bases de données (Données de test) ---
+# On ignore les fichiers .kiva ou .db créés localement
+*.kiva
+*.db
+*.log
+data/
+
+# --- Bibliothèques et Dépendances ---
+*.a
+*.so
+*.dylib
+*.dll
+
+# --- Debug et IDE ---
+*.dSYM/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Tests ---
+tests/test_runner
