@@ -6,12 +6,16 @@
 #include "../core/kivadb_internal.h"
 
 void print_help() {
-    printf("Commands: \n");
-    printf("  set <key> <value>  : Store a pair\n");
-    printf("  get <key>          : Retrieve a value\n");
-    printf("  del <key>          : Remove a key\n");
-    printf("  compact            : Clean the database file\n");
-    printf("  exit               : Close KivaDB and leave\n");
+    printf("\n--- KivaDB Shell Help ---\n");
+    printf("  set <key> <val>  : Store or update a key\n");
+    printf("  get <key>        : Retrieve value of a key\n");
+    printf("  del <key>        : Remove a key from database\n");
+    printf("  scan             : List all existing keys\n");
+    printf("  stats            : Show database health and file size\n");
+    printf("  compact          : Reclaim disk space (defragmentation)\n");
+    printf("  help or h or \\h  : Show this help menu\n");
+    printf("  exit             : Close database and quit\n");
+    printf("-------------------------\n");
 }
 
 int main() {
@@ -63,7 +67,7 @@ int main() {
             kiva_compact(db);
             printf("Compaction done");
         }
-        else if (strcmp(cmd, "help") == 0) {
+        else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "\\h") == 0 || strcmp(cmd, "h") == 0) {
             print_help();
             executed = 0;
         }
