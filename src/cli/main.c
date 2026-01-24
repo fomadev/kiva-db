@@ -7,7 +7,8 @@
 
 void print_help() {
     printf("\n--- KivaDB Shell Help ---\n");
-    printf("  set <key> <val>  : Store or update a key\n");
+    printf("  set <key> <val>   : Create a NEW key-value pair\n");
+    printf("  update <key> <val>: Update an EXISTING key\n");
     printf("  get <key>        : Retrieve value of a key\n");
     printf("  del <key>        : Remove a key from database\n");
     printf("  scan             : List all existing keys\n");
@@ -41,13 +42,44 @@ int main() {
         int executed = 1;
 
         if (strncmp(cmd, "set ", 4) == 0) {
-            if (sscanf(cmd + 4, "%s %[^\n]", key, val) == 2) {
-                kiva_set(db, key, val);
-                printf("OK");
+            char extra[128];
+            int num_args = sscanf(cmd + 4, "%s %s %s", key, val, extra);
+
+            if (num_args != 2) {
+                printf("Error: 'set' expects exactly 2 arguments (key value).\n");
+                executed = 0;
             } else {
-                printf("Usage: set <key> <value>");
+                char* existing = kiva_get(db, key);
+                if (existing) {
+                    printf("Error: Key '%s' already exists. Use 'update' to change it.\n", key);
+                    free(existing);
+                    executed = 0;
+                } else {
+                    kiva_set(db, key, val);
+                    printf("OK (Created)\n");
+                }
             }
-        } 
+        }
+        // --- Logique pour UPDATE (Nouvelle commande) ---
+        else if (strncmp(cmd, "update ", 7) == 0) {
+            char extra[128];
+            int num_args = sscanf(cmd + 7, "%s %s %s", key, val, extra);
+
+            if (num_args != 2) {
+                printf("Error: 'update' expects exactly 2 arguments (key value).\n");
+                executed = 0;
+            } else {
+                char* existing = kiva_get(db, key);
+                if (!existing) {
+                    printf("Error: Key '%s' does not exist. Use 'set' to create it.\n", key);
+                    executed = 0;
+                } else {
+                    kiva_set(db, key, val); // Ici on utilise kiva_set car il gère l'écrasement dans l'index
+                    printf("OK (Updated)\n");
+                    free(existing);
+                }
+            }
+        }
         else if (strncmp(cmd, "get ", 4) == 0) {
             char extra[128];
             // On essaie de lire la clé ET un éventuel argument supplémentaire
