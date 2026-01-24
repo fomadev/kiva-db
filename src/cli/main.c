@@ -49,20 +49,35 @@ int main() {
             }
         } 
         else if (strncmp(cmd, "get ", 4) == 0) {
-            sscanf(cmd + 4, "%s", key);
-            char* res = kiva_get(db, key);
-            if (res) {
-                printf("\"%s\"", res);
-                free(res);
+            char extra[128];
+            // On essaie de lire la clé ET un éventuel argument supplémentaire
+            int num_args = sscanf(cmd + 4, "%s %s", key, extra);
+
+            if (num_args > 1) {
+                printf("Error: 'get' command expects only 1 argument.\n");
+                printf("Usage: get <key>\n");
+                executed = 0;
+            } else if (num_args == 1) {
+                char* res = kiva_get(db, key);
+                printf("%s\n", res ? res : "(nil)");
+                if (res) free(res);
             } else {
-                printf("(nil)");
+                printf("Usage: get <key>\n");
+                executed = 0;
             }
         } 
         else if (strncmp(cmd, "del ", 4) == 0) {
-            sscanf(cmd + 4, "%s", key);
+        char extra[128];
+        int num_args = sscanf(cmd + 4, "%s %s", key, extra);
+        
+        if (num_args != 1) {
+            printf("Error: 'del' command expects exactly 1 argument.\nUsage: del <key>\n");
+            executed = 0;
+        } else {
             kiva_delete(db, key);
-            printf("OK");
+            printf("OK\n");
         }
+    }
         else if (strcmp(cmd, "compact") == 0) {
             kiva_compact(db);
             printf("Compaction done");
