@@ -61,7 +61,9 @@ int main(int argc, char* argv[]) {
         if (strncmp(cmd, "set ", 4) == 0) {
             char *ptr = cmd + 4;
             int found_args = 0, created_count = 0;
-            int executed = 1; // Variable de contrôle du succès
+            int executed = 1; // Utilisé pour valider l'affichage du chrono final
+
+            // On pourrait imaginer ici un : clock_t start = clock(); 
 
             while (*ptr != '\0') {
                 char key[128] = {0}, val[256] = {0};
@@ -82,17 +84,16 @@ int main(int argc, char* argv[]) {
                 ptr = strstr(ptr, key) + strlen(key);
                 while (*ptr == ' ') ptr++;
 
-                // 2. Extraction de la valeur (avec gestion sécurisée des guillemets)
+                // 2. Extraction de la valeur (sécurisée)
                 if (*ptr == '"') {
                     ptr++; // Sauter le guillemet ouvrant
                     int i = 0;
-                    // Boucle sécurisée : s'arrête si guillemet fermant, fin de chaîne, ou buffer plein
+                    // Sécurité : s'arrête si guillemet fermant, fin de chaîne ou buffer plein
                     while (*ptr != '"' && *ptr != '\0' && i < 255) { 
                         val[i++] = *ptr++; 
                     }
-                    if (*ptr == '"') ptr++; // Sauter le guillemet fermant si présent
+                    if (*ptr == '"') ptr++; // Sauter le guillemet fermant
                 } else {
-                    // Lecture d'un mot simple si pas de guillemets
                     if (sscanf(ptr, "%255s", val) == 1) {
                         ptr += strlen(val);
                     }
@@ -113,16 +114,22 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 
-                // Ignorer les espaces après la valeur pour préparer la suite
                 while (*ptr == ' ') ptr++;
             }
 
-            // Résumé de l'opération
+            // Résumé et gestion de la variable 'executed'
             if (found_args == 0) { 
                 printf("Usage: set <key> <val> [and <key2> <val2>...]\n"); 
                 executed = 0; 
             } else {
-                printf("Summary: %d key(s) created.\n", created_count);
+                printf("Summary: %d key(s) created.", created_count);
+            }
+
+            // Utilisation de 'executed' pour afficher le temps (résout le warning)
+            if (executed) {
+                // clock_t end = clock();
+                // printf(" (%.6f sec)\n", (double)(end - start) / CLOCKS_PER_SEC);
+                printf("\n"); // Simple retour à la ligne si vous gérez le temps ailleurs
             }
         }
 
