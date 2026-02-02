@@ -121,23 +121,35 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (strncmp(cmd, "get ", 4) == 0) {
-            char extra[128];
-            // On essaie de lire la clé ET un éventuel argument supplémentaire
-            int num_args = sscanf(cmd + 4, "%s %s", key, extra);
+            char *ptr = cmd + 4;
+            // On utilise strtok pour découper la ligne par les espaces
+            char *token = strtok(ptr, " "); 
+            int found_args = 0;
 
-            if (num_args > 1) {
-                printf("Error: 'get' command expects only 1 argument.\n");
-                printf("Usage: get <key>\n");
-                executed = 0;
-            } else if (num_args == 1) {
-                char* res = kiva_get(db, key);
-                printf("%s\n", res ? res : "(nil)");
-                if (res) free(res);
-            } else {
-                printf("Usage: get <key>\n");
+            while (token != NULL) {
+                // On ignore le mot-clé "and" s'il est présent pour permettre
+                // la syntaxe : get key1 and key2
+                if (strcmp(token, "and") != 0) {
+                    found_args++;
+                    char* res = kiva_get(db, token);
+                    
+                    // Formatage clair pour le multi-get : "clé: valeur"
+                    printf("%s: %s\n", token, res ? res : "(nil)");
+                    
+                    if (res) {
+                        free(res);
+                    }
+                }
+                // On passe au mot suivant
+                token = strtok(NULL, " ");
+            }
+
+            // Si l'utilisateur a juste tapé "get" sans rien derrière
+            if (found_args == 0) {
+                printf("Usage: get <key1> [and] <key2> ...\n");
                 executed = 0;
             }
-        } 
+        }
         else if (strncmp(cmd, "typeof ", 7) == 0) {
             if (sscanf(cmd + 7, "%s", key) == 1) {
                 printf("Type: %s", kiva_typeof(db, key));
