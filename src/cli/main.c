@@ -1,7 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h> 
+#include <time.h>
+#include <inttypes.h>
 #include "../../include/kivadb.h"
 #include "../core/kivadb_internal.h"
 
@@ -230,8 +231,8 @@ int main(int argc, char* argv[]) {
                 HashNode* node = db->index[i];
                 while (node) { count++; node = node->next; }
             }
-            long f_size = kiva_get_file_size(db->path);
-            printf("\n--- Stats ---\nKeys: %d\nSize: %ld bytes\n-------------", count, f_size);
+            int64_t f_size = kiva_get_file_size(db->path);
+            printf("\n--- Stats ---\nKeys: %d\nSize: %" PRId64 " bytes\n-------------", count, f_size);
             executed = 0;
         }
         else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "h") == 0) {
