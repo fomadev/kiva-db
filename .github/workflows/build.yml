@@ -27,9 +27,6 @@ jobs:
             output: kivadb_win_x86.exe
 
           # --- macOS ---
-          - os: macos-13 
-            arch: x64
-            output: kivadb_mac_x64
           - os: macos-latest 
             arch: arm64
             output: kivadb_mac_arm64
