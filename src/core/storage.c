@@ -71,7 +71,7 @@ static void kiva_load_index(KivaDB* db) {
         }
         if (header.format_version == FORMAT_V1) {
             fprintf(stderr, "[Warning] Old format detected. Running in legacy mode. "
-                           "Please run 'compact' to upgrade to v%s\n", KIVADB_VERSION);
+                            "Please run 'compact' to upgrade to v%s\n", KIVADB_VERSION);
         }
     }
     
@@ -109,7 +109,6 @@ KivaDB* kiva_open(const char* path) {
     if (!db) return NULL;
     db->path = strdup(path);
     
-    // On ouvre le fichier
     db->file = fopen(path, "ab+");
     if (!db->file || kiva_lock_file(db->file) == -1) {
         if (db->file) fclose(db->file);
@@ -117,18 +116,16 @@ KivaDB* kiva_open(const char* path) {
         return NULL;
     }
 
-    // --- OPTIMISATION : AJOUT DU BUFFER ---
-    // On crée un buffer de 64 Ko (65536 octets)
-    // Cela regroupe les petites écritures en une seule grosse écriture disque
     setvbuf(db->file, NULL, _IOFBF, 65536);
-
     kiva_load_index(db);
     return db;
 }
 
-KivaStatus kiva_set(KivaDB* db, const char* key, const char* value) {
+/**
+ * Core internal set function that handles writing to disk and indexing
+ */
+static KivaStatus kiva_internal_set(KivaDB* db, const char* key, const char* value, KivaType type) {
     uint32_t k_size = strlen(key), v_size = strlen(value);
-    KivaType type = detect_type(value);
     uint8_t type_byte = (uint8_t)type;
     
     fseek(db->file, 0, SEEK_END);
@@ -141,10 +138,21 @@ KivaStatus kiva_set(KivaDB* db, const char* key, const char* value) {
     fwrite(value, 1, v_size, db->file);
     fflush(db->file);
     
-    // Update index with type information
     int64_t value_offset = pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + k_size;
     index_set(db, key, value_offset, v_size, type);
     return KIVA_OK;
+}
+
+KivaStatus kiva_set(KivaDB* db, const char* key, const char* value) {
+    // Inférence automatique si appelé sans type spécifique
+    KivaType type = detect_type(value);
+    return kiva_internal_set(db, key, value, type);
+}
+
+KivaStatus kiva_set_with_type(KivaDB* db, const char* key, const char* value, KivaType forced_type) {
+    // Si le type est UNKNOWN, on utilise l'inférence, sinon on respecte le choix
+    KivaType type_to_use = (forced_type == KIVA_TYPE_UNKNOWN) ? detect_type(value) : forced_type;
+    return kiva_internal_set(db, key, value, type_to_use);
 }
 
 char* kiva_get(KivaDB* db, const char* key) {
@@ -164,7 +172,6 @@ char* kiva_get(KivaDB* db, const char* key) {
 }
 
 KivaStatus kiva_delete(KivaDB* db, const char* key) {
-    // ÉTAPE 1 : Vérifier si la clé existe dans l'index (Hash Map)
     unsigned long h = hash_function(key);
     HashNode* node = db->index[h];
     int found = 0;
@@ -177,30 +184,29 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
         node = node->next;
     }
 
-    // ÉTAPE 2 : Si la clé n'existe pas, on s'arrête ici
     if (!found) {
-        return KIVA_ERR_NOT_FOUND; // Ou ton code d'erreur correspondant
+        return KIVA_ERR_NOT_FOUND;
     }
 
-    // ÉTAPE 3 : La clé existe, on procède à la suppression logique
-    uint32_t k_size = strlen(key), v_size = 0; // v_size = 0 est notre "Tombstone"
+    uint32_t k_size = strlen(key), v_size = 0;
     fseek(db->file, 0, SEEK_END);
     
     fwrite(&k_size, sizeof(uint32_t), 1, db->file);
     fwrite(&v_size, sizeof(uint32_t), 1, db->file);
+    // On garde l'espace pour le type_byte pour garder le format cohérent
+    uint8_t type_byte = (uint8_t)KIVA_TYPE_UNKNOWN;
+    fwrite(&type_byte, sizeof(uint8_t), 1, db->file);
+    
     fwrite(key, 1, k_size, db->file);
     fflush(db->file);
 
-    // ÉTAPE 4 : Retirer de la mémoire vive
     index_remove(db, key);
-    
     return KIVA_OK;
 }
 
 void kiva_close(KivaDB* db) {
     if (!db) return;
     kiva_unlock_file(db->file);
-    // (Ajouter ici une boucle pour libérer les HashNodes si besoin)
     fclose(db->file);
     free(db->path); free(db);
 }
@@ -215,23 +221,19 @@ KivaStatus kiva_compact(KivaDB* db) {
 
     printf("Compacting database to v%s format...\n", KIVADB_VERSION);
 
-    // Write FORMAT_V2 header for portability
     KivaHeader header;
     memcpy(header.signature, MAGIC_SIGNATURE, 4);
     header.format_version = FORMAT_V2;
     header.reserved = 0;
     fwrite(&header, sizeof(KivaHeader), 1, temp_file);
 
-    // Iterate through Hash Map and write all entries with type information
     for (int i = 0; i < HASH_SIZE; i++) {
         HashNode* node = db->index[i];
         while (node) {
-            // Read value from old file
             char* val = malloc(node->entry.v_size + 1);
             fseek(db->file, node->entry.offset, SEEK_SET);
             fread(val, 1, node->entry.v_size, db->file);
 
-            // Write to new file in FORMAT_V2 with types
             uint32_t k_size = (uint32_t)strlen(node->key);
             uint32_t v_size = node->entry.v_size;
             uint8_t type_byte = (uint8_t)node->entry.type;
@@ -243,7 +245,6 @@ KivaStatus kiva_compact(KivaDB* db) {
             fwrite(node->key, 1, k_size, temp_file);
             fwrite(val, 1, v_size, temp_file);
 
-            // Update RAM index with new position
             node->entry.offset = new_offset_start + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + k_size;
 
             free(val);
@@ -251,14 +252,12 @@ KivaStatus kiva_compact(KivaDB* db) {
         }
     }
 
-    // Close and replace files
     fclose(db->file);
     fclose(temp_file);
 
     remove(db->path);
     rename(temp_path, db->path);
 
-    // Reopen file properly
     db->file = fopen(db->path, "ab+");
     kiva_lock_file(db->file);
     setvbuf(db->file, NULL, _IOFBF, 65536);

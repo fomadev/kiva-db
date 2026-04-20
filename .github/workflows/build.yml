@@ -1,0 +1,82 @@
+name: Multi-Architecture Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: # Permet de lancer le build manuellement
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Windows ---
+          - os: windows-latest
+            arch: x64
+            output: kivadb_win_x64.exe
+          - os: windows-latest
+            arch: x86
+            output: kivadb_win_x86.exe
+
+          # --- macOS ---
+          - os: macos-13 # Intel
+            arch: x64
+            output: kivadb_mac_x64
+          - os: macos-latest # Apple Silicon (M1/M2/M3)
+            arch: arm64
+            output: kivadb_mac_arm64
+
+          # --- Linux ---
+          - os: ubuntu-latest
+            arch: x64
+            output: kivadb_linux_x64
+          - os: ubuntu-latest
+            arch: arm64
+            output: kivadb_linux_arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Configuration spécifique pour Windows x86 (32 bits)
+      - name: Setup MSVC (Windows x86)
+        if: matrix.os == 'windows-latest' && matrix.arch == 'x86'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      # Installation du compilateur cross-platform pour Linux ARM64
+      - name: Install ARM Cross-Compiler (Linux)
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # Compilation
+      - name: Compile KivaDB
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            if [ "${{ matrix.arch }}" = "x86" ]; then
+              cl.exe /Iinclude src/core/*.c src/cli/main.c /Fe:${{ matrix.output }}
+            else
+              gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
+            fi
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+            aarch64-linux-gnu-gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
+          else
+            gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
+          fi
+        shell: bash
+
+      # Téléchargement de l'artéfact
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivadb-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ matrix.output }}
