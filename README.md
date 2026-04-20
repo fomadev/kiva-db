@@ -13,7 +13,7 @@ KivaDB est un moteur de base de données clé-valeur (Key-Value Store) ultra-lé
 Assurez-vous d'avoir `gcc` et `make` installés sur votre système.
 
 ```bash
-git clone https://github.com/votre-compte/kivadb.git
+git clone https://github.com/fomadev/kivadb.git
 cd KivaDB
 make
 ```
