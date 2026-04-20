@@ -5,7 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch: # Permet de lancer le build manuellement
+  workflow_dispatch: 
+
+env:
+  # Force Node 24 pour supprimer les warnings
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -23,10 +27,10 @@ jobs:
             output: kivadb_win_x86.exe
 
           # --- macOS ---
-          - os: macos-13 # Intel
+          - os: macos-13 
             arch: x64
             output: kivadb_mac_x64
-          - os: macos-latest # Apple Silicon (M1/M2/M3)
+          - os: macos-latest 
             arch: arm64
             output: kivadb_mac_arm64
 
@@ -44,37 +48,34 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Configuration spécifique pour Windows x86 (32 bits)
       - name: Setup MSVC (Windows x86)
         if: matrix.os == 'windows-latest' && matrix.arch == 'x86'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
 
-      # Installation du compilateur cross-platform pour Linux ARM64
       - name: Install ARM Cross-Compiler (Linux)
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # Compilation
       - name: Compile KivaDB
+        shell: bash
         run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            if [ "${{ matrix.arch }}" = "x86" ]; then
-              cl.exe /Iinclude src/core/*.c src/cli/main.c /Fe:${{ matrix.output }}
-            else
-              gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
-            fi
-          elif [ "${{ matrix.os }}" = "ubuntu-latest" ] && [ "${{ matrix.arch }}" = "arm64" ]; then
+          # MSYS_NO_PATHCONV=1 empêche Bash de transformer /Iinclude en chemin C:/...
+          export MSYS_NO_PATHCONV=1
+
+          if [[ "${{ matrix.os }}" == "windows-latest" && "${{ matrix.arch }}" == "x86" ]]; then
+            cl.exe /Iinclude "src/core/storage.c" "src/core/index.c" "src/core/transaction.c" "src/cli/main.c" /Fe:${{ matrix.output }}
+          
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
             aarch64-linux-gnu-gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
+          
           else
             gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
           fi
-        shell: bash
 
-      # Téléchargement de l'artéfact
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
