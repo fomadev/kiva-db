@@ -1,13 +1,33 @@
 #ifndef KIVADB_H
 #define KIVADB_H
 
-#define KIVADB_VERSION "1.0.3"
+#define KIVADB_VERSION "1.1.0"
+#define MAGIC_SIGNATURE "KIVA"
+#define FORMAT_V1 1  // Old format (no header)
+#define FORMAT_V2 2  // New format (with header and types)
 
 #include <stddef.h>
 #include <stdint.h>
 
+/* Cross-platform directory creation macros */
+#ifdef _WIN32
+    #include <direct.h>
+    #define MKDIR(dir) _mkdir(dir)
+#else
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #define MKDIR(dir) mkdir(dir, 0755)
+#endif
+
 // Structure opaque pour masquer les détails d'implémentation à l'utilisateur
 typedef struct KivaDB KivaDB;
+
+// File header for portability and format versioning
+typedef struct {
+    char signature[4];    // "KIVA"
+    uint32_t format_version;  // FORMAT_V1 or FORMAT_V2
+    uint32_t reserved;    // For future extensions
+} KivaHeader;
 
 // Codes de retour pour la gestion d'erreurs
 typedef enum {
@@ -17,19 +37,21 @@ typedef enum {
     KIVA_ERR_OPEN,
     FILE_ERR_WRITE,
     KIVA_ERR_NOT_FOUND,
-    KIVA_ERR_MALLOC
+    KIVA_ERR_MALLOC,
+    KIVA_ERR_LEGACY_FORMAT  // New: Old format detected
 } KivaStatus;
 
 typedef enum {
-    TYPE_STRING = 0,
-    TYPE_NUMBER = 1,
-    TYPE_BOOLEAN = 2
+    KIVA_TYPE_STRING = 1,
+    KIVA_TYPE_NUMBER = 2,
+    KIVA_TYPE_BOOLEAN = 3,
+    KIVA_TYPE_UNKNOWN = 0
 } KivaType;
 
 typedef struct {
-    long offset;
-    uint32_t v_size;
-    KivaType type; // Vérifie bien que cette ligne est présente ici
+    int64_t offset;      // Fixed-size offset for portability
+    uint32_t v_size;    // Fixed-size for portability
+    KivaType type;      // Type information
 } KeyDirEntry;
 
 /**
@@ -62,7 +84,7 @@ void kiva_close(KivaDB* db);
 
 KivaStatus kiva_compact(KivaDB* db);
 
-long kiva_get_file_size(const char* path);
+int64_t kiva_get_file_size(const char* path);
 
 const char* kiva_typeof(KivaDB* db, const char* key);
 #endif // KIVADB_H

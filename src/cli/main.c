@@ -4,7 +4,6 @@
 #include <time.h> 
 #include "../../include/kivadb.h"
 #include "../core/kivadb_internal.h"
-#include <direct.h> // Pour _mkdir sur Windows
 
 void print_help() {
     printf("\n--- KivaDB Shell Help ---\n");
@@ -34,7 +33,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    _mkdir("data");
+    MKDIR("data");
     const char* db_path = "data/store.kiva";
 
     KivaDB* db = kiva_open(db_path);

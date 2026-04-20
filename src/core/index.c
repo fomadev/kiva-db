@@ -31,8 +31,8 @@ void index_remove(KivaDB* db, const char* key) {
     }
 }
 
-// Ajouter ou mettre à jour une clé dans l'index RAM
-void index_set(KivaDB* db, const char* key, long offset, uint32_t v_size, KivaType type) {
+// Add or update a key in RAM index
+void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type) {
     unsigned long h = hash_function(key);
     HashNode* node = db->index[h];
 
@@ -40,7 +40,7 @@ void index_set(KivaDB* db, const char* key, long offset, uint32_t v_size, KivaTy
         if (strcmp(node->key, key) == 0) {
             node->entry.offset = offset;
             node->entry.v_size = v_size;
-            node->entry.type = type; // Maintenant 'type' est connu !
+            node->entry.type = type;
             return;
         }
         node = node->next;
@@ -65,9 +65,9 @@ void index_scan(KivaDB* db) {
         while (node) {
             const char* type_str = "unknown";
             // Conversion du type enum en texte pour l'affichage
-            if (node->entry.type == TYPE_STRING) type_str = "string";
-            else if (node->entry.type == TYPE_NUMBER) type_str = "number";
-            else if (node->entry.type == TYPE_BOOLEAN) type_str = "boolean";
+            if (node->entry.type == KIVA_TYPE_STRING) type_str = "string";
+            else if (node->entry.type == KIVA_TYPE_NUMBER) type_str = "number";
+            else if (node->entry.type == KIVA_TYPE_BOOLEAN) type_str = "boolean";
 
             printf("  -> %-15s | Type: %-8s | Size: %u bytes\n", 
                    node->key, type_str, node->entry.v_size);

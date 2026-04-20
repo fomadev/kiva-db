@@ -23,8 +23,7 @@ struct KivaDB {
 
 // --- Fonctions de index.c ---
 unsigned long hash_function(const char* str);
-// On garde UNIQUEMENT la version à 5 arguments
-void index_set(KivaDB* db, const char* key, long offset, uint32_t v_size, KivaType type);
+void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type);
 void index_remove(KivaDB* db, const char* key);
 void index_scan(KivaDB* db);
 
