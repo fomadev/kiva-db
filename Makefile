@@ -1,31 +1,42 @@
 CC = gcc
+CXX = g++
 CFLAGS = -Wall -Wextra -std=c11 -Iinclude
+CXXFLAGS = -Wall -Wextra -std=c++17 -Iinclude
+LDFLAGS = -lstdc++
 
-# Liste des objets
-CORE_OBJ = src/core/storage.o src/core/index.o src/core/transaction.o
-CLI_OBJ = src/cli/main.o
-STRESS_OBJ = src/cli/stress_test.o
+# Sources
+CORE_DIR = src/core
+CLI_DIR = src/cli
+OBJ_DIR = obj
 
-# Cibles principales
-all: kivadb stress_test
+# On sépare les objets C et C++
+C_SRCS = $(CORE_DIR)/storage.c $(CORE_DIR)/transaction.c
+# On prévoit de transformer index et main en C++
+CPP_SRCS = $(CORE_DIR)/index.cpp $(CLI_DIR)/main.cpp
 
-# Règle pour l'exécutable principal
-kivadb: $(CORE_OBJ) $(CLI_OBJ)
-	$(CC) $(CORE_OBJ) $(CLI_OBJ) -o kivadb
+OBJS = $(OBJ_DIR)/storage.o $(OBJ_DIR)/transaction.o \
+       $(OBJ_DIR)/index.o $(OBJ_DIR)/main.o
 
-# Règle pour l'outil de stress test
-stress_test: $(CORE_OBJ) $(STRESS_OBJ)
-	$(CC) $(CORE_OBJ) $(STRESS_OBJ) -o stress_test
+TARGET = kivadb.exe
 
-# Compilation des fichiers .o
-%.o: %.c
+$(TARGET): $(OBJS)
+	$(CXX) $(OBJS) -o $(TARGET) $(LDFLAGS)
+
+# Règle pour les fichiers C
+$(OBJ_DIR)/%.o: $(CORE_DIR)/%.c
+	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Nettoyage robuste
-clean:
-	@echo Cleaning files...
-	-rm -f src/core/*.o src/cli/*.o kivadb kivadb.exe stress_test stress_test.exe
-	@echo Done.
+# Règle pour les fichiers C++ (Core)
+$(OBJ_DIR)/index.o: $(CORE_DIR)/index.cpp
+	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# Reconstruire tout proprement
-re: clean all
+# Règle pour le CLI C++
+$(OBJ_DIR)/main.o: $(CLI_DIR)/main.cpp
+	@if not exist $(OBJ_DIR) mkdir $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+clean:
+	@if exist $(OBJ_DIR) rmdir /s /q $(OBJ_DIR)
+	@if exist $(TARGET) del $(TARGET)
