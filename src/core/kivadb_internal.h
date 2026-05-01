@@ -5,30 +5,31 @@
 #include <stdint.h>
 #include "../../include/kivadb.h"
 
-#define HASH_SIZE 1024
-
-// --- NOTE : On a supprimé KeyDirEntry d'ici car elle est déjà dans kivadb.h ---
-
-typedef struct HashNode {
-    char* key;
-    KeyDirEntry entry;
-    struct HashNode* next;
-} HashNode;
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct KivaDB {
     FILE* file;
     char* path;
-    HashNode* index[HASH_SIZE]; 
+    void* cpp_index; // Pointeur vers KivaIndex (C++ Map)
 };
 
-// --- Fonctions de index.c ---
-unsigned long hash_function(const char* str);
+// --- Prototypes Index ---
+void index_init(KivaDB* db);
+void index_free(KivaDB* db);
 void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type);
 void index_remove(KivaDB* db, const char* key);
 void index_scan(KivaDB* db);
+int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry);
+int index_get_count(KivaDB* db);
 
-// --- Fonctions de transaction.c ---
+// --- Système ---
 int kiva_lock_file(FILE* file);
 void kiva_unlock_file(FILE* file);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

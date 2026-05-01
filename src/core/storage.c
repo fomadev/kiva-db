@@ -94,25 +94,29 @@ static void kiva_load_index(KivaDB* db) {
         
         if (v_size == 0) {
             index_remove(db, key);
-            free(key);
         } else {
             int64_t current_offset = ftell(db->file);
             index_set(db, key, current_offset, v_size, (KivaType)type_raw);
             fseek(db->file, v_size, SEEK_CUR);
-            free(key);
         }
+        free(key);
     }
 }
 
 KivaDB* kiva_open(const char* path) {
     KivaDB* db = calloc(1, sizeof(KivaDB));
     if (!db) return NULL;
-    db->path = strdup(path);
     
+    // Initialisation de l'index C++
+    index_init(db);
+
+    db->path = strdup(path);
     db->file = fopen(path, "ab+");
     if (!db->file || kiva_lock_file(db->file) == -1) {
         if (db->file) fclose(db->file);
-        free(db->path); free(db);
+        index_free(db); // Nettoyage de l'index si échec
+        free(db->path); 
+        free(db);
         return NULL;
     }
 
@@ -144,47 +148,33 @@ static KivaStatus kiva_internal_set(KivaDB* db, const char* key, const char* val
 }
 
 KivaStatus kiva_set(KivaDB* db, const char* key, const char* value) {
-    // Inférence automatique si appelé sans type spécifique
     KivaType type = detect_type(value);
     return kiva_internal_set(db, key, value, type);
 }
 
 KivaStatus kiva_set_with_type(KivaDB* db, const char* key, const char* value, KivaType forced_type) {
-    // Si le type est UNKNOWN, on utilise l'inférence, sinon on respecte le choix
     KivaType type_to_use = (forced_type == KIVA_TYPE_UNKNOWN) ? detect_type(value) : forced_type;
     return kiva_internal_set(db, key, value, type_to_use);
 }
 
 char* kiva_get(KivaDB* db, const char* key) {
-    unsigned long h = hash_function(key);
-    HashNode* node = db->index[h];
-    while (node) {
-        if (strcmp(node->key, key) == 0) {
-            char* val = malloc(node->entry.v_size + 1);
-            fseek(db->file, node->entry.offset, SEEK_SET);
-            fread(val, 1, node->entry.v_size, db->file);
-            val[node->entry.v_size] = '\0';
-            return val;
-        }
-        node = node->next;
+    KeyDirEntry entry;
+    // Utilisation de l'appel vers l'index C++ (unordered_map)
+    if (index_lookup(db, key, &entry)) {
+        char* val = malloc(entry.v_size + 1);
+        if (!val) return NULL;
+        fseek(db->file, entry.offset, SEEK_SET);
+        fread(val, 1, entry.v_size, db->file);
+        val[entry.v_size] = '\0';
+        return val;
     }
     return NULL;
 }
 
 KivaStatus kiva_delete(KivaDB* db, const char* key) {
-    unsigned long h = hash_function(key);
-    HashNode* node = db->index[h];
-    int found = 0;
-
-    while (node) {
-        if (strcmp(node->key, key) == 0) {
-            found = 1;
-            break;
-        }
-        node = node->next;
-    }
-
-    if (!found) {
+    KeyDirEntry entry;
+    // On vérifie d'abord si la clé existe dans l'index C++
+    if (!index_lookup(db, key, &entry)) {
         return KIVA_ERR_NOT_FOUND;
     }
 
@@ -193,7 +183,6 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     
     fwrite(&k_size, sizeof(uint32_t), 1, db->file);
     fwrite(&v_size, sizeof(uint32_t), 1, db->file);
-    // On garde l'espace pour le type_byte pour garder le format cohérent
     uint8_t type_byte = (uint8_t)KIVA_TYPE_UNKNOWN;
     fwrite(&type_byte, sizeof(uint8_t), 1, db->file);
     
@@ -208,7 +197,9 @@ void kiva_close(KivaDB* db) {
     if (!db) return;
     kiva_unlock_file(db->file);
     fclose(db->file);
-    free(db->path); free(db);
+    index_free(db); // Nettoyage de l'index avant de libérer db
+    free(db->path); 
+    free(db);
 }
 
 KivaStatus kiva_compact(KivaDB* db) {
@@ -227,30 +218,16 @@ KivaStatus kiva_compact(KivaDB* db) {
     header.reserved = 0;
     fwrite(&header, sizeof(KivaHeader), 1, temp_file);
 
-    for (int i = 0; i < HASH_SIZE; i++) {
-        HashNode* node = db->index[i];
-        while (node) {
-            char* val = malloc(node->entry.v_size + 1);
-            fseek(db->file, node->entry.offset, SEEK_SET);
-            fread(val, 1, node->entry.v_size, db->file);
-
-            uint32_t k_size = (uint32_t)strlen(node->key);
-            uint32_t v_size = node->entry.v_size;
-            uint8_t type_byte = (uint8_t)node->entry.type;
-            
-            int64_t new_offset_start = ftell(temp_file);
-            fwrite(&k_size, sizeof(uint32_t), 1, temp_file);
-            fwrite(&v_size, sizeof(uint32_t), 1, temp_file);
-            fwrite(&type_byte, sizeof(uint8_t), 1, temp_file);
-            fwrite(node->key, 1, k_size, temp_file);
-            fwrite(val, 1, v_size, temp_file);
-
-            node->entry.offset = new_offset_start + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + k_size;
-
-            free(val);
-            node = node->next;
-        }
-    }
+    /**
+     * Note: Dans un index C++, on délèguera normalement cette boucle 
+     * à une fonction index_get_all_entries() ou on utilisera un itérateur C++.
+     * Pour ce code, nous supposons que index_scan ou une fonction similaire 
+     * permet d'accéder aux données pour la migration.
+     */
+     
+    // Ici, le processus de compaction doit itérer sur l'index C++
+    // Nous appelons une passerelle C++ prévue à cet effet
+    kiva_internal_compact_step(db, temp_file);
 
     fclose(db->file);
     fclose(temp_file);
@@ -276,19 +253,15 @@ int64_t kiva_get_file_size(const char* path) {
 }
 
 const char* kiva_typeof(KivaDB* db, const char* key) {
-    unsigned long h = hash_function(key);
-    HashNode* node = db->index[h];
-    while (node) {
-        if (strcmp(node->key, key) == 0) {
-            switch(node->entry.type) {
-                case KIVA_TYPE_STRING:   return "string";
-                case KIVA_TYPE_NUMBER:   return "number";
-                case KIVA_TYPE_BOOLEAN:  return "boolean";
-                case KIVA_TYPE_UNKNOWN:
-                default:                 return "unknown";
-            }
+    KeyDirEntry entry;
+    if (index_lookup(db, key, &entry)) {
+        switch(entry.type) {
+            case KIVA_TYPE_STRING:   return "string";
+            case KIVA_TYPE_NUMBER:   return "number";
+            case KIVA_TYPE_BOOLEAN:  return "boolean";
+            case KIVA_TYPE_UNKNOWN:
+            default:                 return "unknown";
         }
-        node = node->next;
     }
     return "undefined";
 }
