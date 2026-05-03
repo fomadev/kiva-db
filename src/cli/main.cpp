@@ -5,14 +5,22 @@
 #include <ctime>
 #include <algorithm>
 
+#ifdef _WIN32
+    #include <direct.h>
+    #define MKDIR(path) _mkdir(path)
+#else
+    #include <sys/stat.h>
+    #include <sys/types.h>
+    #define MKDIR(path) mkdir(path, 0777)
+#endif
+
 extern "C" {
     #include "../../include/kivadb.h"
     #include "../core/kivadb_internal.h"
 }
 
 /**
- * CommandParser strict : Gère les "", '', et ``
- * Vérifie maintenant si les guillemets sont correctement fermés.
+ * CommandParser : Gère les guillemets et les délimiteurs.
  */
 struct CommandParser {
     static std::vector<std::string> tokenize(const std::string& input, std::vector<char>& delimiters) {
@@ -39,11 +47,10 @@ struct CommandParser {
             }
         }
 
-        // --- CORRECTION : Détection des guillemets non fermés ---
         if (quote_char != 0) {
             std::cout << "Syntax Error: Unclosed quote detected (" << quote_char << ").\n";
             delimiters.clear();
-            return {}; // Retourne un vecteur vide pour annuler la commande
+            return {};
         }
 
         if (!current.empty()) {
@@ -55,15 +62,14 @@ struct CommandParser {
 };
 
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v1.1.0) ---\n"
-              << "  set [type] `key` \"val\" [ttl s]   : Set with strict quotes\n"
-              << "  update `key` \"val\"               : Update existing keys\n"
-              << "  change `old` to `new`            : Rename and remove TTL\n"
-              << "  get `key1` and `key2`            : Retrieve values\n"
-              << "  typeof `key`                     : Show data type\n"
-              << "  del `key` OR del all keys        : Delete keys\n"
-              << "  scan                             : List all entries\n"
-              << "  compact | stats | exit           : Utility commands\n"
+    std::cout << "\n--- KivaDB Shell Help (v1.1.1) ---\n"
+              << "  set [type] `key` \"val\" [ttl s]   : Insert ONLY (fails if exists)\n"
+              << "  update `key` \"val\"               : Update ONLY (fails if not exists)\n"
+              << "  change `old` to `new`             : Rename (fails if `new` exists)\n"
+              << "  get `key1` and `key2`             : Retrieve values\n"
+              << "  typeof `key`                      : Show data type\n"
+              << "  del `key` OR del all keys         : Delete entries\n"
+              << "  scan | stats | compact | exit     : Utilities\n"
               << "-----------------------------------\n";
 }
 
@@ -95,7 +101,7 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // --- COMMAND: SET ---
+        // --- COMMAND: SET (Strict Insertion) ---
         if (cmd == "set") {
             int global_ttl = 0;
             for (size_t j = 0; j < tokens.size(); j++) 
@@ -115,20 +121,17 @@ int main(int argc, char* argv[]) {
 
                 if (i + 1 >= tokens.size()) break;
 
-                // Rigueur : Clé ne peut pas avoir "" ou ''
-                if (delim[i] == '"' || delim[i] == '\'') {
-                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use ``.\n";
+                // Sécurité 1 : Vérifier si la clé existe déjà
+                char* check = kiva_get(db, tokens[i].c_str());
+                if (check) {
+                    std::cout << "Error: Key '" << tokens[i] << "' already exists. Use 'update' to modify it.\n";
+                    free(check);
                     i += 2; continue;
                 }
 
-                // Rigueur : Valeur doit avoir "" ou '' si c'est un string
-                if ((forced == KIVA_TYPE_STRING || forced == KIVA_TYPE_UNKNOWN) && 
-                    (delim[i+1] != '"' && delim[i+1] != '\'')) {
-                    // On laisse passer les nombres/bool sans guillemets, mais pas le reste
-                    if (forced == KIVA_TYPE_STRING) {
-                        std::cout << "Syntax Error: String values must be in \"\" or ''.\n";
-                        i += 2; continue;
-                    }
+                if (delim[i] == '"' || delim[i] == '\'') {
+                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use ``.\n";
+                    i += 2; continue;
                 }
 
                 kiva_set_ex(db, tokens[i].c_str(), tokens[i+1].c_str(), forced, global_ttl);
@@ -136,17 +139,14 @@ int main(int argc, char* argv[]) {
                 i += 2;
             }
         }
-        // --- COMMAND: UPDATE ---
+        // --- COMMAND: UPDATE (Strict Modification) ---
         else if (cmd == "update") {
             for (size_t i = 1; i + 1 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
-                if (delim[i] == '"' || delim[i] == '\'') {
-                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''.\n";
-                    i += 2; continue;
-                }
+                
                 char* check = kiva_get(db, tokens[i].c_str());
                 if (!check) { 
-                    std::cout << "Error: " << tokens[i] << " not found.\n"; 
+                    std::cout << "Error: Key '" << tokens[i] << "' does not exist. Use 'set' to create it.\n"; 
                 } else {
                     kiva_set(db, tokens[i].c_str(), tokens[i+1].c_str());
                     std::cout << "OK: " << tokens[i] << " updated.\n";
@@ -155,23 +155,27 @@ int main(int argc, char* argv[]) {
                 i += 2;
             }
         }
-        // --- COMMAND: CHANGE ---
+        // --- COMMAND: CHANGE (Anti-Ghosting logic) ---
         else if (cmd == "change") {
             for (size_t i = 1; i + 2 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
                 if (tokens[i+1] == "to") {
-                    if (delim[i] == '"' || delim[i] == '\'' || delim[i+2] == '"' || delim[i+2] == '\'') {
-                        std::cout << "Error: Keys cannot use \"\" or ''.\n";
+                    // Sécurité 2 : Vérifier si la cible existe déjà (évite les fantômes)
+                    char* target_check = kiva_get(db, tokens[i+2].c_str());
+                    if (target_check) {
+                        std::cout << "Error: Target key '" << tokens[i+2] << "' already exists. Collision avoided.\n";
+                        free(target_check);
                         i += 3; continue;
                     }
+
                     char* val = kiva_get(db, tokens[i].c_str());
                     if (val) {
-                        kiva_set(db, tokens[i+2].c_str(), val); // Nouveau set = suppression TTL
+                        kiva_set(db, tokens[i+2].c_str(), val); 
                         kiva_delete(db, tokens[i].c_str());
                         std::cout << "Renamed: " << tokens[i] << " -> " << tokens[i+2] << "\n";
                         free(val);
                     } else { 
-                        std::cout << "Error: '" << tokens[i] << "' not found.\n"; 
+                        std::cout << "Error: Source '" << tokens[i] << "' not found.\n"; 
                     }
                     i += 3;
                 } else i++;
@@ -181,10 +185,6 @@ int main(int argc, char* argv[]) {
         else if (cmd == "get") {
             for (size_t i = 1; i < tokens.size(); i++) {
                 if (tokens[i] == "and") continue;
-                if (delim[i] == '"' || delim[i] == '\'') {
-                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''.\n";
-                    continue;
-                }
                 char* res = kiva_get(db, tokens[i].c_str());
                 std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
                 if (res) free(res);
@@ -194,10 +194,6 @@ int main(int argc, char* argv[]) {
         else if (cmd == "typeof") {
             for (size_t i = 1; i < tokens.size(); i++) {
                 if (tokens[i] == "and") continue;
-                if (delim[i] == '"' || delim[i] == '\'') {
-                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''.\n";
-                    continue;
-                }
                 const char* t_name = kiva_typeof(db, tokens[i].c_str());
                 std::cout << " -> " << tokens[i] << " is a [" << t_name << "]\n";
             }
@@ -205,16 +201,13 @@ int main(int argc, char* argv[]) {
         // --- COMMAND: DEL ---
         else if (cmd == "del") {
             if (tokens.size() == 3 && tokens[1] == "all" && tokens[2] == "keys") {
-                kiva_close(db); remove(db_path);
+                kiva_close(db); 
+                remove(db_path);
                 db = kiva_open(db_path);
                 std::cout << "All keys cleared.\n";
             } else {
                 for (size_t i = 1; i < tokens.size(); i++) {
                     if (tokens[i] == "and") continue;
-                    if (delim[i] == '"' || delim[i] == '\'') {
-                        std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''.\n";
-                        continue;
-                    }
                     if (kiva_delete(db, tokens[i].c_str()) == KIVA_OK)
                         std::cout << "Deleted: " << tokens[i] << "\n";
                     else
@@ -227,7 +220,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Keys: " << index_get_count(db) << " | File: " << kiva_get_file_size(db_path) << " bytes\n";
             show_dur = false;
         }
-        else if (cmd == "compact") { kiva_compact(db); std::cout << "Done.\n"; }
+        else if (cmd == "compact") { kiva_compact(db); std::cout << "Database compacted.\n"; }
         else if (cmd == "help" || cmd == "h") { print_help(); show_dur = false; }
         else { std::cout << "Unknown command. Type 'help'.\n"; show_dur = false; }
 
