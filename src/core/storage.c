@@ -84,7 +84,7 @@ static void kiva_load_index(KivaDB* db) {
             expires_at = 0;
         }
         
-        char* key = malloc(k_size + 1);
+        char* key = (char*)malloc(k_size + 1);
         if (!key) break;
         fread(key, 1, k_size, db->file);
         key[k_size] = '\0';
@@ -109,7 +109,7 @@ static void kiva_load_index(KivaDB* db) {
 }
 
 KivaDB* kiva_open(const char* path) {
-    KivaDB* db = calloc(1, sizeof(KivaDB));
+    KivaDB* db = (KivaDB*)calloc(1, sizeof(KivaDB));
     if (!db) return NULL;
     
     index_init(db);
@@ -191,7 +191,7 @@ char* kiva_get(KivaDB* db, const char* key) {
     KeyDirEntry entry;
     // index_lookup gère la suppression automatique si le TTL est expiré
     if (index_lookup(db, key, &entry)) {
-        char* val = malloc(entry.v_size + 1);
+        char* val = (char*)malloc(entry.v_size + 1);
         if (!val) return NULL;
         fseek(db->file, entry.offset, SEEK_SET);
         fread(val, 1, entry.v_size, db->file);
