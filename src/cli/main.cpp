@@ -5,15 +5,19 @@
 #include <ctime>
 #include <algorithm>
 
-// Gestion propre de MKDIR pour Windows/Linux/macOS
+// --- GESTION PORTABLE DE MKDIR ---
 #ifdef _WIN32
     #include <direct.h>
-    #ifndef MKDIR
-        #define MKDIR(path) _mkdir(path)
-    #endif
 #else
     #include <sys/stat.h>
-    #ifndef MKDIR
+    #include <sys/types.h>
+#endif
+
+// On ne définit MKDIR que s'il n'existe pas déjà (évite le warning)
+#ifndef MKDIR
+    #ifdef _WIN32
+        #define MKDIR(path) _mkdir(path)
+    #else
         #define MKDIR(path) mkdir(path, 0777)
     #endif
 #endif
@@ -66,10 +70,10 @@ struct CommandParser {
 };
 
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v1.1.1) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v1.1.2) ---\n"
               << "  set [type] `key` \"val\" [ttl s]   : Set ONLY if key doesn't exist\n"
               << "  update `key` \"val\"               : Update ONLY if key exists\n"
-              << "  change `old` to `new`            : Rename key (prevents overwriting)\n"
+              << "  change `old` to `new`            : Rename key safely\n"
               << "  get `key1` and `key2`            : Retrieve values\n"
               << "  typeof `key`                     : Show data type\n"
               << "  del `key` OR del all keys        : Delete keys\n"
@@ -106,7 +110,6 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // --- COMMAND: SET (With Existence Check) ---
         if (cmd == "set") {
             int global_ttl = 0;
             for (size_t j = 0; j < tokens.size(); j++) 
@@ -126,16 +129,16 @@ int main(int argc, char* argv[]) {
 
                 if (i + 1 >= tokens.size()) break;
 
-                // Vérification stricte des guillemets pour les clés
+                // Protection contre les clés avec guillemets invalides
                 if (delim[i] == '"' || delim[i] == '\'') {
                     std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use ``.\n";
                     i += 2; continue;
                 }
 
-                // --- CORRECTION : Vérifier si la clé existe déjà ---
+                // VERIFICATION EXISTENCE (Interdit le doublon au SET)
                 char* check_exists = kiva_get(db, tokens[i].c_str());
                 if (check_exists) {
-                    std::cout << "Error: Key '" << tokens[i] << "' already exists. Use 'update' to change it.\n";
+                    std::cout << "Error: Key '" << tokens[i] << "' already exists. Use 'update'.\n";
                     free(check_exists);
                     i += 2; continue;
                 }
@@ -145,13 +148,12 @@ int main(int argc, char* argv[]) {
                 i += 2;
             }
         }
-        // --- COMMAND: UPDATE ---
         else if (cmd == "update") {
             for (size_t i = 1; i + 1 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
                 char* check = kiva_get(db, tokens[i].c_str());
                 if (!check) { 
-                    std::cout << "Error: " << tokens[i] << " not found. Use 'set' to create it.\n"; 
+                    std::cout << "Error: " << tokens[i] << " not found. Use 'set'.\n"; 
                 } else {
                     kiva_set(db, tokens[i].c_str(), tokens[i+1].c_str());
                     std::cout << "OK: " << tokens[i] << " updated.\n";
@@ -160,37 +162,30 @@ int main(int argc, char* argv[]) {
                 i += 2;
             }
         }
-        // --- COMMAND: CHANGE (Collision Proof) ---
         else if (cmd == "change") {
             for (size_t i = 1; i + 2 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
                 if (tokens[i+1] == "to") {
-                    // 1. Vérifier si l'ancienne clé existe
                     char* val = kiva_get(db, tokens[i].c_str());
                     if (!val) {
-                        std::cout << "Error: Source key '" << tokens[i] << "' not found.\n";
+                        std::cout << "Error: Source '" << tokens[i] << "' not found.\n";
                         i += 3; continue;
                     }
-
-                    // 2. Vérifier si la nouvelle clé existe déjà (éviter le fantôme)
+                    // Protection contre écrasement de la cible
                     char* target_exists = kiva_get(db, tokens[i+2].c_str());
                     if (target_exists) {
-                        std::cout << "Error: Cannot rename to '" << tokens[i+2] << "' because it already exists.\n";
+                        std::cout << "Error: Target '" << tokens[i+2] << "' already exists.\n";
                         free(val); free(target_exists);
                         i += 3; continue;
                     }
-
-                    // 3. Effectuer le changement
                     kiva_set(db, tokens[i+2].c_str(), val); 
                     kiva_delete(db, tokens[i].c_str());
                     std::cout << "Renamed: " << tokens[i] << " -> " << tokens[i+2] << "\n";
-                    
                     free(val);
                     i += 3;
                 } else i++;
             }
         }
-        // --- COMMAND: GET ---
         else if (cmd == "get") {
             for (size_t i = 1; i < tokens.size(); i++) {
                 if (tokens[i] == "and") continue;
@@ -199,7 +194,6 @@ int main(int argc, char* argv[]) {
                 if (res) free(res);
             }
         }
-        // --- COMMAND: TYPEOF ---
         else if (cmd == "typeof") {
             for (size_t i = 1; i < tokens.size(); i++) {
                 if (tokens[i] == "and") continue;
@@ -207,11 +201,9 @@ int main(int argc, char* argv[]) {
                 std::cout << " -> " << tokens[i] << " is a [" << t_name << "]\n";
             }
         }
-        // --- COMMAND: DEL ---
         else if (cmd == "del") {
             if (tokens.size() == 3 && tokens[1] == "all" && tokens[2] == "keys") {
-                kiva_close(db); 
-                remove(db_path);
+                kiva_close(db); remove(db_path);
                 db = kiva_open(db_path);
                 std::cout << "All keys cleared.\n";
             } else {
@@ -231,7 +223,7 @@ int main(int argc, char* argv[]) {
         }
         else if (cmd == "compact") { kiva_compact(db); std::cout << "Database compacted.\n"; }
         else if (cmd == "help" || cmd == "h") { print_help(); show_dur = false; }
-        else { std::cout << "Unknown command. Type 'help'.\n"; show_dur = false; }
+        else { std::cout << "Unknown command.\n"; show_dur = false; }
 
         if (show_dur) {
             double d = (double)(clock() - start) / CLOCKS_PER_SEC;
