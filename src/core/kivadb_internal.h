@@ -5,27 +5,55 @@
 #include <stdint.h>
 #include "../../include/kivadb.h"
 
+/* 
+ * Le bloc extern "C" est vital ici : il permet à index.cpp (C++) et storage.c (C)
+ * de partager ces prototypes sans que le C++ ne change le nom des fonctions (Name Mangling).
+ */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/**
+ * Structure interne de la base de données.
+ * cpp_index est un pointeur opaque vers la structure KivaIndex définie dans index.cpp.
+ */
 struct KivaDB {
     FILE* file;
     char* path;
-    void* cpp_index; // Pointeur vers KivaIndex (C++ Map)
+    void* cpp_index; 
 };
 
-// --- Prototypes Index ---
+// --- Prototypes de gestion de l'Index (Implémentés dans index.cpp) ---
+
 void index_init(KivaDB* db);
 void index_free(KivaDB* db);
-void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type);
-void index_remove(KivaDB* db, const char* key);
-void index_scan(KivaDB* db);
-int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry);
-int index_get_count(KivaDB* db);
 
-// --- Système ---
-int kiva_lock_file(FILE* file);
+// Définit une entrée standard (TTL = 0)
+void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type);
+
+// Définit une entrée avec support du TTL
+void index_set_ex(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type, int ttl_sec);
+
+// Recherche une clé (gère la Lazy Deletion si expiré)
+int  index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry);
+
+// Supprime une clé de l'index
+void index_remove(KivaDB* db, const char* key);
+
+// Affiche l'état de l'index (Debug)
+void index_scan(KivaDB* db);
+
+// Retourne le nombre total de clés actives
+int  index_get_count(KivaDB* db);
+
+
+// --- Fonctions de Compaction et Système ---
+
+// Effectue la migration des données valides vers le fichier temporaire
+void kiva_internal_compact_step(KivaDB* db, FILE* temp_file);
+
+// Verrouillage de fichier pour éviter les accès concurrents
+int  kiva_lock_file(FILE* file);
 void kiva_unlock_file(FILE* file);
 
 #ifdef __cplusplus
