@@ -8,7 +8,6 @@ on:
   workflow_dispatch: 
 
 env:
-  # Force Node 24 pour supprimer les warnings
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -45,32 +44,52 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup MSVC (Windows x86)
-        if: matrix.os == 'windows-latest' && matrix.arch == 'x86'
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x86
+          arch: ${{ matrix.arch }}
 
       - name: Install ARM Cross-Compiler (Linux)
         if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Compile KivaDB
         shell: bash
         run: |
-          # MSYS_NO_PATHCONV=1 empêche Bash de transformer /Iinclude en chemin C:/...
           export MSYS_NO_PATHCONV=1
 
-          if [[ "${{ matrix.os }}" == "windows-latest" && "${{ matrix.arch }}" == "x86" ]]; then
-            cl.exe /Iinclude "src/core/storage.c" "src/core/index.c" "src/core/transaction.c" "src/cli/main.c" /Fe:${{ matrix.output }}
-          
+          # --- Compilation Windows (MSVC) ---
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            # Compilation hybride avec cl.exe (supporte C et C++)
+            cl.exe /Iinclude /std:c++17 /EHsc \
+              src/core/storage.c \
+              src/core/transaction.c \
+              src/core/index.cpp \
+              src/cli/main.cpp \
+              /Fe:${{ matrix.output }}
+
+          # --- Compilation Linux ARM64 (Cross-compile) ---
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
-            aarch64-linux-gnu-gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
-          
+            # On utilise g++ pour lier correctement la bibliothèque standard C++
+            aarch64-linux-gnu-g++ -Wall -Wextra -std=c++17 -Iinclude \
+              src/core/storage.c \
+              src/core/transaction.c \
+              src/core/index.cpp \
+              src/cli/main.cpp \
+              -o ${{ matrix.output }}
+
+          # --- Compilation Standard (Linux x64 & macOS ARM64) ---
           else
-            gcc -Wall -Wextra -std=c11 -Iinclude src/core/*.c src/cli/main.c -o ${{ matrix.output }}
+            # Utilisation de g++/clang++ pour le linking C++
+            g++ -Wall -Wextra -std=c++17 -Iinclude \
+              src/core/storage.c \
+              src/core/transaction.c \
+              src/core/index.cpp \
+              src/cli/main.cpp \
+              -o ${{ matrix.output }}
           fi
 
       - name: Upload Artifact
