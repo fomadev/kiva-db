@@ -5,27 +5,23 @@
 #include <ctime>
 #include <algorithm>
 
-// --- GESTION PORTABLE DE MKDIR ---
-#ifdef _WIN32
-    #include <direct.h>
-#else
-    #include <sys/stat.h>
-    #include <sys/types.h>
-#endif
-
-// On ne définit MKDIR que s'il n'existe pas déjà (évite le warning)
-#ifndef MKDIR
-    #ifdef _WIN32
-        #define MKDIR(path) _mkdir(path)
-    #else
-        #define MKDIR(path) mkdir(path, 0777)
-    #endif
-#endif
-
+// On inclut d'abord les headers du projet. 
+// Si kivadb.h définit déjà MKDIR, le bloc suivant ne fera rien.
 extern "C" {
     #include "../../include/kivadb.h"
     #include "../core/kivadb_internal.h"
 }
+
+// Sécurité supplémentaire : on ne définit MKDIR que s'il n'existe pas encore
+#ifndef MKDIR
+    #ifdef _WIN32
+        #include <direct.h>
+        #define MKDIR(path) _mkdir(path)
+    #else
+        #include <sys/stat.h>
+        #define MKDIR(path) mkdir(path, 0777)
+    #endif
+#endif
 
 /**
  * CommandParser strict : Gère les "", '', et ``
@@ -129,13 +125,12 @@ int main(int argc, char* argv[]) {
 
                 if (i + 1 >= tokens.size()) break;
 
-                // Protection contre les clés avec guillemets invalides
                 if (delim[i] == '"' || delim[i] == '\'') {
                     std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use ``.\n";
                     i += 2; continue;
                 }
 
-                // VERIFICATION EXISTENCE (Interdit le doublon au SET)
+                // VERIFICATION EXISTENCE : Empêche les doublons au SET
                 char* check_exists = kiva_get(db, tokens[i].c_str());
                 if (check_exists) {
                     std::cout << "Error: Key '" << tokens[i] << "' already exists. Use 'update'.\n";
@@ -171,7 +166,7 @@ int main(int argc, char* argv[]) {
                         std::cout << "Error: Source '" << tokens[i] << "' not found.\n";
                         i += 3; continue;
                     }
-                    // Protection contre écrasement de la cible
+                    // Protection contre l'écrasement (évite les clés fantômes)
                     char* target_exists = kiva_get(db, tokens[i+2].c_str());
                     if (target_exists) {
                         std::cout << "Error: Target '" << tokens[i+2] << "' already exists.\n";
@@ -203,7 +198,8 @@ int main(int argc, char* argv[]) {
         }
         else if (cmd == "del") {
             if (tokens.size() == 3 && tokens[1] == "all" && tokens[2] == "keys") {
-                kiva_close(db); remove(db_path);
+                kiva_close(db); 
+                remove(db_path);
                 db = kiva_open(db_path);
                 std::cout << "All keys cleared.\n";
             } else {
