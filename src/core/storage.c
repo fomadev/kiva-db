@@ -123,7 +123,11 @@ KivaDB* kiva_open(const char* path) {
     if (!db->file) { /* ... erreur ... */ return NULL; }
 
     if (!exists || kiva_get_file_size(path) == 0) {
-        KivaHeader header = { .signature = "KIVA", .format_version = FORMAT_V2, .reserved = 0 };
+        KivaHeader header;
+        memcpy(header.signature, "KIVA", 4); 
+        header.format_version = FORMAT_V2;
+        header.reserved = 0;
+        
         fwrite(&header, sizeof(KivaHeader), 1, db->file);
         fflush(db->file);
     }
