@@ -63,7 +63,7 @@ jobs:
 
           # --- Compilation Windows (MSVC) ---
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Compilation hybride avec cl.exe (supporte C et C++)
+            # MSVC gère nativement le mélange C/C++ dans une seule commande
             cl.exe /Iinclude /std:c++17 /EHsc \
               src/core/storage.c \
               src/core/transaction.c \
@@ -73,23 +73,23 @@ jobs:
 
           # --- Compilation Linux ARM64 (Cross-compile) ---
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
-            # On utilise g++ pour lier correctement la bibliothèque standard C++
-            aarch64-linux-gnu-g++ -Wall -Wextra -std=c++17 -Iinclude \
-              src/core/storage.c \
-              src/core/transaction.c \
-              src/core/index.cpp \
-              src/cli/main.cpp \
-              -o ${{ matrix.output }}
+            # Compilation séparée pour éviter les warnings de langage
+            aarch64-linux-gnu-gcc -c -Iinclude src/core/storage.c -o storage.o
+            aarch64-linux-gnu-gcc -c -Iinclude src/core/transaction.c -o transaction.o
+            aarch64-linux-gnu-g++ -c -std=c++17 -Iinclude src/core/index.cpp -o index.o
+            aarch64-linux-gnu-g++ -c -std=c++17 -Iinclude src/cli/main.cpp -o main.o
+            # Linkage final avec g++
+            aarch64-linux-gnu-g++ storage.o transaction.o index.o main.o -o ${{ matrix.output }}
 
           # --- Compilation Standard (Linux x64 & macOS ARM64) ---
           else
-            # Utilisation de g++/clang++ pour le linking C++
-            g++ -Wall -Wextra -std=c++17 -Iinclude \
-              src/core/storage.c \
-              src/core/transaction.c \
-              src/core/index.cpp \
-              src/cli/main.cpp \
-              -o ${{ matrix.output }}
+            # Compilation séparée : GCC pour le C, G++ pour le C++
+            gcc -c -Iinclude src/core/storage.c -o storage.o
+            gcc -c -Iinclude src/core/transaction.c -o transaction.o
+            g++ -c -std=c++17 -Iinclude src/core/index.cpp -o index.o
+            g++ -c -std=c++17 -Iinclude src/cli/main.cpp -o main.o
+            # Linkage final avec g++ pour inclure la libstdc++
+            g++ storage.o transaction.o index.o main.o -o ${{ matrix.output }}
           fi
 
       - name: Upload Artifact
