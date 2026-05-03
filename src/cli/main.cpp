@@ -53,18 +53,18 @@ struct CommandParser {
 
 void print_help() {
     std::cout << "\n--- KivaDB Shell Help (C++ Engine) ---\n"
-              << "  set [type] <key> <val> : Create NEW key-value pair(s)\n"
-              << "                           Types: string, number, boolean (optional)\n"
-              << "                           Multiple: set k1 v1 and k2 v2\n"
-              << "  update <key> <val>     : Update EXISTING key(s)\n"
-              << "  get <key>              : Retrieve value of one or more keys\n"
-              << "  typeof <key>           : Show the dynamic data type\n"
-              << "  del <key>              : Remove one or more keys\n"
-              << "  scan                   : List all keys with their types and sizes\n"
-              << "  stats                  : Show database health and file size\n"
-              << "  compact                : Reclaim disk space (defragmentation)\n"
-              << "  help or h              : Show this help menu\n"
-              << "  exit                   : Close database and quit\n"
+              << "  set [type] <key> <val> [ttl <sec>] : Create pair(s) with optional TTL\n"
+              << "                                       Types: string, number, boolean\n"
+              << "                                       Ex: set user \"Alex\" ttl 60\n"
+              << "  update <key> <val>                 : Update EXISTING key(s)\n"
+              << "  get <key>                          : Retrieve value of one or more keys\n"
+              << "  typeof <key>                       : Show the dynamic data type\n"
+              << "  del <key>                          : Remove one or more keys\n"
+              << "  scan                               : List all keys (shows TTL if active)\n"
+              << "  stats                              : Show database health and file size\n"
+              << "  compact                            : Reclaim disk space\n"
+              << "  help or h                          : Show this help menu\n"
+              << "  exit                               : Close database and quit\n"
               << "-------------------------\n";
 }
 
@@ -108,18 +108,25 @@ int main(int argc, char* argv[]) {
 
         if (cmd == "set") {
             int created = 0;
+            // On cherche un éventuel TTL global à la commande
+            int global_ttl = 0;
+            for (size_t j = 0; j < tokens.size(); j++) {
+                if (tokens[j] == "ttl" && j + 1 < tokens.size()) {
+                    try { global_ttl = std::stoi(tokens[j+1]); } catch(...) { global_ttl = 0; }
+                    break;
+                }
+            }
+
             for (size_t i = 1; i < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
+                if (tokens[i] == "ttl") { i += 2; continue; } // On saute le flag TTL déjà traité
 
                 KivaType forced = KIVA_TYPE_UNKNOWN;
                 if (tokens[i] == "string") { forced = KIVA_TYPE_STRING; i++; }
                 else if (tokens[i] == "number") { forced = KIVA_TYPE_NUMBER; i++; }
                 else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
 
-                if (i + 1 >= tokens.size()) {
-                    std::cout << "Error: Missing key or value." << std::endl;
-                    break;
-                }
+                if (i + 1 >= tokens.size()) break;
 
                 std::string key = tokens[i++];
                 std::string val = tokens[i++];
@@ -132,8 +139,9 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                kiva_set_with_type(db, key.c_str(), val.c_str(), forced);
-                std::cout << "OK: " << key << " saved." << std::endl;
+                // Utilisation de la nouvelle fonction kiva_set_ex avec TTL
+                kiva_set_ex(db, key.c_str(), val.c_str(), forced, global_ttl);
+                std::cout << "OK: " << key << " saved" << (global_ttl > 0 ? " (TTL: " + std::to_string(global_ttl) + "s)." : ".") << std::endl;
                 created++;
             }
             std::cout << "Summary: " << created << " key(s) created.";

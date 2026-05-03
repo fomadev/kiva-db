@@ -54,6 +54,7 @@ typedef struct {
     int64_t offset;      // Position fixe pour la portabilité
     uint32_t v_size;     // Taille de la valeur
     KivaType type;       // Type de donnée
+    int64_t expires_at; // 0 = permanent, sinon timestamp Unix en secondes
 } KeyDirEntry;
 
 /**
