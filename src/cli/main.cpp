@@ -5,21 +5,13 @@
 #include <ctime>
 #include <algorithm>
 
-#ifdef _WIN32
-    #include <direct.h>
-    #define MKDIR(d) _mkdir(d)
-#else
-    #include <sys/stat.h>
-    #define MKDIR(d) mkdir(d, 0777)
-#endif
-
 extern "C" {
     #include "../../include/kivadb.h"
     #include "../core/kivadb_internal.h"
 }
 
 /**
- * Utilitaire pour le parsing des commandes et la détection de types
+ * Utilitaire pour le parsing des commandes
  */
 struct CommandParser {
     static std::vector<std::string> tokenize(const std::string& input) {
@@ -42,13 +34,6 @@ struct CommandParser {
         if (!current.empty()) tokens.push_back(current);
         return tokens;
     }
-
-    static bool is_number(const std::string& s) {
-        if (s.empty()) return false;
-        char* p;
-        strtod(s.c_str(), &p);
-        return *p == 0;
-    }
 };
 
 void print_help() {
@@ -57,41 +42,36 @@ void print_help() {
               << "                                       Types: string, number, boolean\n"
               << "                                       Ex: set user \"Alex\" ttl 60\n"
               << "  update <key> <val>                 : Update EXISTING key(s)\n"
-              << "  get <key>                          : Retrieve value of one or more keys\n"
+              << "  get <key>                          : Retrieve value\n"
               << "  typeof <key>                       : Show the dynamic data type\n"
-              << "  del <key>                          : Remove one or more keys\n"
+              << "  del <key>                          : Remove key(s)\n"
               << "  scan                               : List all keys (shows TTL if active)\n"
-              << "  stats                              : Show database health and file size\n"
-              << "  compact                            : Reclaim disk space\n"
-              << "  help or h                          : Show this help menu\n"
-              << "  exit                               : Close database and quit\n"
+              << "  stats                              : Database health & file size\n"
+              << "  compact                            : Reclaim disk space & clean expired keys\n"
+              << "  exit                               : Quit\n"
               << "-------------------------\n";
 }
 
 int main(int argc, char* argv[]) {
     if (argc > 1) {
         std::string arg = argv[1];
-        if (arg == "-version" || arg == "--version" || arg == "-v") {
+        if (arg == "-v" || arg == "--version") {
             std::cout << "kivadb version " << KIVADB_VERSION << std::endl;
-            return 0;
-        }
-        if (arg == "--help" || arg == "-h") {
-            print_help();
             return 0;
         }
     }
 
+    // Utilisation de la macro MKDIR définie dans kivadb.h
     MKDIR("data");
     const char* db_path = "data/store.kiva";
     KivaDB* db = kiva_open(db_path);
 
     if (!db) {
-        std::cerr << "Erreur : Impossible d'ouvrir ou créer " << db_path << std::endl;
+        std::cerr << "Erreur : Impossible d'ouvrir " << db_path << std::endl;
         return 1;
     }
 
-    std::cout << "KivaDB Shell v" << KIVADB_VERSION << " (C++ Engine Ready)\n"
-              << "Type 'help' for commands" << std::endl;
+    std::cout << "KivaDB Shell v" << KIVADB_VERSION << " (C++ Engine Ready)\n";
 
     std::string line;
     while (true) {
@@ -108,8 +88,9 @@ int main(int argc, char* argv[]) {
 
         if (cmd == "set") {
             int created = 0;
-            // On cherche un éventuel TTL global à la commande
             int global_ttl = 0;
+            
+            // Extraction du TTL
             for (size_t j = 0; j < tokens.size(); j++) {
                 if (tokens[j] == "ttl" && j + 1 < tokens.size()) {
                     try { global_ttl = std::stoi(tokens[j+1]); } catch(...) { global_ttl = 0; }
@@ -118,8 +99,10 @@ int main(int argc, char* argv[]) {
             }
 
             for (size_t i = 1; i < tokens.size(); ) {
-                if (tokens[i] == "and") { i++; continue; }
-                if (tokens[i] == "ttl") { i += 2; continue; } // On saute le flag TTL déjà traité
+                if (tokens[i] == "and" || tokens[i] == "ttl") { 
+                    if(tokens[i] == "ttl") i += 2; else i++;
+                    continue; 
+                }
 
                 KivaType forced = KIVA_TYPE_UNKNOWN;
                 if (tokens[i] == "string") { forced = KIVA_TYPE_STRING; i++; }
@@ -131,59 +114,17 @@ int main(int argc, char* argv[]) {
                 std::string key = tokens[i++];
                 std::string val = tokens[i++];
 
-                // On vérifie si la clé existe déjà
-                char* existing = kiva_get(db, key.c_str());
-                if (existing) {
-                    std::cout << "Error: Key '" << key << "' already exists. Use 'update'." << std::endl;
-                    free(existing);
-                    continue;
-                }
-
-                // Utilisation de la nouvelle fonction kiva_set_ex avec TTL
                 kiva_set_ex(db, key.c_str(), val.c_str(), forced, global_ttl);
-                std::cout << "OK: " << key << " saved" << (global_ttl > 0 ? " (TTL: " + std::to_string(global_ttl) + "s)." : ".") << std::endl;
+                std::cout << "OK: " << key << " saved.\n";
                 created++;
             }
-            std::cout << "Summary: " << created << " key(s) created.";
+            std::cout << "Summary: " << created << " key(s) processed.";
         }
-        else if (cmd == "update") {
-            int updated = 0;
-            for (size_t i = 1; i < tokens.size(); ) {
-                if (tokens[i] == "and") { i++; continue; }
-                if (i + 1 >= tokens.size()) break;
-
-                std::string key = tokens[i++];
-                std::string val = tokens[i++];
-
-                char* existing = kiva_get(db, key.c_str());
-                if (!existing) {
-                    std::cout << "Error: Key '" << key << "' not found." << std::endl;
-                } else {
-                    kiva_set(db, key.c_str(), val.c_str());
-                    std::cout << "OK: " << key << " updated." << std::endl;
-                    updated++;
-                    free(existing);
-                }
-            }
-            std::cout << "Summary: " << updated << " key(s) updated.";
-        }
-        else if (cmd == "get" || cmd == "del" || cmd == "typeof") {
-            for (size_t i = 1; i < tokens.size(); ++i) {
-                if (tokens[i] == "and") continue;
-                
-                if (cmd == "get") {
-                    char* res = kiva_get(db, tokens[i].c_str());
-                    std::cout << tokens[i] << ": " << (res ? res : "(nil)") << std::endl;
-                    if (res) free(res);
-                } else if (cmd == "del") {
-                    if (kiva_delete(db, tokens[i].c_str()) == KIVA_OK) 
-                        std::cout << "Deleted: " << tokens[i] << std::endl;
-                    else 
-                        std::cout << "Error: " << tokens[i] << " not found." << std::endl;
-                } else if (cmd == "typeof") {
-                    std::cout << tokens[i] << ": " << kiva_typeof(db, tokens[i].c_str()) << std::endl;
-                }
-            }
+        else if (cmd == "get") {
+            if (tokens.size() < 2) continue;
+            char* res = kiva_get(db, tokens[1].c_str());
+            std::cout << tokens[1] << ": " << (res ? res : "(nil)");
+            if (res) free(res);
         }
         else if (cmd == "scan") {
             index_scan(db);
@@ -191,34 +132,38 @@ int main(int argc, char* argv[]) {
         }
         else if (cmd == "compact") {
             kiva_compact(db);
-            std::cout << "Compaction successful.";
+            std::cout << "Compaction and cleaning done.";
         }
         else if (cmd == "stats") {
             std::cout << "\n--- Stats ---\n"
                       << "Keys: " << index_get_count(db) << "\n"
-                      << "File: " << kiva_get_file_size(db_path) << " bytes\n"
-                      << "-------------";
+                      << "File: " << kiva_get_file_size(db_path) << " bytes\n";
             show_duration = false;
         }
         else if (cmd == "help" || cmd == "h") {
             print_help();
             show_duration = false;
         }
+        else if (cmd == "del") {
+            if (tokens.size() >= 2) {
+                kiva_delete(db, tokens[1].c_str());
+                std::cout << "OK.";
+            }
+        }
         else {
-            std::cout << "Unknown command: " << cmd;
+            std::cout << "Unknown command. Type 'help'.";
             show_duration = false;
         }
 
         clock_t end = clock();
         if (show_duration) {
             double duration = static_cast<double>(end - start) / CLOCKS_PER_SEC;
-            std::cout << " (" << std::fixed << std::setprecision(6) << duration << " sec)\n";
+            std::cout << " (" << std::fixed << std::setprecision(6) << duration << "s)\n";
         } else {
             std::cout << "\n";
         }
     }
 
     kiva_close(db);
-    std::cout << "Bye!" << std::endl;
     return 0;
 }
