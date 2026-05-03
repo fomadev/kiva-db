@@ -113,15 +113,19 @@ KivaDB* kiva_open(const char* path) {
     if (!db) return NULL;
     
     index_init(db);
-
     db->path = strdup(path);
+
+    FILE* check = fopen(path, "rb");
+    int exists = (check != NULL);
+    if (check) fclose(check);
+
     db->file = fopen(path, "ab+");
-    if (!db->file || kiva_lock_file(db->file) == -1) {
-        if (db->file) fclose(db->file);
-        index_free(db);
-        free(db->path); 
-        free(db);
-        return NULL;
+    if (!db->file) { /* ... erreur ... */ return NULL; }
+
+    if (!exists || kiva_get_file_size(path) == 0) {
+        KivaHeader header = { .signature = "KIVA", .format_version = FORMAT_V2, .reserved = 0 };
+        fwrite(&header, sizeof(KivaHeader), 1, db->file);
+        fflush(db->file);
     }
 
     setvbuf(db->file, NULL, _IOFBF, 65536);
