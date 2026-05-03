@@ -1,11 +1,15 @@
 #include "kivadb_internal.h"
 #include <unordered_map>
 #include <string>
+#include <vector>
 #include <iostream>
 #include <iomanip>
 #include <ctime>
 
-// Structure pour encapsuler la Map C++ proprement
+/**
+ * Structure pour encapsuler la Map C++ proprement.
+ * Elle permet d'utiliser la puissance de la STL tout en restant opaque pour le C.
+ */
 struct KivaIndex {
     std::unordered_map<std::string, KeyDirEntry> map;
 };
@@ -13,14 +17,14 @@ struct KivaIndex {
 extern "C" {
 
 /**
- * Initialise l'index en mémoire
+ * Initialise l'index en mémoire.
  */
 void index_init(KivaDB* db) {
     if (db) db->cpp_index = new KivaIndex();
 }
 
 /**
- * Libère la mémoire de l'index
+ * Libère la mémoire de l'index.
  */
 void index_free(KivaDB* db) {
     if (db && db->cpp_index) {
@@ -30,19 +34,18 @@ void index_free(KivaDB* db) {
 }
 
 /**
- * Définit ou met à jour une entrée sans TTL (TTL = 0)
+ * Définit ou met à jour une entrée sans TTL (TTL = 0).
  */
 void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type) {
     if (!db || !db->cpp_index || !key) return;
     
     auto* index = static_cast<KivaIndex*>(db->cpp_index);
-    // On initialise expires_at à 0 pour indiquer "pas d'expiration"
     KeyDirEntry entry = {offset, v_size, type, 0};
     index->map[std::string(key)] = entry;
 }
 
 /**
- * Définit ou met à jour une entrée avec un TTL (Time To Live)
+ * Définit ou met à jour une entrée avec un TTL (Time To Live).
  */
 void index_set_ex(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, KivaType type, int ttl_sec) {
     if (!db || !db->cpp_index || !key) return;
@@ -53,7 +56,7 @@ void index_set_ex(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, 
 }
 
 /**
- * Recherche une clé avec gestion de la suppression paresseuse (Lazy Deletion) si expiré
+ * Recherche une clé avec gestion de la suppression paresseuse (Lazy Deletion).
  */
 int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
     if (!db || !db->cpp_index || !key) return 0;
@@ -62,9 +65,9 @@ int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
     auto it = map.find(key);
 
     if (it != map.end()) {
-        // Vérification du TTL (si expires_at > 0, on compare au temps actuel)
+        // Si le TTL est dépassé, on supprime de l'index et on fait comme si la clé n'existait pas
         if (it->second.expires_at > 0 && it->second.expires_at < std::time(nullptr)) {
-            map.erase(it); // Suppression "à la volée" car expiré
+            map.erase(it);
             return 0;
         }
         
@@ -77,7 +80,7 @@ int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
 }
 
 /**
- * Supprime manuellement une clé de l'index
+ * Supprime manuellement une clé de l'index.
  */
 void index_remove(KivaDB* db, const char* key) {
     if (!db || !db->cpp_index || !key) return;
@@ -85,7 +88,72 @@ void index_remove(KivaDB* db, const char* key) {
 }
 
 /**
- * Affiche le contenu de l'index (utile pour le debug)
+ * kiva_internal_compact_step : Le cœur du nettoyage physique.
+ * Cette fonction filtre les données expirées et réorganise le fichier pour gagner de l'espace.
+ */
+void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
+    if (!db || !db->cpp_index || !temp_file) return;
+    
+    auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
+    time_t now = std::time(nullptr);
+    
+    // Structure temporaire pour stocker les données valides avant réécriture
+    struct ValidEntry { 
+        std::string key; 
+        std::string val; 
+        KivaType type; 
+        int64_t expires_at; 
+    };
+    std::vector<ValidEntry> valid_entries;
+
+    // 1. Parcours de l'index actuel pour collecter ce qui n'est pas expiré
+    for (auto it = map.begin(); it != map.end(); ) {
+        if (it->second.expires_at > 0 && it->second.expires_at < now) {
+            it = map.erase(it); // Suppression de la map
+            continue;
+        }
+
+        // Lecture de la valeur réelle dans l'ancien fichier
+        char* val_ptr = (char*)malloc(it->second.v_size + 1);
+        fseek(db->file, it->second.offset, SEEK_SET);
+        fread(val_ptr, 1, it->second.v_size, db->file);
+        val_ptr[it->second.v_size] = '\0';
+        
+        valid_entries.push_back({it->first, std::string(val_ptr), it->second.type, it->second.expires_at});
+        free(val_ptr);
+        ++it;
+    }
+
+    // 2. Réécriture propre dans le fichier temporaire (Format V2)
+    for (const auto& e : valid_entries) {
+        uint32_t k_size = e.key.length();
+        uint32_t v_size = e.val.length();
+        uint8_t t_byte = (uint8_t)e.type;
+        int64_t exp = e.expires_at;
+
+        long pos = ftell(temp_file);
+        fwrite(&k_size, sizeof(uint32_t), 1, temp_file);
+        fwrite(&v_size, sizeof(uint32_t), 1, temp_file);
+        fwrite(&t_byte, sizeof(uint8_t), 1, temp_file);
+        fwrite(&exp, sizeof(int64_t), 1, temp_file);
+        fwrite(e.key.c_str(), 1, k_size, temp_file);
+        fwrite(e.val.c_str(), 1, v_size, temp_file);
+
+        // 3. Mise à jour de l'index avec les nouveaux offsets du fichier compacté
+        int64_t new_offset = (int64_t)(pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size);
+        
+        KeyDirEntry updated_entry = { 
+            new_offset, 
+            v_size, 
+            e.type,
+            exp
+        };
+        map[e.key] = updated_entry;
+    }
+}
+
+/**
+ * Affiche l'état actuel de la base (Debug).
  */
 void index_scan(KivaDB* db) {
     if (!db || !db->cpp_index) return;
@@ -94,7 +162,6 @@ void index_scan(KivaDB* db) {
 
     std::cout << "\n--- KivaDB Scan (v2.0.0 STL with TTL support) ---\n";
     for (const auto& [key, entry] : map) {
-        // Vérification sommaire pour l'affichage du statut expiré
         std::string status = "";
         if (entry.expires_at > 0) {
             if (entry.expires_at < now) status = " [EXPIRED]";
@@ -112,10 +179,10 @@ void index_scan(KivaDB* db) {
 }
 
 /**
- * Retourne le nombre d'éléments dans l'index
+ * Retourne le nombre de clés actives.
  */
 int index_get_count(KivaDB* db) {
-    return (db && db->cpp_index) ? static_cast<KivaIndex*>(db->cpp_index)->map.size() : 0;
+    return (db && db->cpp_index) ? (int)static_cast<KivaIndex*>(db->cpp_index)->map.size() : 0;
 }
 
 } // extern "C"
