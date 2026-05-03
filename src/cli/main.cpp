@@ -12,6 +12,7 @@ extern "C" {
 
 /**
  * CommandParser avancé : Gère les "", '', et ``
+ * Remplit le vecteur delimiters pour savoir quel symbole entourait chaque token.
  */
 struct CommandParser {
     static std::vector<std::string> tokenize(const std::string& input, std::vector<char>& delimiters) {
@@ -30,7 +31,7 @@ struct CommandParser {
             } else if (isspace(c) && quote_char == 0) {
                 if (!current.empty()) {
                     tokens.push_back(current);
-                    delimiters.push_back(0); // Pas de guillemet
+                    delimiters.push_back(0); 
                     current.clear();
                 }
             } else {
@@ -59,7 +60,7 @@ void print_help() {
 }
 
 int main(int argc, char* argv[]) {
-    // Suppression des warnings unused parameter
+    // Élimination des warnings de compilation
     (void)argc; 
     (void)argv;
 
@@ -67,7 +68,10 @@ int main(int argc, char* argv[]) {
     const char* db_path = "data/store.kiva";
     KivaDB* db = kiva_open(db_path);
 
-    if (!db) return 1;
+    if (!db) {
+        std::cerr << "Fatal Error: Could not open database." << std::endl;
+        return 1;
+    }
 
     std::cout << "KivaDB Shell (C++ Engine Ready)\nType 'help' for commands\n";
 
@@ -89,10 +93,15 @@ int main(int argc, char* argv[]) {
         if (cmd == "set") {
             int global_ttl = 0;
             for (size_t j = 0; j < tokens.size(); j++) 
-                if (tokens[j] == "ttl" && j+1 < tokens.size()) global_ttl = std::stoi(tokens[j+1]);
+                if (tokens[j] == "ttl" && j+1 < tokens.size()) {
+                    try { global_ttl = std::stoi(tokens[j+1]); } catch(...) { global_ttl = 0; }
+                }
 
             for (size_t i = 1; i < tokens.size(); ) {
-                if (tokens[i] == "and" || tokens[i] == "ttl") { i += (tokens[i]=="ttl"?2:1); continue; }
+                if (tokens[i] == "and" || tokens[i] == "ttl") { 
+                    i += (tokens[i] == "ttl" ? 2 : 1); 
+                    continue; 
+                }
                 
                 KivaType forced = KIVA_TYPE_UNKNOWN;
                 if (tokens[i] == "string") { forced = KIVA_TYPE_STRING; i++; }
@@ -104,11 +113,10 @@ int main(int argc, char* argv[]) {
                 std::string key = tokens[i];
                 std::string val = tokens[i+1];
                 
-                // Règle : Les strings doivent être entre "" ou ''
+                // Rigueur : String doit être entre "" ou ''
                 if ((forced == KIVA_TYPE_STRING || forced == KIVA_TYPE_UNKNOWN) && 
                     (delim[i+1] != '"' && delim[i+1] != '\'')) {
-                    // Si ce n'est pas un nombre/booléen pur, on exige les guillemets
-                    std::cout << "Syntax Error: String values must be in \"\" or ''.\n";
+                    std::cout << "Syntax Error: Value for '" << key << "' must be in \"\" or ''.\n";
                     i += 2; continue;
                 }
 
@@ -122,8 +130,9 @@ int main(int argc, char* argv[]) {
             for (size_t i = 1; i + 1 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
                 char* check = kiva_get(db, tokens[i].c_str());
-                if (!check) { std::cout << "Error: " << tokens[i] << " not found.\n"; }
-                else {
+                if (!check) { 
+                    std::cout << "Error: " << tokens[i] << " not found. Use 'set' to create.\n"; 
+                } else {
                     kiva_set(db, tokens[i].c_str(), tokens[i+1].c_str());
                     std::cout << "OK: " << tokens[i] << " updated.\n";
                     free(check);
@@ -142,22 +151,28 @@ int main(int argc, char* argv[]) {
                         kiva_delete(db, tokens[i].c_str());
                         std::cout << "Renamed: " << tokens[i] << " -> " << tokens[i+2] << "\n";
                         free(val);
-                    } else { std::cout << "Error: " << tokens[i] << " not found.\n"; }
+                    } else { 
+                        std::cout << "Error: Source key '" << tokens[i] << "' not found.\n"; 
+                    }
                     i += 3;
                 } else i++;
             }
         }
-        // --- COMMAND: GET / TYPEOF ---
-        else if (cmd == "get" || cmd == "typeof") {
+        // --- COMMAND: GET ---
+        else if (cmd == "get") {
             for (size_t i = 1; i < tokens.size(); i++) {
                 if (tokens[i] == "and") continue;
-                if (cmd == "get") {
-                    char* res = kiva_get(db, tokens[i].c_str());
-                    std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
-                    if (res) free(res);
-                } else {
-                    std::cout << tokens[i] << " type: " << kiva_typeof(db, tokens[i].c_str()) << "\n";
-                }
+                char* res = kiva_get(db, tokens[i].c_str());
+                std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
+                if (res) free(res);
+            }
+        }
+        // --- COMMAND: TYPEOF ---
+        else if (cmd == "typeof") {
+            for (size_t i = 1; i < tokens.size(); i++) {
+                if (tokens[i] == "and") continue;
+                const char* t_name = kiva_typeof(db, tokens[i].c_str());
+                std::cout << " -> " << tokens[i] << " is a [" << t_name << "]\n";
             }
         }
         // --- COMMAND: DEL ---
@@ -166,12 +181,14 @@ int main(int argc, char* argv[]) {
                 kiva_close(db);
                 remove(db_path);
                 db = kiva_open(db_path);
-                std::cout << "All keys cleared from disk.\n";
+                std::cout << "All keys cleared from disk successfully.\n";
             } else {
                 for (size_t i = 1; i < tokens.size(); i++) {
                     if (tokens[i] == "and") continue;
                     if (kiva_delete(db, tokens[i].c_str()) == KIVA_OK)
                         std::cout << "Deleted: " << tokens[i] << "\n";
+                    else
+                        std::cout << "Not found: " << tokens[i] << "\n";
                 }
             }
         }
@@ -180,9 +197,18 @@ int main(int argc, char* argv[]) {
             std::cout << "Keys: " << index_get_count(db) << " | File: " << kiva_get_file_size(db_path) << " bytes\n";
             show_dur = false;
         }
-        else if (cmd == "compact") { kiva_compact(db); std::cout << "Compaction done.\n"; }
-        else if (cmd == "help" || cmd == "h") { print_help(); show_dur = false; }
-        else { std::cout << "Unknown command: " << cmd << "\n"; show_dur = false; }
+        else if (cmd == "compact") { 
+            kiva_compact(db); 
+            std::cout << "Compaction and TTL cleaning done.\n"; 
+        }
+        else if (cmd == "help" || cmd == "h") { 
+            print_help(); 
+            show_dur = false; 
+        }
+        else { 
+            std::cout << "Unknown command: " << cmd << ". Type 'help' for info.\n"; 
+            show_dur = false; 
+        }
 
         if (show_dur) {
             double d = (double)(clock() - start) / CLOCKS_PER_SEC;
