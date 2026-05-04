@@ -37,7 +37,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.0.1\nType 'help' for commands\n";
+    std::cout << "KivaDB Shell v2.0.2\nType 'help' for commands\n";
 
     std::string line;
     while (true) {

@@ -1,7 +1,7 @@
 #include <iostream>
 
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.0.1) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.0.2) ---\n"
               << "  set [type] `key` \"val\" [ttl s]   : Set ONLY if key doesn't exist\n"
               << "  update `key` \"val\"               : Update ONLY if key exists\n"
               << "  change `old` to `new`            : Rename key safely\n"
