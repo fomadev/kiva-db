@@ -7,36 +7,30 @@ on:
     branches: [ main ]
   workflow_dispatch: 
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
-    name: Build for ${{ matrix.os }} (${{ matrix.arch }})
+    name: Build for ${{ matrix.os-name }} (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
         include:
           # --- Windows ---
           - os: windows-latest
+            os-name: windows
             arch: x64
             output: kivadb_win_x64.exe
-          - os: windows-latest
-            arch: x86
-            output: kivadb_win_x86.exe
 
           # --- macOS ---
           - os: macos-latest 
+            os-name: macos
             arch: arm64
             output: kivadb_mac_arm64
 
-          # --- Linux ---
+          # --- Linux (Ubuntu/Debian/Kali/etc) ---
           - os: ubuntu-latest
+            os-name: linux
             arch: x64
             output: kivadb_linux_x64
-          - os: ubuntu-latest
-            arch: arm64
-            output: kivadb_linux_arm64
 
     runs-on: ${{ matrix.os }}
 
@@ -44,56 +38,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup MSVC (Windows)
+      # Setup pour Windows (on utilise MinGW pour rester compatible avec ton Makefile gcc/g++)
+      - name: Setup MinGW (Windows)
         if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: egor-tensin/setup-mingw@v2
         with:
-          arch: ${{ matrix.arch }}
+          platform: x64
 
-      - name: Install ARM Cross-Compiler (Linux)
-        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
+      # Compilation universelle via le Makefile
       - name: Compile KivaDB
         shell: bash
         run: |
-          export MSYS_NO_PATHCONV=1
-
-          # --- Compilation Windows (MSVC) ---
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # MSVC gère nativement le mélange C/C++ dans une seule commande
-            cl.exe /Iinclude /std:c++17 /EHsc \
-              src/core/storage.c \
-              src/core/transaction.c \
-              src/core/index.cpp \
-              src/cli/main.cpp \
-              /Fe:${{ matrix.output }}
-
-          # --- Compilation Linux ARM64 (Cross-compile) ---
-          elif [[ "${{ matrix.os }}" == "ubuntu-latest" && "${{ matrix.arch }}" == "arm64" ]]; then
-            # Compilation séparée pour éviter les warnings de langage
-            aarch64-linux-gnu-gcc -c -Iinclude src/core/storage.c -o storage.o
-            aarch64-linux-gnu-gcc -c -Iinclude src/core/transaction.c -o transaction.o
-            aarch64-linux-gnu-g++ -c -std=c++17 -Iinclude src/core/index.cpp -o index.o
-            aarch64-linux-gnu-g++ -c -std=c++17 -Iinclude src/cli/main.cpp -o main.o
-            # Linkage final avec g++
-            aarch64-linux-gnu-g++ storage.o transaction.o index.o main.o -o ${{ matrix.output }}
-
-          # --- Compilation Standard (Linux x64 & macOS ARM64) ---
-          else
-            # Compilation séparée : GCC pour le C, G++ pour le C++
-            gcc -c -Iinclude src/core/storage.c -o storage.o
-            gcc -c -Iinclude src/core/transaction.c -o transaction.o
-            g++ -c -std=c++17 -Iinclude src/core/index.cpp -o index.o
-            g++ -c -std=c++17 -Iinclude src/cli/main.cpp -o main.o
-            # Linkage final avec g++ pour inclure la libstdc++
-            g++ storage.o transaction.o index.o main.o -o ${{ matrix.output }}
+          # On s'assure que le dossier obj existe
+          mkdir -p obj
+          
+          # On utilise le Makefile que tu as déjà configuré
+          # Il va compiler api.c, engine.c, format_v2.c, storage.c, etc.
+          make
+          
+          # On renomme l'exécutable généré (kivadb.exe) vers le nom spécifique à la matrice
+          if [ -f "kivadb.exe" ]; then
+            mv kivadb.exe ${{ matrix.output }}
+          elif [ -f "kivadb" ]; then
+            mv kivadb ${{ matrix.output }}
           fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kivadb-${{ matrix.os }}-${{ matrix.arch }}
+          name: kivadb-${{ matrix.os-name }}-${{ matrix.arch }}
           path: ${{ matrix.output }}
