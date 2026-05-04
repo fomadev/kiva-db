@@ -47,6 +47,18 @@ void index_scan(KivaDB* db);
 int  index_get_count(KivaDB* db);
 
 
+// --- Fonctions de Format et Type (Implémentées dans format_v2.c) ---
+
+// Détecte automatiquement le type (String, Number, Boolean) d'une chaîne
+KivaType detect_type(const char* value);
+
+// Détecte si le fichier est en format V1 ou V2
+int kiva_detect_format(FILE* file);
+
+// Charge l'index en mémoire à l'ouverture
+void kiva_load_index(KivaDB* db);
+
+
 // --- Fonctions de Compaction et Système ---
 
 // Effectue la migration des données valides vers le fichier temporaire
