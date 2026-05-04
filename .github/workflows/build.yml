@@ -14,19 +14,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # --- Windows ---
           - os: windows-latest
             os-name: windows
             arch: x64
             output: kivadb_win_x64.exe
 
-          # --- macOS ---
           - os: macos-latest 
             os-name: macos
             arch: arm64
             output: kivadb_mac_arm64
 
-          # --- Linux (Ubuntu/Debian/Kali/etc) ---
           - os: ubuntu-latest
             os-name: linux
             arch: x64
@@ -38,25 +35,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Setup pour Windows (on utilise MinGW pour rester compatible avec ton Makefile gcc/g++)
-      - name: Setup MinGW (Windows)
+      # --- Configuration Windows (MSYS2) ---
+      - name: Setup MSYS2 (Windows)
         if: matrix.os == 'windows-latest'
-        uses: egor-tensin/setup-mingw@v2
+        uses: msys2/setup-msys2@v2
         with:
-          platform: x64
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make
 
-      # Compilation universelle via le Makefile
+      # --- Compilation ---
       - name: Compile KivaDB
         shell: bash
         run: |
-          # On s'assure que le dossier obj existe
           mkdir -p obj
           
-          # On utilise le Makefile que tu as déjà configuré
-          # Il va compiler api.c, engine.c, format_v2.c, storage.c, etc.
-          make
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            # Sur Windows avec MSYS2, la commande est 'mingw32-make'
+            mingw32-make
+          else
+            # Sur Linux et macOS, c'est 'make'
+            make
+          fi
           
-          # On renomme l'exécutable généré (kivadb.exe) vers le nom spécifique à la matrice
+          # Renommage vers le nom final
           if [ -f "kivadb.exe" ]; then
             mv kivadb.exe ${{ matrix.output }}
           elif [ -f "kivadb" ]; then
