@@ -6,7 +6,6 @@
 #include <algorithm>
 
 // On inclut d'abord les headers du projet. 
-// Si kivadb.h définit déjà MKDIR, le bloc suivant ne fera rien.
 extern "C" {
     #include "../../include/kivadb.h"
     #include "../core/kivadb_internal.h"
@@ -24,7 +23,7 @@ extern "C" {
 #endif
 
 /**
- * CommandParser strict : Gère les "", '', et ``
+ * CommandParser : Identifie les jetons et leurs délimiteurs respectifs
  */
 struct CommandParser {
     static std::vector<std::string> tokenize(const std::string& input, std::vector<char>& delimiters) {
@@ -32,21 +31,30 @@ struct CommandParser {
         std::string current;
         char quote_char = 0;
 
-        for (char c : input) {
+        for (size_t i = 0; i < input.length(); ++i) {
+            char c = input[i];
+
+            // Début d'une zone citée
             if ((c == '"' || c == '\'' || c == '`') && quote_char == 0) {
                 quote_char = c;
-            } else if (c == quote_char) {
+            } 
+            // Fin d'une zone citée
+            else if (c == quote_char && quote_char != 0) {
                 tokens.push_back(current);
                 delimiters.push_back(quote_char);
                 current.clear();
                 quote_char = 0;
-            } else if (isspace(c) && quote_char == 0) {
+            } 
+            // Espace hors guillemets (séparateur)
+            else if (isspace(c) && quote_char == 0) {
                 if (!current.empty()) {
                     tokens.push_back(current);
-                    delimiters.push_back(0); 
+                    delimiters.push_back(0); // 0 = Aucun délimiteur
                     current.clear();
                 }
-            } else {
+            } 
+            // Caractère standard
+            else {
                 current += c;
             }
         }
@@ -98,8 +106,8 @@ int main(int argc, char* argv[]) {
         if (!std::getline(std::cin, line) || line == "exit") break;
         if (line.empty()) continue;
 
-        std::vector<char> delim;
-        auto tokens = CommandParser::tokenize(line, delim);
+        std::vector<char> delimiters;
+        auto tokens = CommandParser::tokenize(line, delimiters);
         if (tokens.empty()) continue;
 
         std::string cmd = tokens[0];
@@ -108,10 +116,12 @@ int main(int argc, char* argv[]) {
 
         if (cmd == "set") {
             int global_ttl = 0;
-            for (size_t j = 0; j < tokens.size(); j++) 
-                if (tokens[j] == "ttl" && j+1 < tokens.size()) {
+            // Recherche du TTL dans toute la ligne
+            for (size_t j = 0; j < tokens.size(); j++) {
+                if (tokens[j] == "ttl" && j + 1 < tokens.size()) {
                     try { global_ttl = std::stoi(tokens[j+1]); } catch(...) { global_ttl = 0; }
                 }
+            }
 
             for (size_t i = 1; i < tokens.size(); ) {
                 if (tokens[i] == "and" || tokens[i] == "ttl") { 
@@ -125,12 +135,18 @@ int main(int argc, char* argv[]) {
 
                 if (i + 1 >= tokens.size()) break;
 
-                if (delim[i] == '"' || delim[i] == '\'') {
-                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use ``.\n";
+                // --- VALIDATION STRICTE ---
+                // La Clé (i) : Pas de " ou '
+                if (delimiters[i] == '"' || delimiters[i] == '\'') {
+                    std::cout << "Error: Key '" << tokens[i] << "' cannot use \"\" or ''. Use backticks `` or nothing.\n";
+                    i += 2; continue;
+                }
+                // La Valeur (i+1) : Obligatoirement " ou '
+                if (delimiters[i+1] != '"' && delimiters[i+1] != '\'') {
+                    std::cout << "Error: Value for '" << tokens[i] << "' must be enclosed in \"\" or ''.\n";
                     i += 2; continue;
                 }
 
-                // VERIFICATION EXISTENCE : Empêche les doublons au SET
                 char* check_exists = kiva_get(db, tokens[i].c_str());
                 if (check_exists) {
                     std::cout << "Error: Key '" << tokens[i] << "' already exists. Use 'update'.\n";
@@ -146,6 +162,15 @@ int main(int argc, char* argv[]) {
         else if (cmd == "update") {
             for (size_t i = 1; i + 1 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
+
+                // Validation Clé/Valeur
+                if (delimiters[i] == '"' || delimiters[i] == '\'') {
+                    std::cout << "Error: Key cannot use quotes.\n"; i += 2; continue;
+                }
+                if (delimiters[i+1] != '"' && delimiters[i+1] != '\'') {
+                    std::cout << "Error: Value must be quoted.\n"; i += 2; continue;
+                }
+
                 char* check = kiva_get(db, tokens[i].c_str());
                 if (!check) { 
                     std::cout << "Error: " << tokens[i] << " not found. Use 'set'.\n"; 
@@ -157,6 +182,21 @@ int main(int argc, char* argv[]) {
                 i += 2;
             }
         }
+        else if (cmd == "get") {
+            for (size_t i = 1; i < tokens.size(); i++) {
+                if (tokens[i] == "and") continue;
+                
+                // Règle : Une clé demandée en GET ne doit pas être entre ""
+                if (delimiters[i] == '"' || delimiters[i] == '\'') {
+                    std::cout << "Error: Key '" << tokens[i] << "' is quoted. Keys in KivaDB are bare or in ``.\n";
+                    continue;
+                }
+
+                char* res = kiva_get(db, tokens[i].c_str());
+                std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
+                if (res) free(res);
+            }
+        }
         else if (cmd == "change") {
             for (size_t i = 1; i + 2 < tokens.size(); ) {
                 if (tokens[i] == "and") { i++; continue; }
@@ -166,7 +206,6 @@ int main(int argc, char* argv[]) {
                         std::cout << "Error: Source '" << tokens[i] << "' not found.\n";
                         i += 3; continue;
                     }
-                    // Protection contre l'écrasement (évite les clés fantômes)
                     char* target_exists = kiva_get(db, tokens[i+2].c_str());
                     if (target_exists) {
                         std::cout << "Error: Target '" << tokens[i+2] << "' already exists.\n";
@@ -179,14 +218,6 @@ int main(int argc, char* argv[]) {
                     free(val);
                     i += 3;
                 } else i++;
-            }
-        }
-        else if (cmd == "get") {
-            for (size_t i = 1; i < tokens.size(); i++) {
-                if (tokens[i] == "and") continue;
-                char* res = kiva_get(db, tokens[i].c_str());
-                std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
-                if (res) free(res);
             }
         }
         else if (cmd == "typeof") {
