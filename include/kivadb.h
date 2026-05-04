@@ -1,7 +1,7 @@
 #ifndef KIVADB_H
 #define KIVADB_H
 
-#define KIVADB_VERSION "2.0.0"
+#define KIVADB_VERSION "2.0.1"
 #define MAGIC_SIGNATURE "KIVA"
 #define FORMAT_V1 1
 #define FORMAT_V2 2

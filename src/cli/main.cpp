@@ -74,7 +74,7 @@ struct CommandParser {
 };
 
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.0.0) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.0.1) ---\n"
               << "  set [type] `key` \"val\" [ttl s]   : Set ONLY if key doesn't exist\n"
               << "  update `key` \"val\"               : Update ONLY if key exists\n"
               << "  change `old` to `new`            : Rename key safely\n"
@@ -98,7 +98,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.0.0\nType 'help' for commands\n";
+    std::cout << "KivaDB Shell v2.0.1\nType 'help' for commands\n";
 
     std::string line;
     while (true) {
