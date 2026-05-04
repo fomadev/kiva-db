@@ -2,7 +2,7 @@ CC = gcc
 CXX = g++
 CFLAGS = -Wall -Wextra -std=c11 -Iinclude
 CXXFLAGS = -Wall -Wextra -std=c++17 -Iinclude
-LDFLAGS = -lstdc++
+LDFLAGS = -lstdc++ -static-libgcc -static-libstdc++ -static
 
 # Configuration des dossiers
 CORE_DIR = src/core
