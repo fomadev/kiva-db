@@ -74,18 +74,48 @@ void handle_update(KivaDB* db, const std::vector<std::string>& tokens, const std
 }
 
 void handle_change(KivaDB* db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
+    (void)delimiters; 
+
     for (size_t i = 1; i + 2 < tokens.size(); ) {
-        if (tokens[i] == "and") { i++; continue; }
+        if (tokens[i] == "and") { 
+            i++; 
+            continue; 
+        }
+
         if (tokens[i+1] == "to") {
+            if (delimiters[i] == '"' || delimiters[i] == '\'' || 
+                delimiters[i+2] == '"' || delimiters[i+2] == '\'') {
+                std::cout << "Error: Keys cannot be enclosed in quotes for rename operation.\n";
+                i += 3;
+                continue;
+            }
+
             char* val = kiva_get(db, tokens[i].c_str());
-            if (!val) { std::cout << "Error: '" << tokens[i] << "' not found.\n"; i += 3; continue; }
+            if (!val) { 
+                std::cout << "Error: Source key '" << tokens[i] << "' not found.\n"; 
+                i += 3; 
+                continue; 
+            }
+
             char* target = kiva_get(db, tokens[i+2].c_str());
-            if (target) { std::cout << "Error: Target exists.\n"; free(val); free(target); i += 3; continue; }
+            if (target) { 
+                std::cout << "Error: Target key '" << tokens[i+2] << "' already exists.\n"; 
+                free(val); 
+                free(target); 
+                i += 3; 
+                continue; 
+            }
+
             kiva_set(db, tokens[i+2].c_str(), val); 
             kiva_delete(db, tokens[i].c_str());
+
             std::cout << "Renamed: " << tokens[i] << " -> " << tokens[i+2] << "\n";
-            free(val); i += 3;
-        } else i++;
+            
+            free(val); 
+            i += 3;
+        } else {
+            i++;
+        }
     }
 }
 
