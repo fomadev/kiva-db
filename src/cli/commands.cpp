@@ -13,6 +13,7 @@ static bool is_bare(char d) { return d == 0; }
 
 /**
  * Gère la commande SET avec validation stricte des types et des délimiteurs.
+ * RÈGLE : Si une valeur est entre guillemets, elle est forcée en STRING.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
@@ -41,7 +42,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             break;
         }
 
-        // --- VALIDATION DES QUOTES ---
+        // --- VALIDATION DES QUOTES ET DÉTERMINATION DU TYPE ---
 
         // Clé : Pas de " " ou ' ', seulement nu ou ` `
         if (is_string_quote(delimiters[i])) {
@@ -49,25 +50,36 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             i += 2; continue;
         }
 
-        // Valeur selon le type
-        if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
-            if (!is_bare(delimiters[i+1])) {
-                std::cout << "Error: Numbers and Booleans must not be quoted.\n";
-                i += 2; continue;
+        char val_delim = delimiters[i+1];
+
+        // LOGIQUE DE DÉTECTION AUTOMATIQUE (Si pas de type forcé explicitement)
+        if (forced == KIVA_TYPE_UNKNOWN) {
+            if (is_string_quote(val_delim)) {
+                // RÈGLE : Présence de quotes = Forçage en STRING (ex: "74" -> string)
+                forced = KIVA_TYPE_STRING;
             }
+            // Si bare (0), KivaDB (côté C) fera l'inférence naturelle (number/boolean)
         } 
-        else if (forced == KIVA_TYPE_STRING) {
-            if (!is_string_quote(delimiters[i+1])) {
-                std::cout << "Error: String values must be quoted with \"\" or ''.\n";
-                i += 2; continue;
+        else {
+            // VALIDATION SI TYPE FORCÉ EXPLICITEMENT
+            if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
+                if (!is_bare(val_delim)) {
+                    std::cout << "Error: Numbers and Booleans must not be quoted.\n";
+                    i += 2; continue;
+                }
+            } 
+            else if (forced == KIVA_TYPE_STRING) {
+                if (!is_string_quote(val_delim)) {
+                    std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
+                    i += 2; continue;
+                }
             }
         }
-        else {
-            // Type UNKNOWN : si c'est un backtick sur une valeur, on refuse
-            if (is_backtick(delimiters[i+1])) {
-                std::cout << "Error: Value for '" << tokens[i] << "' cannot use backticks.\n";
-                i += 2; continue;
-            }
+
+        // Cas particulier : on refuse les backticks sur les valeurs dans tous les cas
+        if (is_backtick(val_delim)) {
+            std::cout << "Error: Value for '" << tokens[i] << "' cannot use backticks.\n";
+            i += 2; continue;
         }
 
         // Vérification d'existence pour SET (mode strict)
@@ -110,6 +122,13 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             i += 2; continue;
         }
 
+        char val_delim = delimiters[i+1];
+
+        // Détection automatique pour la mise à jour si pas de type forcé
+        if (forced == KIVA_TYPE_UNKNOWN && is_string_quote(val_delim)) {
+            forced = KIVA_TYPE_STRING;
+        }
+
         // Protection : si on précise un type, il doit correspondre à l'existant
         if (forced != KIVA_TYPE_UNKNOWN) {
             std::string type_str = current_type;
@@ -124,8 +143,8 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             }
         }
 
-        // Validation des quotes pour la nouvelle valeur (même logique que SET)
-        if (!is_bare(delimiters[i+1]) && (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN)) {
+        // Validation finale des délimiteurs pour types numériques/booléens
+        if (!is_bare(val_delim) && (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN)) {
              std::cout << "Error: Numbers and Booleans must not be quoted.\n";
              i += 2; continue;
         }
