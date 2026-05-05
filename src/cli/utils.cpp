@@ -1,14 +1,17 @@
 #include <iostream>
 
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.0.2.1) ---\n"
-              << "  set [type] `key` \"val\" [ttl s]   : Set ONLY if key doesn't exist\n"
-              << "  update `key` \"val\"               : Update ONLY if key exists\n"
-              << "  change `old` to `new`            : Rename key safely\n"
-              << "  get `key1` and `key2`            : Retrieve values\n"
-              << "  typeof `key`                     : Show data type\n"
-              << "  del `key` OR del all keys        : Delete keys\n"
-              << "  scan                             : List all entries\n"
-              << "  compact | stats | exit           : Utility commands\n"
-              << "-----------------------------------\n";
+    std::cout << "\n--- KivaDB Shell Help ---\n"
+              << "  set [type] <key> <val> [ttl <sec>]  : Save a value (strictly typed).\n"
+              << "  update [type] <key> <val>           : Update existing key (checks type compatibility).\n"
+              << "  get <key1> and <key2>               : Retrieve values.\n"
+              << "  del <key> / del all keys            : Remove data.\n"
+              << "  typeof <key>                        : Show data type of a key.\n"
+              << "  change <old> to <new>               : Rename a key.\n"
+              << "  scan                                : List all indexed keys.\n"
+              << "  stats                               : Database file statistics.\n"
+              << "  compact                             : Reorganize storage to save space.\n"
+              << "  clear                               : Clear shell screen.\n"
+              << "  exit                                : Close KivaDB.\n"
+              << "-------------------------\n\n";
 }
