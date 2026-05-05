@@ -56,17 +56,12 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
         // LOGIQUE DE DÉTECTION ET VALIDATION STRICTE
         if (forced == KIVA_TYPE_UNKNOWN) {
             if (is_string_quote(val_delim)) {
-                // RÈGLE : Présence de quotes = STRING
                 forced = KIVA_TYPE_STRING;
             } 
             else {
-                // RÈGLE DE FER : Sans quotes = DOIT être un nombre ou un booléen
-                // On utilise la logique d'inférence de KivaDB (ou une fonction utilitaire)
-                // Ici, on simule l'appel à ton moteur C pour vérifier le type potentiel
                 KivaType inferred = kiva_identify_type(val_str.c_str()); 
 
                 if (inferred == KIVA_TYPE_STRING) {
-                    // C'est du texte nu qui n'est ni un nombre ni un booléen -> REFUS
                     std::cout << "Error: String values like '" << val_str << "' must be quoted (\"\" or '').\n";
                     i += 2; continue;
                 }
@@ -74,7 +69,6 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             }
         } 
         else {
-            // VALIDATION SI TYPE FORCÉ EXPLICITEMENT (ex: set string age 44)
             if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
                 if (!is_bare(val_delim)) {
                     std::cout << "Error: Numbers and Booleans must not be quoted.\n";
@@ -89,13 +83,11 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             }
         }
 
-        // Cas particulier : on refuse les backticks sur les valeurs
         if (is_backtick(val_delim)) {
             std::cout << "Error: Value for '" << tokens[i] << "' cannot use backticks.\n";
             i += 2; continue;
         }
 
-        // Vérification d'existence pour SET (mode strict)
         char* exists = kiva_get(*db, tokens[i].c_str());
         if (exists) {
             std::cout << "Error: Key '" << tokens[i] << "' exists. Use 'update'.\n";
@@ -114,7 +106,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
 }
 
 /**
- * Gère la mise à jour avec protection du type existant et validation des bare values.
+ * Gère la mise à jour avec protection du type existant.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     for (size_t i = 1; i + 1 < tokens.size(); ) {
@@ -136,7 +128,6 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
         char val_delim = delimiters[i+1];
         std::string val_str = tokens[i+1];
 
-        // Détection automatique pour Update avec la même règle de fer
         if (forced == KIVA_TYPE_UNKNOWN) {
             if (is_string_quote(val_delim)) {
                 forced = KIVA_TYPE_STRING;
@@ -150,7 +141,6 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             }
         }
 
-        // Protection : concordance avec le type existant
         if (forced != KIVA_TYPE_UNKNOWN) {
             std::string type_str = current_type;
             bool mismatch = false;
@@ -170,19 +160,58 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
     }
 }
 
+/**
+ * Gère la récupération avec validation optionnelle du type.
+ * RÈGLE : Si un type est spécifié, il doit correspondre à celui en base.
+ */
 void handle_get(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
+    KivaType requested_type = KIVA_TYPE_UNKNOWN;
+
     for (size_t i = 1; i < tokens.size(); i++) {
-        if (tokens[i] == "and" || tokens[i] == "string" || tokens[i] == "number" || tokens[i] == "boolean") 
-            continue;
+        // 1. Détection du type demandé (si présent avant la clé)
+        if (tokens[i] == "string") { requested_type = KIVA_TYPE_STRING; continue; }
+        if (tokens[i] == "number") { requested_type = KIVA_TYPE_NUMBER; continue; }
+        if (tokens[i] == "boolean") { requested_type = KIVA_TYPE_BOOLEAN; continue; }
+        if (tokens[i] == "and") continue;
         
+        // 2. Validation des quotes sur la clé
         if (is_string_quote(delimiters[i])) {
             std::cout << "Error: Key '" << tokens[i] << "' is quoted. Use bare text or ``.\n";
+            requested_type = KIVA_TYPE_UNKNOWN; // Reset pour la suite
             continue;
         }
 
+        // 3. Vérification du type en base si un type a été demandé
+        const char* actual_type_str = kiva_typeof(*db, tokens[i].c_str());
+        
+        if (requested_type != KIVA_TYPE_UNKNOWN) {
+            std::string actual(actual_type_str);
+            bool mismatch = false;
+            
+            if (strcmp(actual_type_str, "none") == 0) {
+                std::cout << tokens[i] << ": (nil)\n";
+                requested_type = KIVA_TYPE_UNKNOWN;
+                continue;
+            }
+
+            if (requested_type == KIVA_TYPE_STRING && actual != "string") mismatch = true;
+            if (requested_type == KIVA_TYPE_NUMBER && actual != "number") mismatch = true;
+            if (requested_type == KIVA_TYPE_BOOLEAN && actual != "boolean") mismatch = true;
+
+            if (mismatch) {
+                std::cout << "Error: Type mismatch. '" << tokens[i] << "' is a [" << actual_type_str << "].\n";
+                requested_type = KIVA_TYPE_UNKNOWN;
+                continue;
+            }
+        }
+
+        // 4. Récupération et affichage
         char* res = kiva_get(*db, tokens[i].c_str());
         std::cout << tokens[i] << ": " << (res ? res : "(nil)") << "\n";
         if (res) free(res);
+        
+        // Reset du type pour la prochaine clé après un éventuel "and"
+        requested_type = KIVA_TYPE_UNKNOWN;
     }
 }
 
