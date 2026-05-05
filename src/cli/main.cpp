@@ -22,14 +22,17 @@ extern "C" {
     #endif
 #endif
 
-// Déclarée dans utils.cpp
+// Déclarée dans utils.cpp (ou autre fichier utilitaire)
 void print_help();
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
+    // Création du dossier de stockage si inexistant
     MKDIR("data");
     const char* db_path = "data/store.kiva";
+    
+    // Ouverture initiale de la base
     KivaDB* db = kiva_open(db_path);
 
     if (!db) {
@@ -37,7 +40,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.0.2.1\nType 'help' for commands\n";
+    std::cout << "KivaDB Shell v2.0.2.2\nType 'help' for commands\n";
 
     std::string line;
     while (true) {
@@ -53,27 +56,62 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        if (cmd == "set") handle_set(db, tokens, delimiters);
-        else if (cmd == "update") handle_update(db, tokens, delimiters);
-        else if (cmd == "get") handle_get(db, tokens, delimiters);
-        else if (cmd == "change") handle_change(db, tokens, delimiters);
-        else if (cmd == "typeof") handle_typeof(db, tokens);
-        else if (cmd == "del") handle_del(db, tokens, db_path);
-        else if (cmd == "scan") { index_scan(db); show_dur = false; }
-        else if (cmd == "stats") {
-            std::cout << "Keys: " << index_get_count(db) << " | File: " << kiva_get_file_size(db_path) << " bytes\n";
+        /* 
+         * Note technique : On passe l'adresse du pointeur (&db) aux fonctions de commande.
+         * Cela permet à handle_del de réinitialiser la variable 'db' ici même.
+         */
+        
+        if (cmd == "set") {
+            handle_set(&db, tokens, delimiters);
+        }
+        else if (cmd == "update") {
+            handle_update(&db, tokens, delimiters);
+        }
+        else if (cmd == "get") {
+            handle_get(&db, tokens, delimiters);
+        }
+        else if (cmd == "change") {
+            handle_change(&db, tokens, delimiters);
+        }
+        else if (cmd == "typeof") {
+            handle_typeof(&db, tokens);
+        }
+        else if (cmd == "del") {
+            handle_del(&db, tokens, db_path);
+        }
+        else if (cmd == "scan") {
+            index_scan(db); 
             show_dur = false;
         }
-        else if (cmd == "compact") { kiva_compact(db); std::cout << "Database compacted.\n"; }
-        else if (cmd == "help" || cmd == "h") { print_help(); show_dur = false; }
-        else { std::cout << "Unknown command.\n"; show_dur = false; }
+        else if (cmd == "stats") {
+            std::cout << "Keys: " << index_get_count(db) 
+                      << " | File: " << kiva_get_file_size(db_path) << " bytes\n";
+            show_dur = false;
+        }
+        else if (cmd == "compact") {
+            kiva_compact(db); 
+            std::cout << "Database compacted.\n";
+        }
+        else if (cmd == "help" || cmd == "h") {
+            print_help(); 
+            show_dur = false;
+        }
+        else {
+            std::cout << "Unknown command.\n";
+            show_dur = false;
+        }
 
+        // Affichage de la durée d'exécution (en microsecondes/secondes)
         if (show_dur) {
             double d = (double)(clock() - start) / CLOCKS_PER_SEC;
             std::cout << "(" << std::fixed << std::setprecision(6) << d << "s)\n";
         }
     }
 
-    kiva_close(db);
+    // Fermeture propre avant de quitter
+    if (db) {
+        kiva_close(db);
+    }
+    
     return 0;
 }
