@@ -105,6 +105,25 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     return KIVA_OK;
 }
 
+KivaType kiva_identify_type(const char* value) {
+    if (!value) return KIVA_TYPE_STRING;
+
+    // Est-ce un booléen ?
+    if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
+        return KIVA_TYPE_BOOLEAN;
+    }
+
+    // Est-ce un nombre ? (Vérifie si c'est composé de chiffres et d'un seul point)
+    char* endptr;
+    strtod(value, &endptr);
+    if (*endptr == '\0' && endptr != value) {
+        return KIVA_TYPE_NUMBER;
+    }
+
+    // Par défaut, c'est du texte
+    return KIVA_TYPE_STRING;
+}
+
 /**
  * Retourne le nom du type de la donnée pour le CLI.
  */

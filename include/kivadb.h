@@ -95,4 +95,6 @@ const char* kiva_typeof(KivaDB* db, const char* key);
 KivaStatus kiva_compact(KivaDB* db);
 int64_t kiva_get_file_size(const char* path);
 
+
+KivaType kiva_identify_type(const char* value);
 #endif
