@@ -12,16 +12,18 @@ extern "C" {
     #include "../core/kivadb_internal.h"
 }
 
-// Gestion multiplateforme pour le dossier data et la commande clear
-#ifndef MKDIR
-    #ifdef _WIN32
-        #include <direct.h>
+// --- Gestion multiplateforme corrigée ---
+#ifdef _WIN32
+    #include <direct.h>
+    #define CLEAR_COMMAND "cls"
+    #ifndef MKDIR
         #define MKDIR(path) _mkdir(path)
-        #define CLEAR_COMMAND "cls"
-    #else
-        #include <sys/stat.h>
+    #endif
+#else
+    #include <sys/stat.h>
+    #define CLEAR_COMMAND "clear"
+    #ifndef MKDIR
         #define MKDIR(path) mkdir(path, 0777)
-        #define CLEAR_COMMAND "clear"
     #endif
 #endif
 
@@ -47,7 +49,7 @@ void print_help() {
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
-    // Création du dossier de données
+    // Création du dossier de données (ignore l'erreur si déjà existant)
     MKDIR("data");
     const char* db_path = "data/store.kiva";
 
@@ -91,7 +93,7 @@ int main(int argc, char* argv[]) {
             handle_del(&db, tokens, db_path);
         }
         else if (cmd == "clear") {
-            system(CLEAR_COMMAND);
+            system(CLEAR_COMMAND); // Désormais toujours déclaré
             show_dur = false;
         }
         else if (cmd == "change") {
