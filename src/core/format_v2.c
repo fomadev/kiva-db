@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
+#include <ctype.h>
 #include "../../include/kivadb.h"
 #include "kivadb_internal.h"
 
@@ -11,13 +12,23 @@
 
 /**
  * Vérifie si une chaîne est un nombre pur (entier ou flottant).
+ * Utilise strtod pour une précision maximale et vérifie la fin de chaîne.
  */
 int is_valid_number(const char* s) {
     if (!s || *s == '\0') return 0;
+    
+    // Ignorer les espaces au début (optionnel selon ta rigueur)
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == '\0') return 0;
+
     char* endptr;
     strtod(s, &endptr);
-    // On vérifie que toute la chaîne a été consommée
-    return *s != '\0' && *endptr == '\0';
+
+    // Ignorer les espaces à la fin
+    while (isspace((unsigned char)*endptr)) endptr++;
+
+    // Si endptr pointe sur '\0', toute la chaîne est un nombre valide
+    return *endptr == '\0';
 }
 
 /**
@@ -30,7 +41,7 @@ int is_valid_boolean(const char* s) {
 
 /**
  * Analyse la chaîne de caractères pour deviner son type de donnée.
- * Utilise désormais la validation stricte.
+ * Cette fonction est utilisée par le mode 'auto' (KIVA_TYPE_UNKNOWN).
  */
 KivaType detect_type(const char* value) {
     if (!value || *value == '\0') return KIVA_TYPE_STRING;
@@ -72,18 +83,19 @@ int kiva_detect_format(FILE* file) {
 }
 
 /**
- * Parcourt le fichier de données pour reconstruire l'index en mémoire (HashTable C++).
+ * Parcourt le fichier de données pour reconstruire l'index en mémoire (HashTable).
  * Gère la rétrocompatibilité V1 et les métadonnées V2 (Type + TTL).
  */
 void kiva_load_index(KivaDB* db) {
     fseek(db->file, 0, SEEK_SET);
     int format = kiva_detect_format(db->file);
     
+    // Si c'est un format V2, on saute le Header Global de 12 octets
     if (format == FORMAT_V2) {
         KivaHeader header;
         if (fread(&header, sizeof(KivaHeader), 1, db->file) != 1) return; 
         if (header.format_version == FORMAT_V1) {
-            fprintf(stderr, "[Warning] Old format version in header. Run 'compact' to upgrade.\n");
+            fprintf(stderr, "[Warning] Migration needed: Header states V1 on V2 file.\n");
         }
     }
     
@@ -91,16 +103,16 @@ void kiva_load_index(KivaDB* db) {
     uint8_t type_raw;
     int64_t expires_at = 0;
     
-    // Boucle de lecture séquentielle du fichier (Append-only log)
+    // Boucle de lecture séquentielle du journal (Append-only log)
     while (fread(&k_size, sizeof(uint32_t), 1, db->file) == 1) {
         if (fread(&v_size, sizeof(uint32_t), 1, db->file) != 1) break;
         
         if (format == FORMAT_V2) {
-            // Lecture des métadonnées spécifiques à la V2
+            // Lecture des métadonnées V2 (1 octet type + 8 octets expiration)
             if (fread(&type_raw, sizeof(uint8_t), 1, db->file) != 1) break;
             if (fread(&expires_at, sizeof(int64_t), 1, db->file) != 1) break;
         } else {
-            // Mode Rétrocompatibilité V1 : Tout est considéré comme String sans expiration
+            // Fallback V1
             type_raw = KIVA_TYPE_STRING;
             expires_at = 0;
         }
@@ -111,23 +123,21 @@ void kiva_load_index(KivaDB* db) {
         key[k_size] = '\0';
         
         if (v_size == 0) {
-            // Marqueur de suppression (Tombstone)
+            // Taille 0 = Marqueur de suppression
             index_remove(db, key);
         } else {
-            // Gestion de l'expiration (Lazy loading)
+            // Vérification de l'expiration au chargement (Lazy loading)
             if (expires_at > 0 && expires_at < (int64_t)time(NULL)) {
-                // Donnée expirée : on ignore l'entrée et on avance le curseur
+                // Donnée expirée : on saute la valeur sans l'indexer
                 fseek(db->file, v_size, SEEK_CUR);
             } else {
-                // Donnée valide : on stocke l'offset dans l'index mémoire
+                // Donnée valide : enregistrement de la position physique
                 int64_t current_offset = ftell(db->file);
-                
-                // Conversion du temps restant en secondes pour index_set_ex
                 int ttl_remaining = (expires_at > 0) ? (int)(expires_at - time(NULL)) : 0;
                 
                 index_set_ex(db, key, current_offset, v_size, (KivaType)type_raw, ttl_remaining);
                 
-                // Avancer le curseur après la valeur
+                // On avance le curseur pour pointer sur l'entrée suivante
                 fseek(db->file, v_size, SEEK_CUR);
             }
         }
