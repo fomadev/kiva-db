@@ -273,16 +273,51 @@ void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char*
         } else {
             std::cout << "Error: Could not delete database file.\n";
         }
+        return;
     } 
-    else {
-        for (size_t i = 1; i < tokens.size(); i++) {
-            if (tokens[i] == "and" || tokens[i] == "string" || tokens[i] == "number" || tokens[i] == "boolean") 
-                continue;
-            if (kiva_delete(*db, tokens[i].c_str()) == KIVA_OK) {
-                std::cout << "Deleted: " << tokens[i] << "\n";
-            } else {
+
+    KivaType requested_type = KIVA_TYPE_UNKNOWN;
+
+    for (size_t i = 1; i < tokens.size(); i++) {
+        // 1. Détection du type de sécurité
+        if (tokens[i] == "string") { requested_type = KIVA_TYPE_STRING; continue; }
+        if (tokens[i] == "number") { requested_type = KIVA_TYPE_NUMBER; continue; }
+        if (tokens[i] == "boolean") { requested_type = KIVA_TYPE_BOOLEAN; continue; }
+        if (tokens[i] == "and") continue;
+
+        // 2. Vérification du type avant suppression
+        const char* actual_type_str = kiva_typeof(*db, tokens[i].c_str());
+
+        if (requested_type != KIVA_TYPE_UNKNOWN) {
+            std::string actual(actual_type_str);
+            
+            // Si la clé n'existe pas, on sort proprement
+            if (actual == "none") {
                 std::cout << "Not found: " << tokens[i] << "\n";
+                requested_type = KIVA_TYPE_UNKNOWN;
+                continue;
+            }
+
+            bool mismatch = false;
+            if (requested_type == KIVA_TYPE_STRING && actual != "string") mismatch = true;
+            if (requested_type == KIVA_TYPE_NUMBER && actual != "number") mismatch = true;
+            if (requested_type == KIVA_TYPE_BOOLEAN && actual != "boolean") mismatch = true;
+
+            if (mismatch) {
+                std::cout << "Error: Type mismatch. Cannot delete '" << tokens[i] 
+                          << "' because it is a [" << actual_type_str << "].\n";
+                requested_type = KIVA_TYPE_UNKNOWN;
+                continue;
             }
         }
+
+        // 3. Suppression effective
+        if (kiva_delete(*db, tokens[i].c_str()) == KIVA_OK) {
+            std::cout << "Deleted: " << tokens[i] << "\n";
+        } else {
+            std::cout << "Not found: " << tokens[i] << "\n";
+        }
+        
+        requested_type = KIVA_TYPE_UNKNOWN; // Reset pour la clé suivante
     }
 }
