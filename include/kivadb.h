@@ -1,7 +1,7 @@
 #ifndef KIVADB_H
 #define KIVADB_H
 
-#define KIVADB_VERSION "2.0.2.1"
+#define KIVADB_VERSION "2.0.2.2"
 #define MAGIC_SIGNATURE "KIVA"
 #define FORMAT_V1 1
 #define FORMAT_V2 2
@@ -21,55 +21,78 @@
 
 typedef struct KivaDB KivaDB;
 
+/**
+ * Structure de l'en-tête du fichier de base de données (V2)
+ */
 typedef struct {
-    char signature[4];
-    uint32_t format_version;
-    uint32_t reserved;
+    char signature[4];        // "KIVA"
+    uint32_t format_version;  // 1 ou 2
+    uint32_t reserved;        // Aligné pour usage futur
 } KivaHeader;
 
+/**
+ * Statuts de retour pour les opérations de l'API
+ */
 typedef enum {
     KIVA_OK = 0,
-    KIVA_NOT_FOUND = -1,
-    KIVA_WRITE_ERROR = -2,
-    KIVA_ERR_OPEN,
-    FILE_ERR_WRITE,
-    KIVA_ERR_NOT_FOUND,
-    KIVA_ERR_MALLOC,
-    KIVA_ERR_LEGACY_FORMAT
+    KIVA_ERR_NOT_FOUND = 1,
+    FILE_ERR_OPEN = 2,
+    FILE_ERR_WRITE = 3,
+    KIVA_ERR_INVALID_INPUT = 4,  // Erreur : Entrée NULL ou vide
+    KIVA_ERR_TYPE_MISMATCH = 5,   // Erreur : Valeur non conforme au type forcé
+    KIVA_ERR_MALLOC = 6,
+    KIVA_ERR_LEGACY_FORMAT = 7
 } KivaStatus;
 
+/**
+ * Types de données supportés par KivaDB
+ */
 typedef enum {
+    KIVA_TYPE_UNKNOWN = 0,
     KIVA_TYPE_STRING = 1,
     KIVA_TYPE_NUMBER = 2,
-    KIVA_TYPE_BOOLEAN = 3,
-    KIVA_TYPE_UNKNOWN = 0
+    KIVA_TYPE_BOOLEAN = 3
 } KivaType;
 
+/**
+ * Entrée de l'index en mémoire (KeyDir)
+ */
 typedef struct {
-    int64_t offset;
-    uint32_t v_size;
-    KivaType type;
-    int64_t expires_at; 
+    int64_t offset;      // Position de la valeur dans le fichier
+    uint32_t v_size;     // Taille de la valeur
+    KivaType type;       // Type de donnée
+    int64_t expires_at;  // Timestamp Unix d'expiration (0 si infini)
 } KeyDirEntry;
 
 /* --- API PUBLIQUE --- */
 
+/**
+ * Initialisation et Fermeture
+ */
 KivaDB* kiva_open(const char* path);
 void kiva_close(KivaDB* db);
+KivaStatus kiva_reset(KivaDB* db); // Nouvelle fonction pour Reset complet
 
-// Set standard
+/**
+ * Opérations de Stockage
+ */
+// Set standard (Type auto-détecté)
 KivaStatus kiva_set(KivaDB* db, const char* key, const char* value);
 
-// Set avec Type forcé
-KivaStatus kiva_set_with_type(KivaDB* db, const char* key, const char* value, KivaType forced_type);
-
-// Set étendu avec Type ET TTL (Utilisé par le Shell)
+// Set étendu avec Type ET TTL (utilisé par le Shell)
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec);
 
+/**
+ * Opérations de Lecture et Suppression
+ */
 char* kiva_get(KivaDB* db, const char* key);
 KivaStatus kiva_delete(KivaDB* db, const char* key);
+const char* kiva_typeof(KivaDB* db, const char* key);
+
+/**
+ * Maintenance et Utilitaires
+ */
 KivaStatus kiva_compact(KivaDB* db);
 int64_t kiva_get_file_size(const char* path);
-const char* kiva_typeof(KivaDB* db, const char* key);
 
 #endif
