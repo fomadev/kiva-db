@@ -52,6 +52,9 @@ int  index_get_count(KivaDB* db);
 // Détecte automatiquement le type (String, Number, Boolean) d'une chaîne
 KivaType detect_type(const char* value);
 
+int is_valid_number(const char* s);
+int is_valid_boolean(const char* s);
+
 // Détecte si le fichier est en format V1 ou V2
 int kiva_detect_format(FILE* file);
 
