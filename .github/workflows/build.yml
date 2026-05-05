@@ -50,14 +50,17 @@ jobs:
           mkdir -p obj
           
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Sur Windows avec MSYS2, la commande est 'mingw32-make'
+            # Sur Windows avec MSYS2
             mingw32-make
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            # On force Clang sur Mac pour une meilleure compatibilité Apple
+            make CC=clang CXX=clang++
           else
-            # Sur Linux et macOS, c'est 'make'
+            # Sur Linux
             make
           fi
           
-          # Renommage vers le nom final
+          # Renommage vers le nom final défini dans la matrice
           if [ -f "kivadb.exe" ]; then
             mv kivadb.exe ${{ matrix.output }}
           elif [ -f "kivadb" ]; then
