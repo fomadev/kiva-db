@@ -13,7 +13,7 @@ static bool is_bare(char d) { return d == 0; }
 
 /**
  * Gère la commande SET avec validation stricte des types et des délimiteurs.
- * RÈGLE : Si une valeur est entre guillemets, elle est forcée en STRING.
+ * RÈGLE : Si une valeur est bare (sans quotes), elle DOIT être un nombre ou un booléen.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
@@ -51,17 +51,30 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
         }
 
         char val_delim = delimiters[i+1];
+        std::string val_str = tokens[i+1];
 
-        // LOGIQUE DE DÉTECTION AUTOMATIQUE (Si pas de type forcé explicitement)
+        // LOGIQUE DE DÉTECTION ET VALIDATION STRICTE
         if (forced == KIVA_TYPE_UNKNOWN) {
             if (is_string_quote(val_delim)) {
-                // RÈGLE : Présence de quotes = Forçage en STRING (ex: "74" -> string)
+                // RÈGLE : Présence de quotes = STRING
                 forced = KIVA_TYPE_STRING;
+            } 
+            else {
+                // RÈGLE DE FER : Sans quotes = DOIT être un nombre ou un booléen
+                // On utilise la logique d'inférence de KivaDB (ou une fonction utilitaire)
+                // Ici, on simule l'appel à ton moteur C pour vérifier le type potentiel
+                KivaType inferred = kiva_identify_type(val_str.c_str()); 
+
+                if (inferred == KIVA_TYPE_STRING) {
+                    // C'est du texte nu qui n'est ni un nombre ni un booléen -> REFUS
+                    std::cout << "Error: String values like '" << val_str << "' must be quoted (\"\" or '').\n";
+                    i += 2; continue;
+                }
+                forced = inferred;
             }
-            // Si bare (0), KivaDB (côté C) fera l'inférence naturelle (number/boolean)
         } 
         else {
-            // VALIDATION SI TYPE FORCÉ EXPLICITEMENT
+            // VALIDATION SI TYPE FORCÉ EXPLICITEMENT (ex: set string age 44)
             if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
                 if (!is_bare(val_delim)) {
                     std::cout << "Error: Numbers and Booleans must not be quoted.\n";
@@ -76,7 +89,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             }
         }
 
-        // Cas particulier : on refuse les backticks sur les valeurs dans tous les cas
+        // Cas particulier : on refuse les backticks sur les valeurs
         if (is_backtick(val_delim)) {
             std::cout << "Error: Value for '" << tokens[i] << "' cannot use backticks.\n";
             i += 2; continue;
@@ -89,7 +102,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             free(exists); i += 2; continue;
         }
 
-        KivaStatus status = kiva_set_ex(*db, tokens[i].c_str(), tokens[i+1].c_str(), forced, global_ttl);
+        KivaStatus status = kiva_set_ex(*db, tokens[i].c_str(), val_str.c_str(), forced, global_ttl);
         if (status == KIVA_OK) {
             std::cout << "OK: " << tokens[i] << " saved.\n";
         } else {
@@ -101,7 +114,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
 }
 
 /**
- * Gère la mise à jour avec protection du type existant.
+ * Gère la mise à jour avec protection du type existant et validation des bare values.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     for (size_t i = 1; i + 1 < tokens.size(); ) {
@@ -114,22 +127,30 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
 
         if (i + 1 >= tokens.size()) break;
 
-        // Récupérer le type actuel en base
         const char* current_type = kiva_typeof(*db, tokens[i].c_str());
-        
         if (strcmp(current_type, "none") == 0) {
             std::cout << "Error: Key '" << tokens[i] << "' not found.\n";
             i += 2; continue;
         }
 
         char val_delim = delimiters[i+1];
+        std::string val_str = tokens[i+1];
 
-        // Détection automatique pour la mise à jour si pas de type forcé
-        if (forced == KIVA_TYPE_UNKNOWN && is_string_quote(val_delim)) {
-            forced = KIVA_TYPE_STRING;
+        // Détection automatique pour Update avec la même règle de fer
+        if (forced == KIVA_TYPE_UNKNOWN) {
+            if (is_string_quote(val_delim)) {
+                forced = KIVA_TYPE_STRING;
+            } else {
+                KivaType inferred = kiva_identify_type(val_str.c_str());
+                if (inferred == KIVA_TYPE_STRING) {
+                    std::cout << "Error: String values must be quoted.\n";
+                    i += 2; continue;
+                }
+                forced = inferred;
+            }
         }
 
-        // Protection : si on précise un type, il doit correspondre à l'existant
+        // Protection : concordance avec le type existant
         if (forced != KIVA_TYPE_UNKNOWN) {
             std::string type_str = current_type;
             bool mismatch = false;
@@ -143,13 +164,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             }
         }
 
-        // Validation finale des délimiteurs pour types numériques/booléens
-        if (!is_bare(val_delim) && (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN)) {
-             std::cout << "Error: Numbers and Booleans must not be quoted.\n";
-             i += 2; continue;
-        }
-
-        kiva_set_ex(*db, tokens[i].c_str(), tokens[i+1].c_str(), forced, 0);
+        kiva_set_ex(*db, tokens[i].c_str(), val_str.c_str(), forced, 0);
         std::cout << "OK: " << tokens[i] << " updated.\n";
         i += 2;
     }
