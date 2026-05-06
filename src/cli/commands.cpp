@@ -131,49 +131,61 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
 
         if (i + 1 >= tokens.size()) break;
 
-        // Pas besoin de vérifier is_reserved_keyword ici car SET l'aura déjà bloqué, 
-        // mais on le laisse par sécurité si on modifie le comportement futur.
+        // 1. Protection contre les mots-clés réservés
         if (is_reserved_keyword(tokens[i])) {
             std::cout << "Error: '" << tokens[i] << "' is reserved.\n";
             i += 2; continue;
         }
 
-        const char* current_type = kiva_typeof(*db, tokens[i].c_str());
-        if (strcmp(current_type, "none") == 0) {
+        // 2. Vérification de l'existence et récupération du type actuel
+        const char* current_type_str = kiva_typeof(*db, tokens[i].c_str());
+        if (strcmp(current_type_str, "none") == 0) {
             std::cout << "Error: Key '" << tokens[i] << "' not found.\n";
             i += 2; continue;
         }
 
         char val_delim = delimiters[i+1];
         std::string val_str = tokens[i+1];
+        KivaType detected_type = KIVA_TYPE_UNKNOWN;
 
-        if (forced == KIVA_TYPE_UNKNOWN) {
-            if (is_string_quote(val_delim)) {
-                forced = KIVA_TYPE_STRING;
-            } else {
-                KivaType inferred = kiva_identify_type(val_str.c_str());
-                if (inferred == KIVA_TYPE_STRING) {
-                    std::cout << "Error: String values must be quoted.\n";
-                    i += 2; continue;
-                }
-                forced = inferred;
-            }
-        }
-
-        if (forced != KIVA_TYPE_UNKNOWN) {
-            std::string type_str = current_type;
-            bool mismatch = false;
-            if (forced == KIVA_TYPE_STRING && type_str != "string") mismatch = true;
-            if (forced == KIVA_TYPE_NUMBER && type_str != "number") mismatch = true;
-            if (forced == KIVA_TYPE_BOOLEAN && type_str != "boolean") mismatch = true;
-
-            if (mismatch) {
-                std::cout << "Error: Type mismatch. Key '" << tokens[i] << "' is a [" << current_type << "].\n";
+        // 3. ANALYSE STRICTE DE LA NOUVELLE VALEUR
+        if (is_string_quote(val_delim)) {
+            detected_type = KIVA_TYPE_STRING;
+        } else {
+            detected_type = kiva_identify_type(val_str.c_str());
+            // RÈGLE DE FER : Si c'est du texte sans quotes, on refuse
+            if (detected_type == KIVA_TYPE_STRING) {
+                std::cout << "Error: String values must be quoted (\"\" or '').\n";
                 i += 2; continue;
             }
         }
 
-        kiva_set_ex(*db, tokens[i].c_str(), val_str.c_str(), forced, 0);
+        // 4. VALIDATION DE LA CONCORDANCE (TYPE EXISTANT VS NOUVEL TYPE)
+        // Si l'utilisateur a forcé un type (ex: update string j ...), il doit correspondre à l'existant
+        if (forced != KIVA_TYPE_UNKNOWN) {
+            std::string actual(current_type_str);
+            if ((forced == KIVA_TYPE_STRING && actual != "string") ||
+                (forced == KIVA_TYPE_NUMBER && actual != "number") ||
+                (forced == KIVA_TYPE_BOOLEAN && actual != "boolean")) {
+                std::cout << "Error: Type mismatch. '" << tokens[i] << "' is a [" << current_type_str << "].\n";
+                i += 2; continue;
+            }
+        }
+
+        // 5. VALIDATION DU FORMAT DE LA VALEUR PAR RAPPORT AU TYPE RÉEL
+        // Même si on ne force pas le type, la valeur fournie doit être compatible avec le type en base
+        std::string actual(current_type_str);
+        if ((actual == "string" && detected_type != KIVA_TYPE_STRING) ||
+            (actual == "number" && detected_type != KIVA_TYPE_NUMBER) ||
+            (actual == "boolean" && detected_type != KIVA_TYPE_BOOLEAN)) {
+            std::cout << "Error: Cannot update [" << actual << "] with a value formatted as [" 
+                      << (detected_type == KIVA_TYPE_NUMBER ? "number" : (detected_type == KIVA_TYPE_BOOLEAN ? "boolean" : "string")) 
+                      << "].\n";
+            i += 2; continue;
+        }
+
+        // 6. EXECUTION
+        kiva_set_ex(*db, tokens[i].c_str(), val_str.c_str(), detected_type, 0);
         std::cout << "OK: " << tokens[i] << " updated.\n";
         i += 2;
     }
