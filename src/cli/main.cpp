@@ -30,20 +30,7 @@ extern "C" {
 /**
  * Affiche l'aide utilisateur pour les commandes du shell.
  */
-void print_help() {
-    std::cout << "\nAvailable commands:\n"
-              << "  set <key> <value>          Insert or update a key\n"
-              << "  get <key>                  Retrieve value of a key\n"
-              << "  update <key> <value>       Update an existing key only\n"
-              << "  change <old> <new>         Rename a key\n"
-              << "  del <key>                  Remove a key\n"
-              << "  typeof <key>               Show data type\n"
-              << "  scan                       List all keys\n"
-              << "  stats                      Show database statistics\n"
-              << "  compact                    Optimize storage size\n"
-              << "  clear                      Clear screen\n"
-              << "  exit                       Close shell\n\n";
-}
+void print_help();
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
