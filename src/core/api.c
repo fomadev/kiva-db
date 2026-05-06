@@ -124,6 +124,29 @@ KivaType kiva_identify_type(const char* value) {
     return KIVA_TYPE_STRING;
 }
 
+KivaStatus kiva_rename(KivaDB* db, const char* old_key, const char* new_key) {
+    if (!db || !old_key || !new_key) return KIVA_ERR_INVALID_INPUT;
+
+    char* value = kiva_get(db, old_key);
+    if (!value) return KIVA_ERR_NOT_FOUND;
+
+    // Récupérer le type actuel pour le conserver
+    const char* type_str = kiva_typeof(db, old_key);
+    KivaType current_type = KIVA_TYPE_STRING;
+    if (strcmp(type_str, "number") == 0) current_type = KIVA_TYPE_NUMBER;
+    else if (strcmp(type_str, "boolean") == 0) current_type = KIVA_TYPE_BOOLEAN;
+
+    // Créer la nouvelle clé avec les mêmes données
+    KivaStatus status = kiva_set_ex(db, new_key, value, current_type, 0);
+    
+    if (status == KIVA_OK) {
+        kiva_delete(db, old_key); // Supprimer l'ancienne
+    }
+
+    free(value);
+    return status;
+}
+
 /**
  * Retourne le nom du type de la donnée pour le CLI.
  */

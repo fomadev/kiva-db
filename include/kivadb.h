@@ -82,12 +82,11 @@ KivaStatus kiva_set(KivaDB* db, const char* key, const char* value);
 // Set étendu avec Type ET TTL (utilisé par le Shell)
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec);
 
-/**
- * Opérations de Lecture et Suppression
- */
+/* --- Opérations de Lecture et Suppression --- */
 char* kiva_get(KivaDB* db, const char* key);
 KivaStatus kiva_delete(KivaDB* db, const char* key);
 const char* kiva_typeof(KivaDB* db, const char* key);
+KivaStatus kiva_rename(KivaDB* db, const char* old_key, const char* new_key);
 
 /**
  * Maintenance et Utilitaires
