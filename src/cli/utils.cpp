@@ -1,17 +1,26 @@
+#include "utils.hpp"
 #include <iostream>
 
+/**
+ * Affiche l'aide du Shell KivaDB avec les précisions sur le typage strict.
+ */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help ---\n"
-              << "  set [type] <key> <val> [ttl <sec>]  : Save a value (strictly typed).\n"
-              << "  update [type] <key> <val>           : Update existing key (checks type compatibility).\n"
-              << "  get <key1> and <key2>               : Retrieve values.\n"
-              << "  del <key> / del all keys            : Remove data.\n"
-              << "  typeof <key>                        : Show data type of a key.\n"
-              << "  change <old> to <new>               : Rename a key.\n"
-              << "  scan                                : List all indexed keys.\n"
-              << "  stats                               : Database file statistics.\n"
-              << "  compact                             : Reorganize storage to save space.\n"
-              << "  clear                               : Clear shell screen.\n"
-              << "  exit                                : Close KivaDB.\n"
-              << "-------------------------\n\n";
+    std::cout << "\n--- KivaDB Shell Help (v2.1.0 STL) ---\n"
+              << "  RELIABILITY RULES:\n"
+              << "  - Strings MUST be quoted: \"value\" or 'value'.\n"
+              << "  - Numbers & Booleans MUST NOT be quoted: 42, 3.14, true.\n"
+              << "  - Reserved keywords (set, get, string, etc.) cannot be used as keys.\n"
+              << "\n  COMMANDS:\n"
+              << "  set [type] <key> <val> [ttl <sec>]  : Save a value. Quotes define strings.\n"
+              << "  update [type] <key> <val>           : Update value (must match existing type).\n"
+              << "  get [type] <key1> and <key2>        : Retrieve values (optional type check).\n"
+              << "  del [type] <key> / del all keys     : Remove data (optional type check).\n"
+              << "  typeof <key>                        : Show the stored data type.\n"
+              << "  change <old> to <new>               : Rename a key (new key must be unique).\n"
+              << "  scan                                : List all keys with types and sizes.\n"
+              << "  stats                               : Show DB file and memory statistics.\n"
+              << "  compact                             : Reorganize storage and remove stale data.\n"
+              << "  clear                               : Clear the terminal screen.\n"
+              << "  exit                                : Safely close KivaDB and exit.\n"
+              << "----------------------------------------\n\n";
 }
