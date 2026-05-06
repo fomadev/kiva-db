@@ -47,42 +47,40 @@ jobs:
       - name: Compile KivaDB
         shell: bash
         run: |
-          # Création du dossier d'objets requis par le Makefile
           mkdir -p obj
           
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Compilation avec MinGW sur Windows[cite: 9]
+            # Windows : On garde le statique car MinGW le permet
             mingw32-make
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # Force Clang pour macOS
-            make CC=clang CXX=clang++
+            # macOS : INTERDICTION du statique (LDFLAGS vide pour éviter -static)[cite: 10]
+            make CC=clang CXX=clang++ LDFLAGS="-lstdc++"
           else
-            # Compilation standard Linux[cite: 9]
+            # Linux : Compilation standard statique[cite: 10]
             make
           fi
           
-          # Renommage du binaire final selon la matrice
+          # Renommage du binaire
           if [ -f "kivadb.exe" ]; then
             mv kivadb.exe ${{ matrix.output }}
           elif [ -f "kivadb" ]; then
             mv kivadb ${{ matrix.output }}
           fi
 
-      # --- Archivage pour préserver les permissions (chmod +x) ---
+      # --- Archivage intelligent ---
       - name: Archive Binary
         shell: bash
         run: |
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Format ZIP pour Windows
-            zip ${{ matrix.output }}.zip ${{ matrix.output }}
+            # Utilisation de 7z car 'zip' est absent sur GitHub Windows Runner
+            7z a ${{ matrix.output }}.zip ${{ matrix.output }}
             echo "ASSET=${{ matrix.output }}.zip" >> $GITHUB_ENV
           else
-            # Format tar.gz pour Linux/Mac afin de garder les droits d'exécution
+            # tar.gz pour Linux et Mac (garde les permissions)
             tar -czvf ${{ matrix.output }}.tar.gz ${{ matrix.output }}
             echo "ASSET=${{ matrix.output }}.tar.gz" >> $GITHUB_ENV
           fi
 
-      # --- Upload de l'artéfact final ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
