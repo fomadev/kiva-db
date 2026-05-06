@@ -47,28 +47,44 @@ jobs:
       - name: Compile KivaDB
         shell: bash
         run: |
+          # Création du dossier d'objets requis par le Makefile
           mkdir -p obj
           
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Sur Windows avec MSYS2
+            # Compilation avec MinGW sur Windows[cite: 9]
             mingw32-make
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # On force Clang sur Mac pour une meilleure compatibilité Apple
+            # Force Clang pour macOS
             make CC=clang CXX=clang++
           else
-            # Sur Linux
+            # Compilation standard Linux[cite: 9]
             make
           fi
           
-          # Renommage vers le nom final défini dans la matrice
+          # Renommage du binaire final selon la matrice
           if [ -f "kivadb.exe" ]; then
             mv kivadb.exe ${{ matrix.output }}
           elif [ -f "kivadb" ]; then
             mv kivadb ${{ matrix.output }}
           fi
 
+      # --- Archivage pour préserver les permissions (chmod +x) ---
+      - name: Archive Binary
+        shell: bash
+        run: |
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            # Format ZIP pour Windows
+            zip ${{ matrix.output }}.zip ${{ matrix.output }}
+            echo "ASSET=${{ matrix.output }}.zip" >> $GITHUB_ENV
+          else
+            # Format tar.gz pour Linux/Mac afin de garder les droits d'exécution
+            tar -czvf ${{ matrix.output }}.tar.gz ${{ matrix.output }}
+            echo "ASSET=${{ matrix.output }}.tar.gz" >> $GITHUB_ENV
+          fi
+
+      # --- Upload de l'artéfact final ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: kivadb-${{ matrix.os-name }}-${{ matrix.arch }}
-          path: ${{ matrix.output }}
+          path: ${{ env.ASSET }}
