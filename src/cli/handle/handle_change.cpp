@@ -46,7 +46,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
                 i += 3; continue;
             }
 
-            // D. Exécution du renommage via l'API C[cite: 3]
+            // D. Exécution du renommage via l'API C
             if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
                 std::cout << "OK: " << old_key << " -> " << new_key << "\n";
             } else {

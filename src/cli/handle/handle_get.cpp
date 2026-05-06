@@ -66,12 +66,12 @@ void handle_get(KivaDB** db, const std::vector<std::string>& tokens, const std::
         if (res) {
             // Affichage formaté avec le type pour la clarté du shell
             std::cout << tokens[i] << ": " << res << " [" << actual_type_str << "]\n";
-            free(res); // Crucial : libérer la mémoire allouée par le moteur C[cite: 2]
+            free(res); // Crucial : libérer la mémoire allouée par le moteur C
         } else {
             std::cout << tokens[i] << ": (nil)\n";
         }
 
-        // 6. Reset du type pour permettre une requête différente après un "and"[cite: 2]
+        // 6. Reset du type pour permettre une requête différente après un "and"
         requested_type = KIVA_TYPE_UNKNOWN;
     }
 }

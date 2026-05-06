@@ -25,7 +25,7 @@ void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
         // Appel au moteur C pour récupérer le type (string, number, boolean ou none)
         const char* type = kiva_typeof(*db, tokens[i].c_str());
 
-        // Affichage du résultat[cite: 2]
+        // Affichage du résultat
         if (std::strcmp(type, "none") == 0 || std::strcmp(type, "undefined") == 0) {
             std::cout << " -> " << tokens[i] << " does not exist (nil)\n";
         } else {

@@ -43,7 +43,7 @@ void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char*
             continue; 
         }
         
-        // Ignorer le mot-clé de liaison "and"[cite: 2]
+        // Ignorer le mot-clé de liaison "and"
         if (tokens[i] == "and") {
             continue;
         }
@@ -75,7 +75,7 @@ void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char*
             }
         }
 
-        // 4. Suppression effective via l'API C[cite: 3]
+        // 4. Suppression effective via l'API C
         if (kiva_delete(*db, tokens[i].c_str()) == KIVA_OK) {
             std::cout << "Deleted: " << tokens[i] << "\n";
         } else {

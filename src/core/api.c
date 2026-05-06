@@ -8,7 +8,7 @@
 
 /**
  * Définit une clé avec un type forcé et un TTL (Time To Live).
- * Version avec validation stricte des types[cite: 2].
+ * Version avec validation stricte des types.
  */
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec) {
     // 1. Vérification des entrées (Interdire les valeurs NULL ou vides pour la cohérence)
@@ -16,7 +16,7 @@ KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType 
         return KIVA_ERR_INVALID_INPUT;
     }
 
-    // 2. Validation stricte si un type est spécifié[cite: 2]
+    // 2. Validation stricte si un type est spécifié
     if (forced_type == KIVA_TYPE_NUMBER && !is_valid_number(value)) {
         return KIVA_ERR_TYPE_MISMATCH;
     }
@@ -104,7 +104,7 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
 }
 
 /**
- * Identifie dynamiquement le type d'une valeur textuelle[cite: 2].
+ * Identifie dynamiquement le type d'une valeur textuelle.
  */
 KivaType kiva_identify_type(const char* value) {
     if (!value) return KIVA_TYPE_STRING;

@@ -1,24 +1,24 @@
 # KivaDB (v2.1.0)
 
-KivaDB is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid C/C++ architecture[cite: 9]. It combines the low-level efficiency of C for storage operations with the power of C++ STL for advanced indexing and TTL (Time To Live) management[cite: 3, 9].
+KivaDB is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid C/C++ architecture. It combines the low-level efficiency of C for storage operations with the power of C++ STL for advanced indexing and TTL (Time To Live) management.
 
-Designed for speed and simplicity, KivaDB utilizes an Append-Only File (AOF) storage strategy and a memory-mapped index to ensure high read performance[cite: 8, 9].
+Designed for speed and simplicity, KivaDB utilizes an Append-Only File (AOF) storage strategy and a memory-mapped index to ensure high read performance.
 
 ## Key Features
 
-* **Hybrid Engine**: Core storage and transaction management implemented in C11, with optimized indexing in C++17[cite: 9].
+* **Hybrid Engine**: Core storage and transaction management implemented in C11, with optimized indexing in C++17.
 * **Persistent Storage**: Data persistence across restarts using a robust binary format with a signature-based header (`KIVA`).
 * **Smart TTL Support**: Native support for expiring keys, managed via lazy deletion during boot and data access.
 * **Type Safety**: Built-in type inference and validation for String, Number, and Boolean types.
-* **Advanced Shell**: A feature-rich CLI supporting quoted strings (`""`, `''`), reserved keyword protection, and command chaining[cite: 4, 7].
-* **Maintenance Suite**: Integrated tools for database scanning, real-time statistics, and automatic compaction to optimize disk usage[cite: 3, 4].
+* **Advanced Shell**: A feature-rich CLI supporting quoted strings (`""`, `''`), reserved keyword protection, and command chaining.
+* **Maintenance Suite**: Integrated tools for database scanning, real-time statistics, and automatic compaction to optimize disk usage.
 
 ## Architecture
 
 KivaDB is organized into three distinct functional layers:
 
-1. **The Shell (CLI)**: Manages user input, command parsing, and request validation[cite: 9].
-2. **The Index (C++)**: A `std::map` based index storing key metadata and file offsets for logarithmic-time lookups[cite: 3, 9].
+1. **The Shell (CLI)**: Manages user input, command parsing, and request validation.
+2. **The Index (C++)**: A `std::map` based index storing key metadata and file offsets for logarithmic-time lookups.
 3. **The Storage (C)**: Manages binary I/O operations, file format integrity (V2), and the append-only log.
 
 ## Getting Started
@@ -108,23 +108,23 @@ Once compiled, launch the executable:
 </table>
 
 ## File Format (v2.1)
-KivaDB uses a structured binary format to ensure data reliability and rapid recovery[cite: 3, 8]:
+KivaDB uses a structured binary format to ensure data reliability and rapid recovery:
 
 ### Header (12 bytes)
 * **Signature** (4 bytes): `KIVA`
 
 * **Version** (4 bytes): Format version (V1 or V2)  
 
-* **Reserved** (4 bytes): Aligned for future extensions[cite: 3]
+* **Reserved** (4 bytes): Aligned for future extensions
 
 ### Data Entry
 * **k_size** (uint32): Length of the key  
 
 * **v_size** (uint32): Length of the value (0 indicates a deletion marker)  
 
-* **type** (uint8): Data type identifier (String, Number, Boolean)[cite: 3, 8]
+* **type** (uint8): Data type identifier (String, Number, Boolean)
 
-* **expires_at** (int64): Unix timestamp for expiration (0 for permanent)[cite: 3, 8]
+* **expires_at** (int64): Unix timestamp for expiration (0 for permanent)
 
 * **key**: Variable length key name  
 
