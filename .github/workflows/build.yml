@@ -17,7 +17,7 @@ jobs:
           - os: windows-latest
             os-name: windows
             arch: x64
-            output: kivadb_win_x64.exe
+            output: kivadb_win_x64
 
           - os: macos-latest 
             os-name: macos
@@ -50,37 +50,38 @@ jobs:
           mkdir -p obj
           
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Windows : On garde le statique car MinGW le permet
+            # Windows : Compilation avec MinGW
             mingw32-make
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # macOS : INTERDICTION du statique (LDFLAGS vide pour éviter -static)[cite: 10]
+            # macOS : Utilisation de clang et interdiction du statique
             make CC=clang CXX=clang++ LDFLAGS="-lstdc++"
           else
-            # Linux : Compilation standard statique[cite: 10]
+            # Linux : Compilation standard via le Makefile
             make
           fi
           
-          # Renommage du binaire
-          if [ -f "kivadb.exe" ]; then
-            mv kivadb.exe ${{ matrix.output }}
-          elif [ -f "kivadb" ]; then
-            mv kivadb ${{ matrix.output }}
-          fi
+          # Note : On ne renomme PAS le binaire ici pour garder le nom standard (kivadb).
 
       # --- Archivage intelligent ---
       - name: Archive Binary
         shell: bash
         run: |
+          # Définition du nom de l'exécutable produit par le Makefile
+          BINARY_NAME="kivadb"
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Utilisation de 7z car 'zip' est absent sur GitHub Windows Runner
-            7z a ${{ matrix.output }}.zip ${{ matrix.output }}
+            BINARY_NAME="kivadb.exe"
+            
+            # On crée un ZIP nommé selon l'architecture contenant le binaire standard
+            7z a ${{ matrix.output }}.zip $BINARY_NAME
             echo "ASSET=${{ matrix.output }}.zip" >> $GITHUB_ENV
           else
-            # tar.gz pour Linux et Mac (garde les permissions)
-            tar -czvf ${{ matrix.output }}.tar.gz ${{ matrix.output }}
+            # On crée un tar.gz nommé selon l'architecture contenant le binaire standard
+            # tar conserve les permissions d'exécution sur Linux/macOS
+            tar -czvf ${{ matrix.output }}.tar.gz $BINARY_NAME
             echo "ASSET=${{ matrix.output }}.tar.gz" >> $GITHUB_ENV
           fi
 
+      # --- Publication de l'artéfact ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
