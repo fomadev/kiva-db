@@ -1,14 +1,20 @@
-// Dans src/cli/commands.hpp
 #ifndef KIVADB_COMMANDS_HPP
 #define KIVADB_COMMANDS_HPP
 
 #include <vector>
 #include <string>
+
 extern "C" {
     #include "../../include/kivadb.h"
 }
 
-// Change KivaDB* en KivaDB** pour tous les prototypes
+// Utilitaires partagés (définis dans handle_utils.cpp)
+bool is_string_quote(char d);
+bool is_backtick(char d);
+bool is_bare(char d);
+bool is_reserved_keyword(const std::string& key);
+
+// Prototypes des commandes
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 void handle_get(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
