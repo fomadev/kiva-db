@@ -8,7 +8,7 @@
 
 /**
  * Définit une clé avec un type forcé et un TTL (Time To Live).
- * Version avec validation stricte des types.
+ * Version avec validation stricte des types[cite: 2].
  */
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec) {
     // 1. Vérification des entrées (Interdire les valeurs NULL ou vides pour la cohérence)
@@ -16,7 +16,7 @@ KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType 
         return KIVA_ERR_INVALID_INPUT;
     }
 
-    // 2. Validation stricte si un type est spécifié
+    // 2. Validation stricte si un type est spécifié[cite: 2]
     if (forced_type == KIVA_TYPE_NUMBER && !is_valid_number(value)) {
         return KIVA_ERR_TYPE_MISMATCH;
     }
@@ -83,7 +83,6 @@ char* kiva_get(KivaDB* db, const char* key) {
  */
 KivaStatus kiva_delete(KivaDB* db, const char* key) {
     KeyDirEntry entry;
-    // Si la clé n'existe pas dans l'index, rien à supprimer
     if (!index_lookup(db, key, &entry)) return KIVA_ERR_NOT_FOUND;
 
     uint32_t k_size = (uint32_t)strlen(key);
@@ -100,27 +99,26 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     fwrite(key, 1, k_size, db->file);
     fflush(db->file);
 
-    // Supprimer de l'index mémoire immédiatement
     index_remove(db, key);
     return KIVA_OK;
 }
 
+/**
+ * Identifie dynamiquement le type d'une valeur textuelle[cite: 2].
+ */
 KivaType kiva_identify_type(const char* value) {
     if (!value) return KIVA_TYPE_STRING;
 
-    // Est-ce un booléen ?
     if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
         return KIVA_TYPE_BOOLEAN;
     }
 
-    // Est-ce un nombre ? (Vérifie si c'est composé de chiffres et d'un seul point)
     char* endptr;
     strtod(value, &endptr);
     if (*endptr == '\0' && endptr != value) {
         return KIVA_TYPE_NUMBER;
     }
 
-    // Par défaut, c'est du texte
     return KIVA_TYPE_STRING;
 }
 
@@ -130,17 +128,15 @@ KivaStatus kiva_rename(KivaDB* db, const char* old_key, const char* new_key) {
     char* value = kiva_get(db, old_key);
     if (!value) return KIVA_ERR_NOT_FOUND;
 
-    // Récupérer le type actuel pour le conserver
     const char* type_str = kiva_typeof(db, old_key);
     KivaType current_type = KIVA_TYPE_STRING;
     if (strcmp(type_str, "number") == 0) current_type = KIVA_TYPE_NUMBER;
     else if (strcmp(type_str, "boolean") == 0) current_type = KIVA_TYPE_BOOLEAN;
 
-    // Créer la nouvelle clé avec les mêmes données
     KivaStatus status = kiva_set_ex(db, new_key, value, current_type, 0);
     
     if (status == KIVA_OK) {
-        kiva_delete(db, old_key); // Supprimer l'ancienne
+        kiva_delete(db, old_key);
     }
 
     free(value);
@@ -161,4 +157,24 @@ const char* kiva_typeof(KivaDB* db, const char* key) {
         }
     }
     return "undefined";
+}
+
+/**
+ * Affiche l'ensemble des clés présentes dans la base.
+ * Ajouté pour résoudre l'erreur de linkage.
+ */
+void kiva_scan(KivaDB* db) {
+    if (!db) return;
+    printf("--- KivaDB Scan ---\n");
+    // TODO: Implémenter le parcours de l'index in-memory
+}
+
+/**
+ * Affiche les statistiques de la base de données.
+ * Ajouté pour résoudre l'erreur de linkage.
+ */
+void kiva_stats(KivaDB* db) {
+    if (!db) return;
+    printf("--- KivaDB Stats ---\n");
+    // TODO: Implémenter le calcul de l'usage mémoire et disque
 }

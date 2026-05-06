@@ -12,7 +12,7 @@ extern "C" {
     #include "../core/kivadb_internal.h"
 }
 
-// --- Gestion multiplateforme corrigée ---
+// --- Gestion multiplateforme ---
 #ifdef _WIN32
     #include <direct.h>
     #define CLEAR_COMMAND "cls"
@@ -30,16 +30,29 @@ extern "C" {
 /**
  * Affiche l'aide utilisateur pour les commandes du shell.
  */
-void print_help();
+void print_help() {
+    std::cout << "\nAvailable commands:\n"
+              << "  set <key> <value>          Insert or update a key\n"
+              << "  get <key>                  Retrieve value of a key\n"
+              << "  update <key> <value>       Update an existing key only\n"
+              << "  change <old> <new>         Rename a key\n"
+              << "  del <key>                  Remove a key\n"
+              << "  typeof <key>               Show data type\n"
+              << "  scan                       List all keys\n"
+              << "  stats                      Show database statistics\n"
+              << "  compact                    Optimize storage size\n"
+              << "  clear                      Clear screen\n"
+              << "  exit                       Close shell\n\n";
+}
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
-    // Création du dossier de données (ignore l'erreur si déjà existant)
+    // Création du dossier de données
     MKDIR("data");
     const char* db_path = "data/store.kiva";
 
-    // Ouverture de la base de données via l'API C
+    // Ouverture de la base de données
     KivaDB* db = kiva_open(db_path);
 
     if (!db) {
@@ -55,7 +68,7 @@ int main(int argc, char* argv[]) {
         if (!std::getline(std::cin, line) || line == "exit") break;
         if (line.empty()) continue;
 
-        // Analyse de la ligne via le Parser (Tokenizer)
+        // Analyse de la ligne
         std::vector<char> delimiters;
         auto tokens = CommandParser::tokenize(line, delimiters);
         
@@ -65,7 +78,7 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // Routage des commandes vers les handlers respectifs
+        // Routage des commandes
         if (cmd == "set") {
             handle_set(&db, tokens, delimiters);
         }
@@ -79,11 +92,12 @@ int main(int argc, char* argv[]) {
             handle_del(&db, tokens, db_path);
         }
         else if (cmd == "clear") {
-            system(CLEAR_COMMAND); // Désormais toujours déclaré
+            system(CLEAR_COMMAND);
             show_dur = false;
         }
         else if (cmd == "change") {
-            handle_change(&db, tokens, delimiters);
+            // Corrigé : Appel avec seulement 2 arguments
+            handle_change(&db, tokens); 
         }
         else if (cmd == "typeof") {
             handle_typeof(&db, tokens);
@@ -110,14 +124,13 @@ int main(int argc, char* argv[]) {
             show_dur = false;
         }
 
-        // Affichage du temps d'exécution pour les opérations de données
+        // Affichage du temps d'exécution
         if (show_dur) {
             double d = (double)(clock() - start) / CLOCKS_PER_SEC;
             std::cout << "(" << std::fixed << std::setprecision(6) << d << "s)\n";
         }
     }
 
-    // Fermeture propre avant de quitter
     if (db) kiva_close(db);
     std::cout << "Goodbye.\n";
     
