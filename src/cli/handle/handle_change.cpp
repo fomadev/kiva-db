@@ -3,43 +3,61 @@
 #include <cstring>
 
 /**
- * Gère le renommage d'une clé existante.
- * Syntaxe : change <old_key> to <new_key>
+ * Gère le renommage de clés existantes.
+ * Supporte le chaînage : change <old> to <new> and <old2> to <new2>
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
-    // 1. Validation de la syntaxe
-    if (tokens.size() < 4 || tokens[2] != "to") {
-        std::cout << "Usage: change <old_key> to <new_key>\n";
+    // 1. Validation minimale de la taille pour une opération simple
+    if (tokens.size() < 4) {
+        std::cout << "Usage: change <old_key> to <new_key> [and <old2> to <new2>...]\n";
         return;
     }
 
-    std::string old_key = tokens[1];
-    std::string new_key = tokens[3];
+    // 2. Boucle de traitement pour gérer le chaînage avec 'and'
+    for (size_t i = 1; i + 2 < tokens.size(); ) {
+        // Ignorer le mot-clé de liaison "and"
+        if (tokens[i] == "and") { 
+            i++; 
+            continue; 
+        }
 
-    // 2. Vérification des mots-clés réservés pour la nouvelle clé
-    if (is_reserved_keyword(new_key)) {
-        std::cout << "Error: '" << new_key << "' is a reserved keyword and cannot be used as a key name.\n";
-        return;
-    }
+        // On vérifie la présence du mot-clé "to" (ex: change a TO b)
+        if (tokens[i + 1] == "to") {
+            std::string old_key = tokens[i];
+            std::string new_key = tokens[i + 2];
 
-    // 3. Vérification de l'existence de la clé source
-    const char* type_old = kiva_typeof(*db, old_key.c_str());
-    if (std::strcmp(type_old, "none") == 0) {
-        std::cout << "Error: Source key '" << old_key << "' does not exist.\n";
-        return;
-    }
+            // A. Protection contre les mots-clés réservés pour la destination
+            if (is_reserved_keyword(new_key)) {
+                std::cout << "Error: Target '" << new_key << "' is a reserved keyword.\n";
+                i += 3; continue;
+            }
 
-    // 4. Vérification de collision (la destination ne doit pas déjà exister)
-    const char* type_new = kiva_typeof(*db, new_key.c_str());
-    if (std::strcmp(type_new, "none") != 0) {
-        std::cout << "Error: Target key '" << new_key << "' already exists. Use 'update' or 'del' first.\n";
-        return;
-    }
+            // B. Vérification de l'existence de la source
+            const char* type_old = kiva_typeof(*db, old_key.c_str());
+            if (std::strcmp(type_old, "none") == 0 || std::strcmp(type_old, "undefined") == 0) {
+                std::cout << "Error: Source '" << old_key << "' not found.\n";
+                i += 3; continue;
+            }
 
-    // 5. Exécution du renommage via l'API
-    if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
-        std::cout << "OK: '" << old_key << "' renamed to '" << new_key << "'.\n";
-    } else {
-        std::cout << "Error: Failed to rename key.\n";
+            // C. Vérification de collision (la destination ne doit pas exister)
+            const char* type_new = kiva_typeof(*db, new_key.c_str());
+            if (std::strcmp(type_new, "none") != 0 && std::strcmp(type_new, "undefined") != 0) {
+                std::cout << "Error: Target '" << new_key << "' already exists.\n";
+                i += 3; continue;
+            }
+
+            // D. Exécution du renommage via l'API C[cite: 3]
+            if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
+                std::cout << "OK: " << old_key << " -> " << new_key << "\n";
+            } else {
+                std::cout << "Error: Failed to rename '" << old_key << "'.\n";
+            }
+
+            i += 3; // On avance de 3 (old + to + new)
+        } else {
+            // Si la syntaxe est incorrecte (ex: manque le "to")
+            std::cout << "Error: Expected 'to' after '" << tokens[i] << "'.\n";
+            break;
+        }
     }
 }
