@@ -94,7 +94,10 @@ const char* kiva_typeof(KivaDB* db, const char* key);
  */
 KivaStatus kiva_compact(KivaDB* db);
 int64_t kiva_get_file_size(const char* path);
+void kiva_scan(KivaDB* db);
+void kiva_stats(KivaDB* db);
 
 
 KivaType kiva_identify_type(const char* value);
+
 #endif

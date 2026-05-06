@@ -5,13 +5,7 @@
 #include <algorithm>
 
 /**
- * NOTE : Les fonctions handle_set, handle_get, handle_update, handle_del 
- * et handle_change sont maintenant définies dans le dossier src/cli/handle/
- * et liées lors de la compilation.
- */
-
-/**
- * Gère la commande TYPEOF (Relais simple car la logique est courte)
+ * Gère la commande TYPEOF
  */
 void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
     if (tokens.size() < 2) {
@@ -21,31 +15,31 @@ void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
 
     for (size_t i = 1; i < tokens.size(); i++) {
         if (tokens[i] == "and") continue;
-        
         const char* type = kiva_typeof(*db, tokens[i].c_str());
         std::cout << " -> " << tokens[i] << " is a [" << type << "]\n";
     }
 }
 
 /**
- * Gère SCAN (Affiche toutes les clés avec leurs métadonnées)
+ * Gère SCAN
  */
 void handle_scan(KivaDB** db) {
-    kiva_scan(*db);
+    kiva_scan(*db); // Utilise *db pour passer le pointeur simple
 }
 
 /**
- * Gère STATS (Statistiques de stockage)
+ * Gère STATS
  */
 void handle_stats(KivaDB** db) {
-    kiva_stats(*db);
+    kiva_stats(*db); // Utilise *db
 }
 
 /**
- * Gère COMPACT (Réorganisation du fichier de stockage)
+ * Gère COMPACT
  */
 void handle_compact(KivaDB** db) {
     std::cout << "Compacting database...\n";
-    kiva_compact(db);
-    std::cout << "Compactation terminée.\n";
+    // CORRECTION ICI : passage de *db au lieu de db
+    kiva_compact(*db); 
+    std::cout << "Compactation terminee.\n";
 }
