@@ -17,17 +17,20 @@ jobs:
           - os: windows-latest
             os-name: windows
             arch: x64
-            output: kivadb_win_x64
+            output_name: kivadb_win_x64
+            binary_ext: .exe
 
           - os: macos-latest 
             os-name: macos
             arch: arm64
-            output: kivadb_mac_arm64
+            output_name: kivadb_mac_arm64
+            binary_ext: ""
 
           - os: ubuntu-latest
             os-name: linux
             arch: x64
-            output: kivadb_linux_x64
+            output_name: kivadb_linux_x64
+            binary_ext: ""
 
     runs-on: ${{ matrix.os }}
 
@@ -50,38 +53,41 @@ jobs:
           mkdir -p obj
           
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Windows : Compilation avec MinGW
+            # Windows : Compilation statique avec MinGW[cite: 11]
             mingw32-make
           elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # macOS : Utilisation de clang et interdiction du statique
+            # macOS : Pas de statique, utilisation de Clang[cite: 10]
             make CC=clang CXX=clang++ LDFLAGS="-lstdc++"
           else
-            # Linux : Compilation standard via le Makefile
+            # Linux : Compilation standard[cite: 11]
             make
           fi
           
-          # Note : On ne renomme PAS le binaire ici pour garder le nom standard (kivadb).
+          # On uniformise le nom du binaire produit par le Makefile (kivadb.exe)[cite: 11]
+          # vers un nom simple 'kivadb' (ou 'kivadb.exe' sur Windows)
+          if [ -f "kivadb.exe" ]; then
+            if [[ "${{ matrix.os }}" != "windows-latest" ]]; then
+               mv kivadb.exe kivadb
+            fi
+          fi
 
       # --- Archivage intelligent ---
       - name: Archive Binary
         shell: bash
         run: |
-          # Définition du nom de l'exécutable produit par le Makefile
-          BINARY_NAME="kivadb"
+          # Le nom du fichier à l'intérieur de l'archive sera "kivadb" (ou kivadb.exe)
+          # Mais le nom du pack (l'archive) contiendra l'architecture.
+          
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            BINARY_NAME="kivadb.exe"
-            
-            # On crée un ZIP nommé selon l'architecture contenant le binaire standard
-            7z a ${{ matrix.output }}.zip $BINARY_NAME
-            echo "ASSET=${{ matrix.output }}.zip" >> $GITHUB_ENV
+            # Archive : kivadb_win_x64.zip | Contenu : kivadb.exe
+            7z a ${{ matrix.output_name }}.zip kivadb.exe
+            echo "ASSET=${{ matrix.output_name }}.zip" >> $GITHUB_ENV
           else
-            # On crée un tar.gz nommé selon l'architecture contenant le binaire standard
-            # tar conserve les permissions d'exécution sur Linux/macOS
-            tar -czvf ${{ matrix.output }}.tar.gz $BINARY_NAME
-            echo "ASSET=${{ matrix.output }}.tar.gz" >> $GITHUB_ENV
+            # Archive : kivadb_macos_arm64.tar.gz | Contenu : kivadb
+            tar -czvf ${{ matrix.output_name }}.tar.gz kivadb
+            echo "ASSET=${{ matrix.output_name }}.tar.gz" >> $GITHUB_ENV
           fi
 
-      # --- Publication de l'artéfact ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
