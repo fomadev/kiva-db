@@ -160,7 +160,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.0.2.1 STL with TTL support) ---\n";
+    std::cout << "\n--- KivaDB Scan (v2.1.0 STL with TTL support) ---\n";
     for (const auto& [key, entry] : map) {
         std::string status = "";
         if (entry.expires_at > 0) {

@@ -1,4 +1,4 @@
-# KivaDB (v2.0.2.1)
+# KivaDB (v2.1.0)
 
 **KivaDB** is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid **C/C++ architecture**. It combines the low-level efficiency of C for storage with the power of C++ STL for advanced indexing and TTL (Time To Live) management.
 
