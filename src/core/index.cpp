@@ -89,7 +89,6 @@ void index_remove(KivaDB* db, const char* key) {
 
 /**
  * kiva_internal_compact_step : Le cœur du nettoyage physique.
- * Cette fonction filtre les données expirées et réorganise le fichier pour gagner de l'espace.
  */
 void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
     if (!db || !db->cpp_index || !temp_file) return;
@@ -97,7 +96,6 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
     
-    // Structure temporaire pour stocker les données valides avant réécriture
     struct ValidEntry { 
         std::string key; 
         std::string val; 
@@ -106,14 +104,12 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
     };
     std::vector<ValidEntry> valid_entries;
 
-    // 1. Parcours de l'index actuel pour collecter ce qui n'est pas expiré
     for (auto it = map.begin(); it != map.end(); ) {
         if (it->second.expires_at > 0 && it->second.expires_at < now) {
-            it = map.erase(it); // Suppression de la map
+            it = map.erase(it); 
             continue;
         }
 
-        // Lecture de la valeur réelle dans l'ancien fichier
         char* val_ptr = (char*)malloc(it->second.v_size + 1);
         fseek(db->file, it->second.offset, SEEK_SET);
         fread(val_ptr, 1, it->second.v_size, db->file);
@@ -124,10 +120,9 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         ++it;
     }
 
-    // 2. Réécriture propre dans le fichier temporaire (Format V2)
     for (const auto& e : valid_entries) {
-        uint32_t k_size = e.key.length();
-        uint32_t v_size = e.val.length();
+        uint32_t k_size = (uint32_t)e.key.length();
+        uint32_t v_size = (uint32_t)e.val.length();
         uint8_t t_byte = (uint8_t)e.type;
         int64_t exp = e.expires_at;
 
@@ -139,15 +134,9 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         fwrite(e.key.c_str(), 1, k_size, temp_file);
         fwrite(e.val.c_str(), 1, v_size, temp_file);
 
-        // 3. Mise à jour de l'index avec les nouveaux offsets du fichier compacté
         int64_t new_offset = (int64_t)(pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size);
         
-        KeyDirEntry updated_entry = { 
-            new_offset, 
-            v_size, 
-            e.type,
-            exp
-        };
+        KeyDirEntry updated_entry = { new_offset, v_size, e.type, exp };
         map[e.key] = updated_entry;
     }
 }
@@ -160,7 +149,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.1.0 STL with TTL support) ---\n";
+    std::cout << "\n--- KivaDB Scan (v2.1.1 STL with TTL support) ---\n";
     for (const auto& [key, entry] : map) {
         std::string status = "";
         if (entry.expires_at > 0) {
@@ -178,11 +167,38 @@ void index_scan(KivaDB* db) {
     std::cout << "Total: " << map.size() << " keys.\n--------------------------------\n";
 }
 
+/* --- Nouvelles fonctions pour l'API STATS (v2.1.1) --- */
+
 /**
- * Retourne le nombre de clés actives.
+ * Retourne le nombre exact de clés indexées.
  */
-int index_get_count(KivaDB* db) {
-    return (db && db->cpp_index) ? (int)static_cast<KivaIndex*>(db->cpp_index)->map.size() : 0;
+uint32_t index_get_count(KivaDB* db) {
+    if (!db || !db->cpp_index) return 0;
+    return (uint32_t)static_cast<KivaIndex*>(db->cpp_index)->map.size();
+}
+
+/**
+ * Calcule l'usage mémoire approximatif de l'index en RAM.
+ * (Estimation : Taille des clés + taille des structures KeyDirEntry)
+ */
+size_t kiva_get_memory_usage(KivaDB* db) {
+    if (!db || !db->cpp_index) return 0;
+    auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
+    
+    size_t total = sizeof(KivaIndex);
+    for (const auto& [key, entry] : map) {
+        total += key.capacity(); // Taille du string
+        total += sizeof(KeyDirEntry); // Taille de la valeur d'index
+        total += 32; // Overhang approximatif pour les nodes de l'unordered_map
+    }
+    return total;
+}
+
+/**
+ * Retourne le chemin de la base de données.
+ */
+const char* kiva_get_path(KivaDB* db) {
+    return (db) ? db->db_path : "Unknown";
 }
 
 } // extern "C"

@@ -43,9 +43,6 @@ void index_remove(KivaDB* db, const char* key);
 // Affiche l'état de l'index (Debug)
 void index_scan(KivaDB* db);
 
-// Retourne le nombre total de clés actives
-int  index_get_count(KivaDB* db);
-
 
 // --- Fonctions de Format et Type (Implémentées dans format_v2.c) ---
 

@@ -179,28 +179,20 @@ void kiva_stats(KivaDB* db) {
     // TODO: Implémenter le calcul de l'usage mémoire et disque
 }
 
-/**
- * Retourne le chemin du fichier de la base de données
- */
 const char* kiva_get_db_path(KivaDB* db) {
     return (db) ? db->path : NULL;
 }
 
-/**
- * Retourne le nombre d'entrées dans l'index
- */
+// Cette fonction va appeler une fonction C++ que nous allons créer à l'étape 4
+extern uint32_t cpp_index_get_count(void* cpp_index);
+
 uint32_t index_get_count(KivaDB* db) {
-    if (!db) return 0;
-    // Remplacez par votre variable réelle stockant le nombre de clés
-    return db->index_count; 
+    if (!db || !db->cpp_index) return 0;
+    return cpp_index_get_count(db->cpp_index);
 }
 
-/**
- * Calcule l'usage mémoire approximatif
- */
 size_t kiva_get_memory_usage(KivaDB* db) {
     if (!db) return 0;
-    size_t base_size = sizeof(KivaDB);
-    // Estimation : nombre de clés * (taille entrée + moyenne taille clé)
-    return base_size + (index_get_count(db) * (sizeof(KeyDirEntry) + 24));
+    // Taille de la structure + (nombre de clés * estimation taille entrée index)
+    return sizeof(KivaDB) + (index_get_count(db) * 64); 
 }

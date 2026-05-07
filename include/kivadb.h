@@ -1,7 +1,7 @@
 #ifndef KIVADB_H
 #define KIVADB_H
 
-#define KIVADB_VERSION "2.1.0"
+#define KIVADB_VERSION "2.1.1"
 #define MAGIC_SIGNATURE "KIVA"
 #define FORMAT_V1 1
 #define FORMAT_V2 2
@@ -17,6 +17,14 @@
     #include <sys/stat.h>
     #include <sys/types.h>
     #define MKDIR(dir) mkdir(dir, 0755)
+#endif
+
+/* 
+ * Pour assurer la compatibilité C++, on englobe les déclarations 
+ * si le header est inclus dans un fichier .cpp
+ */
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 typedef struct KivaDB KivaDB;
@@ -71,7 +79,7 @@ typedef struct {
  */
 KivaDB* kiva_open(const char* path);
 void kiva_close(KivaDB* db);
-KivaStatus kiva_reset(KivaDB* db); // Nouvelle fonction pour Reset complet
+KivaStatus kiva_reset(KivaDB* db); 
 
 /**
  * Opérations de Stockage
@@ -82,7 +90,9 @@ KivaStatus kiva_set(KivaDB* db, const char* key, const char* value);
 // Set étendu avec Type ET TTL (utilisé par le Shell)
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec);
 
-/* --- Opérations de Lecture et Suppression --- */
+/**
+ * Opérations de Lecture et Suppression
+ */
 char* kiva_get(KivaDB* db, const char* key);
 KivaStatus kiva_delete(KivaDB* db, const char* key);
 const char* kiva_typeof(KivaDB* db, const char* key);
@@ -96,10 +106,16 @@ int64_t kiva_get_file_size(const char* path);
 void kiva_scan(KivaDB* db);
 void kiva_stats(KivaDB* db);
 
-uint32_t index_get_count(KivaDB* db);      // Récupère le nombre de clés
-size_t kiva_get_memory_usage(KivaDB* db);  // Calcule l'usage RAM
+/**
+ * Getters et Introspection (Indispensables pour STATS et Shell)
+ */
+const char* kiva_get_path(KivaDB* db);           // Récupère le chemin du fichier DB
+uint32_t index_get_count(KivaDB* db);            // Nombre de clés actives
+size_t kiva_get_memory_usage(KivaDB* db);        // Estimation RAM de l'index
+KivaType kiva_identify_type(const char* value);  // Analyseur de type de chaîne
 
-
-KivaType kiva_identify_type(const char* value);
-
+#ifdef __cplusplus
+}
 #endif
+
+#endif /* KIVADB_H */
