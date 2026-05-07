@@ -144,6 +144,25 @@ KivaStatus kiva_rename(KivaDB* db, const char* old_key, const char* new_key) {
 }
 
 /**
+ * Calcule l'usage approximatif de la mémoire par l'index KeyDir.
+ */
+size_t kiva_get_memory_usage(KivaDB* db) {
+    if (!db) return 0;
+
+    size_t total_mem = sizeof(KivaDB);
+    
+    // Estimation basée sur le nombre d'entrées dans l'index
+    // Chaque entrée KeyDirEntry occupe une taille fixe, plus la taille de la chaîne de caractères (clé)
+    // index_get_count() est une fonction interne supposée renvoyer db->index_count
+    uint32_t count = index_get_count(db); 
+    
+    // Structure d'une entrée + estimation moyenne pour le stockage des clés dans la map
+    total_mem += count * (sizeof(KeyDirEntry) + 32); 
+
+    return total_mem;
+}
+
+/**
  * Retourne le nom du type de la donnée pour le CLI.
  */
 const char* kiva_typeof(KivaDB* db, const char* key) {
