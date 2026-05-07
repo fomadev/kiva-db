@@ -2,8 +2,13 @@
 #include <iostream>
 #include <iomanip>
 
-// Importation des fonctions internes non présentes dans kivadb.h
-extern uint32_t index_get_count(KivaDB* db);
+// Déclarations des fonctions externes pour faire le lien avec le moteur C
+extern "C" {
+    const char* kiva_get_path(KivaDB* db);
+    uint32_t index_get_count(KivaDB* db);
+    long long kiva_get_file_size(const char* path);
+    size_t kiva_get_memory_usage(KivaDB* db);
+}
 
 /**
  * Gère la commande STATS
@@ -18,9 +23,7 @@ void handle_stats(KivaDB** db) {
     uint32_t keys = index_get_count(*db);
 
     // 2. Taille du fichier 
-    // CORRECTION : Utilisez kiva_get_path(*db) si vous avez une fonction getter, 
-    // ou assurez-vous que la struct est visible. 
-    // Si la struct est opaque, utilisez l'API :
+    // Utilisation du path récupéré via le getter pour obtenir la taille
     long long f_size = kiva_get_file_size(kiva_get_path(*db)); 
 
     // 3. Usage mémoire
