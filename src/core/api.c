@@ -8,15 +8,13 @@
 
 /**
  * Définit une clé avec un type forcé et un TTL (Time To Live).
- * Version avec validation stricte des types.
  */
 KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType forced_type, int ttl_sec) {
-    // 1. Vérification des entrées (Interdire les valeurs NULL ou vides pour la cohérence)
     if (!db || !key || !value || *value == '\0') {
         return KIVA_ERR_INVALID_INPUT;
     }
 
-    // 2. Validation stricte si un type est spécifié
+    // Validation stricte si un type est spécifié
     if (forced_type == KIVA_TYPE_NUMBER && !is_valid_number(value)) {
         return KIVA_ERR_TYPE_MISMATCH;
     }
@@ -24,17 +22,14 @@ KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType 
         return KIVA_ERR_TYPE_MISMATCH;
     }
 
-    // 3. Détermination du type final
-    KivaType type = (forced_type == KIVA_TYPE_UNKNOWN) ? detect_type(value) : forced_type;
+    KivaType type = (forced_type == KIVA_TYPE_UNKNOWN) ? kiva_identify_type(value) : forced_type;
     uint8_t type_byte = (uint8_t)type;
 
     uint32_t k_size = (uint32_t)strlen(key);
     uint32_t v_size = (uint32_t)strlen(value);
     
-    // Calcul de la date d'expiration (timestamp Unix)
     int64_t expires_at = (ttl_sec > 0) ? ((int64_t)time(NULL) + ttl_sec) : 0;
 
-    // 4. Écriture sur le disque (Append-only)
     fseek(db->file, 0, SEEK_END);
     int64_t pos = ftell(db->file);
 
@@ -46,24 +41,16 @@ KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType 
     fwrite(value, 1, v_size, db->file);
     fflush(db->file);
 
-    // 5. Mise à jour de l'index en mémoire
-    // L'offset de la valeur est : position_debut + en-têtes + taille_clé
     int64_t value_offset = pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size;
     index_set_ex(db, key, value_offset, v_size, type, ttl_sec);
 
     return KIVA_OK;
 }
 
-/**
- * Définit une clé en mode automatique (Type deviné, pas de TTL).
- */
 KivaStatus kiva_set(KivaDB* db, const char* key, const char* value) {
     return kiva_set_ex(db, key, value, KIVA_TYPE_UNKNOWN, 0);
 }
 
-/**
- * Récupère la valeur d'une clé.
- */
 char* kiva_get(KivaDB* db, const char* key) {
     KeyDirEntry entry;
     if (index_lookup(db, key, &entry)) {
@@ -78,15 +65,12 @@ char* kiva_get(KivaDB* db, const char* key) {
     return NULL;
 }
 
-/**
- * Supprime une clé en écrivant un marqueur de suppression (Tombstone).
- */
 KivaStatus kiva_delete(KivaDB* db, const char* key) {
     KeyDirEntry entry;
     if (!index_lookup(db, key, &entry)) return KIVA_ERR_NOT_FOUND;
 
     uint32_t k_size = (uint32_t)strlen(key);
-    uint32_t v_size = 0; // Taille 0 = Supprimé
+    uint32_t v_size = 0; 
     int64_t expires_at = 0;
     uint8_t type_byte = (uint8_t)KIVA_TYPE_UNKNOWN;
 
@@ -103,21 +87,13 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     return KIVA_OK;
 }
 
-/**
- * Identifie dynamiquement le type d'une valeur textuelle.
- */
 KivaType kiva_identify_type(const char* value) {
     if (!value) return KIVA_TYPE_STRING;
-
-    if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) {
-        return KIVA_TYPE_BOOLEAN;
-    }
+    if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0) return KIVA_TYPE_BOOLEAN;
 
     char* endptr;
     strtod(value, &endptr);
-    if (*endptr == '\0' && endptr != value) {
-        return KIVA_TYPE_NUMBER;
-    }
+    if (*endptr == '\0' && endptr != value) return KIVA_TYPE_NUMBER;
 
     return KIVA_TYPE_STRING;
 }
@@ -134,18 +110,12 @@ KivaStatus kiva_rename(KivaDB* db, const char* old_key, const char* new_key) {
     else if (strcmp(type_str, "boolean") == 0) current_type = KIVA_TYPE_BOOLEAN;
 
     KivaStatus status = kiva_set_ex(db, new_key, value, current_type, 0);
-    
-    if (status == KIVA_OK) {
-        kiva_delete(db, old_key);
-    }
+    if (status == KIVA_OK) kiva_delete(db, old_key);
 
     free(value);
     return status;
 }
 
-/**
- * Retourne le nom du type de la donnée pour le CLI.
- */
 const char* kiva_typeof(KivaDB* db, const char* key) {
     KeyDirEntry entry;
     if (index_lookup(db, key, &entry)) {
@@ -159,40 +129,9 @@ const char* kiva_typeof(KivaDB* db, const char* key) {
     return "undefined";
 }
 
-/**
- * Affiche l'ensemble des clés présentes dans la base.
- * Ajouté pour résoudre l'erreur de linkage.
+/* 
+ * NOTE : Les fonctions kiva_scan, kiva_stats, kiva_get_path, index_get_count 
+ * et kiva_get_memory_usage ont été déplacées dans index.cpp pour éviter 
+ * les erreurs de "multiple definition". 
+ * Elles sont exposées via le bloc extern "C" dans index.cpp.
  */
-void kiva_scan(KivaDB* db) {
-    if (!db) return;
-    printf("--- KivaDB Scan ---\n");
-    // TODO: Implémenter le parcours de l'index in-memory
-}
-
-/**
- * Affiche les statistiques de la base de données.
- * Ajouté pour résoudre l'erreur de linkage.
- */
-void kiva_stats(KivaDB* db) {
-    if (!db) return;
-    printf("--- KivaDB Stats ---\n");
-    // TODO: Implémenter le calcul de l'usage mémoire et disque
-}
-
-const char* kiva_get_db_path(KivaDB* db) {
-    return (db) ? db->path : NULL;
-}
-
-// Cette fonction va appeler une fonction C++ que nous allons créer à l'étape 4
-extern uint32_t cpp_index_get_count(void* cpp_index);
-
-uint32_t index_get_count(KivaDB* db) {
-    if (!db || !db->cpp_index) return 0;
-    return cpp_index_get_count(db->cpp_index);
-}
-
-size_t kiva_get_memory_usage(KivaDB* db) {
-    if (!db) return 0;
-    // Taille de la structure + (nombre de clés * estimation taille entrée index)
-    return sizeof(KivaDB) + (index_get_count(db) * 64); 
-}

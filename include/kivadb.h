@@ -114,6 +114,8 @@ uint32_t index_get_count(KivaDB* db);            // Nombre de clés actives
 size_t kiva_get_memory_usage(KivaDB* db);        // Estimation RAM de l'index
 KivaType kiva_identify_type(const char* value);  // Analyseur de type de chaîne
 
+const char* kiva_get_db_path(KivaDB* db);
+
 #ifdef __cplusplus
 }
 #endif

@@ -65,7 +65,6 @@ int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
     auto it = map.find(key);
 
     if (it != map.end()) {
-        // Si le TTL est dépassé, on supprime de l'index et on fait comme si la clé n'existait pas
         if (it->second.expires_at > 0 && it->second.expires_at < std::time(nullptr)) {
             map.erase(it);
             return 0;
@@ -167,29 +166,33 @@ void index_scan(KivaDB* db) {
     std::cout << "Total: " << map.size() << " keys.\n--------------------------------\n";
 }
 
-/* --- Nouvelles fonctions pour l'API STATS (v2.1.1) --- */
+/* --- Implémentations pour l'API STATS & CHEMIN --- */
 
 /**
  * Retourne le nombre exact de clés indexées.
  */
 uint32_t index_get_count(KivaDB* db) {
     if (!db || !db->cpp_index) return 0;
-    return (uint32_t)static_cast<KivaIndex*>(db->cpp_index)->map.size();
+    auto* index = static_cast<KivaIndex*>(db->cpp_index);
+    return (uint32_t)index->map.size();
 }
 
 /**
  * Calcule l'usage mémoire approximatif de l'index en RAM.
- * (Estimation : Taille des clés + taille des structures KeyDirEntry)
  */
 size_t kiva_get_memory_usage(KivaDB* db) {
     if (!db || !db->cpp_index) return 0;
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     
-    size_t total = sizeof(KivaIndex);
-    for (const auto& [key, entry] : map) {
-        total += key.capacity(); // Taille du string
-        total += sizeof(KeyDirEntry); // Taille de la valeur d'index
-        total += 32; // Overhang approximatif pour les nodes de l'unordered_map
+    // Taille de base des structures
+    size_t total = sizeof(KivaDB) + sizeof(KivaIndex);
+    
+    // Itération pour estimer la consommation des entrées dynamiques
+    for (auto const& [key, val] : map) {
+        // key.capacity() : Mémoire allouée pour le texte de la clé
+        // sizeof(KeyDirEntry) : La structure de données fixe
+        // 32 : Estimation de l'overhead de gestion des nœuds de unordered_map (pointeurs next, buckets, etc.)
+        total += key.capacity() + sizeof(KeyDirEntry) + 32; 
     }
     return total;
 }
@@ -197,8 +200,8 @@ size_t kiva_get_memory_usage(KivaDB* db) {
 /**
  * Retourne le chemin de la base de données.
  */
-const char* kiva_get_path(KivaDB* db) {
-    return (db) ? db->db_path : "Unknown";
+const char* kiva_get_db_path(KivaDB* db) {
+    return (db) ? db->path : "Unknown";
 }
 
 } // extern "C"
