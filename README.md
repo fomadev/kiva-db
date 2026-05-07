@@ -91,7 +91,7 @@ Once compiled, launch the executable:
         </tr>
         <tr>
             <td><strong>stats</strong></td>
-            <td>View database health and storage metrics</td>
+            <td>Monitor key count, storage size, and memory usage</td>
             <td><code>stats</code></td>
         </tr>
         <tr>
