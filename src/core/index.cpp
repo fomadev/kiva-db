@@ -180,20 +180,30 @@ uint32_t index_get_count(KivaDB* db) {
 /**
  * Calcule l'usage mémoire approximatif de l'index en RAM.
  */
+/**
+ * Calcule l'usage mémoire approximatif de l'index en RAM.
+ * Cette fonction parcourt la map pour estimer la mémoire consommée sur le tas (heap).
+ */
 size_t kiva_get_memory_usage(KivaDB* db) {
-    if (!db || !db->cpp_index) return 0;
+    if (!db || !db->cpp_index) {
+        return 0;
+    }
+
+    // Récupération de la référence vers la map C++
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     
-    // Taille de base des structures
+    // 1. Taille de base des structures fixes
     size_t total = sizeof(KivaDB) + sizeof(KivaIndex);
     
-    // Itération pour estimer la consommation des entrées dynamiques
+    // 2. Itération pour estimer la consommation des données dynamiques
     for (auto const& [key, val] : map) {
-        // key.capacity() : Mémoire allouée pour le texte de la clé
-        // sizeof(KeyDirEntry) : La structure de données fixe
-        // 32 : Estimation de l'overhead de gestion des nœuds de unordered_map (pointeurs next, buckets, etc.)
+        // key.capacity() : La mémoire réelle allouée pour le texte de la clé
+        // sizeof(KeyDirEntry) : La structure contenant offset, v_size, type et expiry
+        // 32 : Estimation de l'overhead par nœud dans une std::unordered_map 
+        //      (pointeurs de chaînage, buckets, et métadonnées d'allocation)
         total += key.capacity() + sizeof(KeyDirEntry) + 32; 
     }
+
     return total;
 }
 
