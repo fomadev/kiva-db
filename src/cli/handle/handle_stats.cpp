@@ -1,18 +1,11 @@
+/* --- Dans src/cli/handle/handle_stats.cpp --- */
 #include "../commands.hpp"
 #include <iostream>
 #include <iomanip>
 
-// Déclarations des fonctions externes pour faire le lien avec le moteur C
-extern "C" {
-    const char* kiva_get_path(KivaDB* db);
-    uint32_t index_get_count(KivaDB* db);
-    long long kiva_get_file_size(const char* path);
-    size_t kiva_get_memory_usage(KivaDB* db);
-}
+// Ajout de l'accès à la fonction de chemin si non présente dans commands.hpp
+extern "C" const char* kiva_get_db_path(KivaDB* db);
 
-/**
- * Gère la commande STATS
- */
 void handle_stats(KivaDB** db) {
     if (!db || !*db) {
         std::cout << "Error: Database not initialized.\n";
@@ -22,9 +15,9 @@ void handle_stats(KivaDB** db) {
     // 1. Nombre de clés
     uint32_t keys = index_get_count(*db);
 
-    // 2. Taille du fichier 
-    // Utilisation du path récupéré via le getter pour obtenir la taille
-    long long f_size = kiva_get_file_size(kiva_get_path(*db)); 
+    // 2. Taille du fichier (Utilisation de la fonction wrapper pour le chemin)
+    const char* path = kiva_get_db_path(*db);
+    long long f_size = kiva_get_file_size(path);
 
     // 3. Usage mémoire
     size_t mem_usage = kiva_get_memory_usage(*db);
@@ -45,6 +38,5 @@ void handle_stats(KivaDB** db) {
         std::cout << " > Memory Usage  : " << std::fixed << std::setprecision(2) 
                   << (mem_usage / 1024.0) << " KB\n";
     }
-    
     std::cout << "----------------------------------\n";
 }

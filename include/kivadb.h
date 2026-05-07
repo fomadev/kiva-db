@@ -95,13 +95,10 @@ KivaStatus kiva_compact(KivaDB* db);
 int64_t kiva_get_file_size(const char* path);
 void kiva_scan(KivaDB* db);
 void kiva_stats(KivaDB* db);
-size_t kiva_get_memory_usage(KivaDB* db);
 
-/**
- * Getters et introspection
- */
-const char* kiva_get_path(KivaDB* db);           // Ajouté pour résoudre l'erreur de compilation
-uint32_t index_get_count(KivaDB* db);            // Ajouté pour les statistiques de clés
+uint32_t index_get_count(KivaDB* db);      // Récupère le nombre de clés
+size_t kiva_get_memory_usage(KivaDB* db);  // Calcule l'usage RAM
+
 
 KivaType kiva_identify_type(const char* value);
 

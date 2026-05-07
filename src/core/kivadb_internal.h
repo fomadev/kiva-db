@@ -71,6 +71,9 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file);
 int  kiva_lock_file(FILE* file);
 void kiva_unlock_file(FILE* file);
 
+
+const char* kiva_get_db_path(KivaDB* db);
+
 #ifdef __cplusplus
 }
 #endif
