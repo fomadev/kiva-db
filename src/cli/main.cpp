@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.1.0\nType 'help' or 'h' for command list\n";
+    std::cout << "KivaDB Shell v2.1.1\nType 'help' or 'h' for command list\n";
 
     std::string line;
     while (true) {
@@ -94,8 +94,7 @@ int main(int argc, char* argv[]) {
             show_dur = false;
         }
         else if (cmd == "stats") {
-            std::cout << "Indexed Keys: " << index_get_count(db) 
-                      << " | Storage: " << kiva_get_file_size(db_path) << " bytes\n";
+            handle_stats(&db); 
             show_dur = false;
         }
         else if (cmd == "compact") {
