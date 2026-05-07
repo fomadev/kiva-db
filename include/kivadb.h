@@ -95,6 +95,7 @@ KivaStatus kiva_compact(KivaDB* db);
 int64_t kiva_get_file_size(const char* path);
 void kiva_scan(KivaDB* db);
 void kiva_stats(KivaDB* db);
+size_t kiva_get_memory_usage(KivaDB* db);
 
 
 KivaType kiva_identify_type(const char* value);
