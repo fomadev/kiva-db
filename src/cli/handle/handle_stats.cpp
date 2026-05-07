@@ -12,11 +12,10 @@ void handle_stats(KivaDB** db) {
         return;
     }
 
-    // 1. Récupération des données via l'API
-    // Utilisation des fonctions exposées par index.cpp via extern "C"
+    // 1. Récupération des données via l'API (déclarée dans kivadb.h)
     uint32_t keys = index_get_count(*db);
     
-    // CORRECTION : Appel de kiva_get_db_path pour correspondre à l'étape 2
+    // On récupère le chemin via la fonction dédiée car la structure est opaque
     const char* path = kiva_get_db_path(*db); 
     
     long long f_size = kiva_get_file_size(path);
@@ -27,10 +26,8 @@ void handle_stats(KivaDB** db) {
     std::cout << "    KivaDB Statistics (v" << KIVADB_VERSION << ")" << std::endl;
     std::cout << std::setfill('-') << std::setw(36) << "" << std::setfill(' ') << std::endl;
 
-    // Affichage du nombre de clés
     std::cout << " > Total Keys      : " << keys << std::endl;
 
-    // Affichage de la taille du fichier sur le disque
     std::cout << " > Storage Size    : ";
     if (f_size < 1024) {
         std::cout << f_size << " bytes" << std::endl;
@@ -40,7 +37,6 @@ void handle_stats(KivaDB** db) {
         std::cout << std::fixed << std::setprecision(2) << (f_size / (1024.0 * 1024.0)) << " MB" << std::endl;
     }
 
-    // Affichage de l'usage estimé de la RAM par l'index
     std::cout << " > RAM Usage       : ";
     if (mem_usage < 1024) {
         std::cout << mem_usage << " bytes" << std::endl;
