@@ -5,6 +5,13 @@
 #include <algorithm>
 #include <cstring>
 
+
+/**
+ * NOTE : Les handlers (set, get, update, del, change, stats) 
+ * sont définis dans le dossier src/cli/handle/
+ */
+ 
+
 /**
  * Gère la commande TYPEOF pour identifier le type de données stocké.
  * Supporte le chaînage via le mot-clé 'and'.
@@ -39,13 +46,6 @@ void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
  */
 void handle_scan(KivaDB** db) {
     kiva_scan(*db); // Utilise *db pour passer le pointeur simple
-}
-
-/**
- * Gère STATS
- */
-void handle_stats(KivaDB** db) {
-    kiva_stats(*db); // Utilise *db
 }
 
 /**

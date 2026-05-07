@@ -23,4 +23,6 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens);
 void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens);
 void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char* db_path);
 
+void handle_stats(KivaDB** db);
+
 #endif
