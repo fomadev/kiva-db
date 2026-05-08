@@ -1,21 +1,24 @@
-MIT License
+FomaDev Public License (FPL)
 
-Copyright (c) 2026
+Copyright (c) 2026 FomaDev. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license protects KivaDB innovation while encouraging community collaboration.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Personal and Educational Use
+The use of compiled KivaDB versions (CLI program) is entirely free, including within a company for commercial projects. You may use the tool to manage your data without any payment to FomaDev.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. Contributions (Fork & Pull Request)
+Forks are authorized ONLY for contributing to the official FomaDev project. Any improvements must be submitted via a Pull Request. By contributing, you agree that your code will be integrated under this same license.
+
+3. Commercial Use and Competition (PAID)
+A paid commercial license is MANDATORY for the following cases:
+- Selling or distributing a modified version of the source code.
+- Integrating KivaDB source code directly into another commercial software.
+- Creating a paid Cloud service based on the KivaDB engine.
+- Developing derivative products or databases based on this code.
+
+4. Prohibition of Independent Forks
+Maintaining a separate version (permanent Fork) of this project to bypass FomaDev's authority is strictly prohibited.
+
+5. Licensing Contact
+To obtain commercial authorization or negotiate an exploitation license, contact Fordi (FomaDev) directly.

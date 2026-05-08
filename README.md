@@ -129,3 +129,13 @@ KivaDB uses a structured binary format to ensure data reliability and rapid reco
 * **key**: Variable length key name  
 
 * **value**: Variable length value data
+
+## ⚖️ License
+
+This project is licensed under the **FomaDev Public License (FPL)**.
+
+- **Free for use**: You can use the compiled KivaDB CLI for personal and commercial projects for free.
+- **Source Code**: For reproduction, modification, or integration into commercial products, a paid license is required.
+- **Contributions**: Forks are permitted only for contributing back to the official repository via Pull Requests.
+
+See the [LICENSE](LICENSE) file for full details.

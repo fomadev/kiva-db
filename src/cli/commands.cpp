@@ -45,7 +45,7 @@ void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
  * Gère SCAN
  */
 void handle_scan(KivaDB** db) {
-    kiva_scan(*db); // Utilise *db pour passer le pointeur simple
+    kiva_scan(*db);
 }
 
 /**
@@ -53,7 +53,6 @@ void handle_scan(KivaDB** db) {
  */
 void handle_compact(KivaDB** db) {
     std::cout << "Compacting database...\n";
-    // CORRECTION ICI : passage de *db au lieu de db
     kiva_compact(*db); 
     std::cout << "Compactation terminee.\n";
 }
