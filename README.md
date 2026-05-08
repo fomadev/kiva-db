@@ -31,8 +31,8 @@ KivaDB is organized into three distinct functional layers:
 ### Installation
 The project includes a unified Makefile for compilation:
 ```bash
-git clone https://github.com/fomadev/KivaDB.git
-cd KivaDB
+git clone https://github.com/fomadev/kiva-db.git
+cd kiva-db
 make clean
 make
 ```
