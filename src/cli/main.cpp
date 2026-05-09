@@ -8,6 +8,7 @@
 #include <vector>
 #include <iomanip>
 #include <ctime>
+#include <algorithm>
 
 #include "parser.hpp"
 #include "commands.hpp"
@@ -42,6 +43,14 @@ void print_help();
  */
 bool is_kiva_type(const std::string& t) {
     return (t == "string" || t == "number" || t == "boolean");
+}
+
+/**
+ * Vérifie si une chaîne de caractères est un nombre entier positif.
+ */
+bool is_number(const std::string& s) {
+    return !s.empty() && std::find_if(s.begin(), s.end(), 
+        [](unsigned char c) { return !std::isdigit(c); }) == s.end();
 }
 
 int main(int argc, char* argv[]) {
@@ -81,14 +90,12 @@ int main(int argc, char* argv[]) {
         // --- ROUTAGE VERSION 2.1.1.5 (STRICT ERROR MODE) ---
 
         if (cmd == "set") {
-            // Analyse des jetons pour valider les formats avec TTL
-            // Format n=5 : set <key> <value> ttl <sec>
+            // Analyse des jetons pour valider le TTL si présent
+            // Format 5: set <k> <v> ttl <sec>
             bool has_ttl_5 = (n == 5 && tokens[3] == "ttl" && is_number(tokens[4]));
-            
-            // Format n=6 : set <type> <key> <value> ttl <sec>
+            // Format 6: set <t> <k> <v> ttl <sec>
             bool has_ttl_6 = (n == 6 && is_kiva_type(tokens[1]) && tokens[4] == "ttl" && is_number(tokens[5]));
             
-            // Validation globale
             bool ok = (n == 3) || 
                       (n == 4 && is_kiva_type(tokens[1])) || 
                       has_ttl_5 || 
@@ -97,19 +104,16 @@ int main(int argc, char* argv[]) {
             if (ok) {
                 handle_set(&db, tokens, delimiters);
             } else {
-                // Gestion d'erreur spécifique pour le TTL non numérique
+                // Message d'erreur spécifique pour le TTL mal formé
                 if ((n == 5 && tokens[3] == "ttl") || (n == 6 && tokens[4] == "ttl")) {
-                    // On vérifie si l'erreur vient spécifiquement du fait que le dernier token n'est pas un chiffre
                     std::cerr << "Error: TTL must be a positive number." << std::endl;
                 } else {
-                    // Erreur de syntaxe générale
                     std::cerr << "Error: Invalid set syntax.\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
                 }
                 show_dur = false;
             }
         }
         else if (cmd == "get") {
-            // Formats: get k (2), get t k (3)
             bool ok = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
             if (ok) {
                 handle_get(&db, tokens, delimiters);
@@ -119,7 +123,6 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "update") {
-            // Formats: update k v (3), update t k v (4)
             bool ok = (n == 3) || (n == 4 && is_kiva_type(tokens[1]));
             if (ok) {
                 handle_update(&db, tokens, delimiters);
@@ -129,16 +132,10 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "del") {
-            // Formats supportés : 
-            // 1. del <key> (n=2)
-            // 2. del <type> <key> (n=3 && type valide : string, number, boolean)
-            // 3. del all keys (n=3 && tokens[1]=="all" && tokens[2]=="keys")
-            
             bool is_reset = (n == 3 && tokens[1] == "all" && tokens[2] == "keys");
             bool is_standard = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
 
             if (is_reset) {
-                // Appel direct au moteur pour réinitialiser la base
                 KivaStatus status = kiva_reset(db);
                 if (status == KIVA_OK) {
                     std::cout << "All keys deleted. Database reset." << std::endl;
@@ -147,11 +144,9 @@ int main(int argc, char* argv[]) {
                 }
             } 
             else if (is_standard) {
-                // Suppression d'une clé spécifique
                 handle_del(&db, tokens, db_path);
             } 
             else {
-                // Erreur de syntaxe (le Mode Strict rejette "del all" ou "del key extra")
                 std::cerr << "Error: Invalid del syntax.\nUsage: del [type] <key> OR del all keys" << std::endl;
                 show_dur = false;
             }
@@ -165,7 +160,6 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "change") {
-            // Format strict: change <old> to <new>
             if (n == 4 && tokens[2] == "to") {
                 handle_change(&db, tokens);
             } else {
