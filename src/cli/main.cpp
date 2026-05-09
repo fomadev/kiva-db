@@ -185,6 +185,14 @@ int main(int argc, char* argv[]) {
             print_help(); 
             show_dur = false;
         }
+        else if (cmd == "has") {
+            if (n == 2 || (n == 3 && is_kiva_type(tokens[1]))) {
+                handle_has(&db, tokens);
+            } else {
+                std::cerr << "Error: Usage: has [type] <key>" << std::endl;
+                show_dur = false;
+            }
+        }
         else {
             std::cout << "Unknown command: '" << cmd << "'. Try 'help'." << std::endl;
             show_dur = false;
