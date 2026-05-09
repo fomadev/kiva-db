@@ -65,6 +65,11 @@ Once compiled, launch the executable:
             <td><code>get u1 and u2</code></td>
         </tr>
         <tr>
+            <td><strong>has</strong></td>
+            <td>Check if a key exists without reading value</td>
+            <td><code>has user_123</code></td>
+        </tr>
+        <tr>
             <td><strong>update</strong></td>
             <td>Modify an existing key's value</td>
             <td><code>update u1 "New Value"</code></td>
