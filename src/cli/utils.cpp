@@ -19,6 +19,7 @@ void print_help() {
               << "  set [type] <key> <val> [ttl <sec>]  : Save a value. Quotes define strings.\n"
               << "  update [type] <key> <val>           : Update value (must match existing type).\n"
               << "  get [type] <key1> and <key2>        : Retrieve values (optional type check).\n"
+              << "  has [type] <key>                    : Check if a key exists (optional type check).\n"
               << "  del [type] <key> / del all keys     : Remove data (optional type check).\n"
               << "  typeof <key>                        : Show the stored data type.\n"
               << "  change <old> to <new>               : Rename a key (new key must be unique).\n"
