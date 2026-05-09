@@ -18,8 +18,8 @@ static bool is_kiva_type_local(const std::string& t) {
 }
 
 /**
- * handle_change (v2.1.3 - Strict Refactoring Mode)
- * Gère le renommage et la migration avec validation de cohérence source/cible.
+ * handle_change (v2.1.3 - Strict & Safe Atomic Mode)
+ * Gère le renommage et la migration avec protection contre la perte de données.
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (!db || !*db) return;
@@ -49,18 +49,18 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         to_index = 2;
     }
 
-    // Vérification de l'existence
+    // Vérification de l'existence avant toute chose
     const char* actual_type_str = kiva_typeof(*db, old_key.c_str());
     if (std::strcmp(actual_type_str, "none") == 0 || std::strcmp(actual_type_str, "undefined") == 0) {
         std::cerr << "Error: Source key '" << old_key << "' not found." << std::endl;
         return;
     }
 
-    // Traduction du type réel en énumération pour comparaison
+    // Traduction du type réel pour comparaison
     KivaType actual_enum = (std::strcmp(actual_type_str, "number") == 0) ? KIVA_TYPE_NUMBER :
                            (std::strcmp(actual_type_str, "boolean") == 0) ? KIVA_TYPE_BOOLEAN : KIVA_TYPE_STRING;
 
-    // VALIDATION : Est-ce que le type prétendu correspond au type réel ?
+    // Validation du type source (si spécifié)
     if (forced_old_type != KIVA_TYPE_AUTO && forced_old_type != actual_enum) {
         std::cerr << "Error: Type mismatch for source key. '" << old_key 
                   << "' is actually a '" << actual_type_str << "'." << std::endl;
@@ -73,7 +73,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         return;
     }
 
-    // 2. Localisation de la nouvelle clé (new_key) et du type cible
+    // 2. Localisation de la nouvelle clé et du type cible
     std::string new_key;
     KivaType k_type_target = KIVA_TYPE_AUTO; 
     size_t val_index = 0;
@@ -96,31 +96,28 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         return;
     }
 
-    // 4. Logique d'exécution
+    // 3. Logique d'exécution SÉCURISÉE
     
     // CAS A : Renommage Simple (Valeur préservée)
     if (val_index >= n) {
-        // Interdire le changement de type sans nouvelle valeur
         if (k_type_target != KIVA_TYPE_AUTO && k_type_target != actual_enum) {
-            std::string t_name = (k_type_target == KIVA_TYPE_NUMBER) ? "number" : 
-                                 (k_type_target == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
-            std::cerr << "Error: Cannot change type to '" << t_name 
+            std::cerr << "Error: Cannot change type to '" << tokens[after_to] 
                       << "' without providing a new value." << std::endl;
             return;
         }
 
         if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
-            std::cout << "Renamed: " << old_key << " -> " << new_key << " (Type '" << actual_type_str << "' preserved)" << std::endl;
+            std::cout << "Renamed: " << old_key << " -> " << new_key << " (Type preserved)" << std::endl;
         } else {
             std::cerr << "Error: Failed to rename. Target might already exist." << std::endl;
         }
     } 
-    // CAS B : Migration avec Nouvelle Valeur (Strict Mode)
+    // CAS B : Migration avec Nouvelle Valeur (Safe Mode)
     else {
         std::string new_value = tokens[val_index];
         char delim = (val_index < delimiters.size()) ? delimiters[val_index] : 0;
 
-        // Détection auto si non forcé
+        // --- PHASE 1 : VALIDATION (AVANT suppression) ---
         if (k_type_target == KIVA_TYPE_AUTO) {
             if (new_value == "true" || new_value == "false") {
                 k_type_target = KIVA_TYPE_BOOLEAN;
@@ -131,7 +128,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
             else {
                 if (delim != '\"' && delim != '\'') {
                     std::cerr << "Error: String values must be enclosed in quotes." << std::endl;
-                    return;
+                    return; // ON ARRÊTE TOUT ICI : La donnée 'old_key' est sauvée.
                 }
                 k_type_target = KIVA_TYPE_STRING;
             }
@@ -139,17 +136,24 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         else if (k_type_target == KIVA_TYPE_STRING) {
             if (delim != '\"' && delim != '\'') {
                 std::cerr << "Error: Explicit string type requires quotes." << std::endl;
-                return;
+                return; // ON ARRÊTE TOUT ICI.
             }
         }
 
-        kiva_delete(*db, old_key.c_str());
+        // --- PHASE 2 : EXÉCUTION ---
+        // Si source == cible, on ne supprime pas (kiva_set_ex écrasera proprement)
+        if (old_key != new_key) {
+            kiva_delete(*db, old_key.c_str());
+        }
+
         KivaStatus status = kiva_set_ex(*db, new_key.c_str(), new_value.c_str(), k_type_target, 0);
         
         if (status == KIVA_OK) {
             std::string t_final = (k_type_target == KIVA_TYPE_NUMBER) ? "number" : 
                                   (k_type_target == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
             std::cout << "Migrated: " << old_key << " -> " << new_key << " (Type: " << t_final << ")" << std::endl;
+        } else {
+            std::cerr << "Error: Migration failed during insertion." << std::endl;
         }
     }
 }
