@@ -119,12 +119,30 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "del") {
-            // Formats: del k (2), del t k (3)
-            bool ok = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
-            if (ok) {
+            // Formats supportés : 
+            // 1. del <key> (n=2)
+            // 2. del <type> <key> (n=3 && type valide : string, number, boolean)
+            // 3. del all keys (n=3 && tokens[1]=="all" && tokens[2]=="keys")
+            
+            bool is_reset = (n == 3 && tokens[1] == "all" && tokens[2] == "keys");
+            bool is_standard = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
+
+            if (is_reset) {
+                // Appel direct au moteur pour réinitialiser la base
+                KivaStatus status = kiva_reset(db);
+                if (status == KIVA_OK) {
+                    std::cout << "All keys deleted. Database reset." << std::endl;
+                } else {
+                    std::cerr << "Error: Could not reset database." << std::endl;
+                }
+            } 
+            else if (is_standard) {
+                // Suppression d'une clé spécifique
                 handle_del(&db, tokens, db_path);
-            } else {
-                std::cerr << "Error: Invalid del syntax.\nUsage: del [type] <key>" << std::endl;
+            } 
+            else {
+                // Erreur de syntaxe (le Mode Strict rejette "del all" ou "del key extra")
+                std::cerr << "Error: Invalid del syntax.\nUsage: del [type] <key> OR del all keys" << std::endl;
                 show_dur = false;
             }
         }
