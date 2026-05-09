@@ -45,6 +45,13 @@ bool is_kiva_type(const std::string& t) {
     return (t == "string" || t == "number" || t == "boolean");
 }
 
+bool is_valid_key_name(const std::string& key) {
+    if (key.empty()) return false;
+    // Une clé ne peut pas commencer par un chiffre
+    if (std::isdigit(key[0])) return false;
+    return true;
+}
+
 /**
  * Vérifie si une chaîne de caractères est un nombre entier positif.
  */

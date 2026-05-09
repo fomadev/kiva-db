@@ -13,16 +13,24 @@
 enum PrintTokenType { P_STRING, P_NUMBER, P_ERROR };
 
 /**
- * Évalue une expression : peut être un nombre, une clé, ou un calcul récursif (ex: a+b).
- * Version 2.1.5 - Support récursif et vérification de type.
+ * Évalue une expression : gère les nombres, les clés, et l'arithmétique (+, -, *, /).
+ * L'ordre de recherche (find_last_of) respecte la priorité des opérations.
  */
 std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& out_type) {
-    // 1. Nettoyage des espaces pour l'analyse lexicale
+    // 1. Nettoyage des espaces
     expr.erase(std::remove(expr.begin(), expr.end(), ' '), expr.end());
+    if (expr.empty()) { out_type = P_ERROR; return ""; }
 
-    // 2. Tentative de calcul mathématique (Récursivité)
-    size_t op_pos = expr.find_first_of("+-");
-    if (op_pos != std::string::npos) {
+    // 2. Analyse des opérateurs (Priorité inverse pour la récursivité)
+    // On cherche d'abord + et - car ils doivent être évalués en dernier (basse priorité)
+    size_t op_pos = expr.find_last_of("+-");
+    if (op_pos == std::string::npos) {
+        // Sinon on cherche * et / (haute priorité)
+        op_pos = expr.find_last_of("*/");
+    }
+
+    if (op_pos != std::string::npos && op_pos > 0 && op_pos < expr.length() - 1) {
+        char op = expr[op_pos];
         std::string left_part = expr.substr(0, op_pos);
         std::string right_part = expr.substr(op_pos + 1);
 
@@ -34,21 +42,29 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
             try {
                 int val1 = std::stoi(v1);
                 int val2 = std::stoi(v2);
-                int res = (expr[op_pos] == '+') ? val1 + val2 : val1 - val2;
+                int res = 0;
                 out_type = P_NUMBER;
+
+                switch (op) {
+                    case '+': res = val1 + val2; break;
+                    case '-': res = val1 - val2; break;
+                    case '*': res = val1 * val2; break;
+                    case '/': 
+                        if (val2 == 0) return "[DIV_BY_ZERO]";
+                        res = val1 / val2; 
+                        break;
+                }
                 return std::to_string(res);
             } catch (...) {
-                out_type = P_ERROR;
-                return "";
+                out_type = P_ERROR; return "";
             }
         } else {
-            // Signalement d'un conflit de type dans une expression arithmétique
             return "[TYPE_ERROR]"; 
         }
     }
 
     // 3. Est-ce un nombre pur ?
-    if (!expr.empty() && std::all_of(expr.begin(), expr.end(), ::isdigit)) {
+    if (std::all_of(expr.begin(), expr.end(), ::isdigit)) {
         out_type = P_NUMBER;
         return expr;
     }
@@ -57,7 +73,6 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
     char* db_val = kiva_get(*db, expr.c_str());
     if (db_val) {
         std::string res(db_val);
-        // On récupère le type réel pour la logique de concaténation stricte
         const char* actual_type = kiva_typeof(*db, expr.c_str());
         free(db_val);
         
@@ -70,8 +85,7 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
 }
 
 /**
- * handle_print (v2.1.5 - Strict Interpreter Mode)
- * Gère l'affichage avec interpolation, expressions récursives et séparateurs obligatoires.
+ * handle_print (v2.1.5)
  */
 void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (tokens.size() < 2) {
@@ -87,8 +101,7 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
         std::string token = tokens[i];
         bool is_quoted = is_string_quote(delimiters[i]);
 
-        // --- RÈGLE 1 : DÉTECTION OBLIGATOIRE DE SÉPARATEUR ---
-        // Empêche les erreurs de type "hello"username
+        // RÈGLE 1 : DÉTECTION OBLIGATOIRE DE SÉPARATEUR
         if (i > 1 && !is_quoted && token != "+" && token != ",") {
             if (tokens[i-1] != "+" && tokens[i-1] != ",") {
                 std::cerr << "Error: SyntaxError: missing separator between tokens." << std::endl;
@@ -96,10 +109,9 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
             }
         }
 
-        // On ignore les jetons séparateurs eux-mêmes pour le traitement de valeur
         if (!is_quoted && (token == "+" || token == ",")) continue;
 
-        // --- RÈGLE 2 : ÉVALUATION ET INTERPOLATION ---
+        // RÈGLE 2 : ÉVALUATION ET INTERPOLATION
         PrintTokenType current_type;
         std::string evaluated;
 
@@ -114,8 +126,9 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
                 PrintTokenType sub_type;
                 std::string sub_res = evaluate_expression(db, sub_expr, sub_type);
 
-                if (sub_type == P_ERROR || sub_res == "[TYPE_ERROR]") {
-                    std::cerr << "Error: NameError/TypeError in interpolation '${" << sub_expr << "}'" << std::endl;
+                if (sub_type == P_ERROR || sub_res == "[TYPE_ERROR]" || sub_res == "[DIV_BY_ZERO]") {
+                    std::cerr << "Error: EvaluationError in '${" << sub_expr << "}': " 
+                              << (sub_res == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid reference/type") << std::endl;
                     return;
                 }
                 content.replace(pos, end_pos - pos + 1, sub_res);
@@ -127,14 +140,14 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
             evaluated = evaluate_expression(db, token, current_type);
         }
 
-        // Gestion de l'erreur d'existence ou de type
-        if (current_type == P_ERROR || evaluated == "[TYPE_ERROR]") {
-            std::cerr << "Error: NameError/TypeError: invalid reference or operation near '" << token << "'" << std::endl;
+        if (current_type == P_ERROR || evaluated == "[TYPE_ERROR]" || evaluated == "[DIV_BY_ZERO]") {
+            std::cerr << "Error: NameError/TypeError: " 
+                      << (evaluated == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid operation") 
+                      << " near '" << token << "'" << std::endl;
             return;
         }
 
-        // --- RÈGLE 3 : CONCATÉNATION STRICTE (Style Python) ---
-        // Vérifie que l'opérateur '+' est utilisé entre types identiques
+        // RÈGLE 3 : CONCATÉNATION STRICTE
         if (i > 1 && tokens[i-1] == "+") {
             if (last_type != current_type) {
                 std::cerr << "Error: TypeError: can only concatenate " 
