@@ -214,6 +214,11 @@ int main(int argc, char* argv[]) {
                 show_dur = false;
             }
         }
+        else if (cmd == "print") {
+            // La commande print accepte 0 à N arguments, 
+            // la validation est gérée dynamiquement par handle_print.
+            handle_print(&db, tokens, delimiters);
+        }
         else {
             std::cout << "Unknown command: '" << cmd << "'. Try 'help'." << std::endl;
             show_dur = false;
