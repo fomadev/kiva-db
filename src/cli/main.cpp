@@ -35,29 +35,14 @@ extern "C" {
 /**
  * Affiche l'aide utilisateur pour les commandes du shell.
  */
-void print_help() {
-    std::cout << "\nAvailable commands:\n"
-              << "  set <key> <value> [TTL]  : Set a key with optional TTL (seconds)\n"
-              << "  get <key>                : Get the value of a key\n"
-              << "  update <key> <new_val>   : Update an existing key\n"
-              << "  del <key>                : Delete a key\n"
-              << "  typeof <key>             : Show the type of a key\n"
-              << "  change <old> to <new>    : Rename a key\n"
-              << "  scan                     : List all keys in memory\n"
-              << "  stats                    : Show database statistics\n"
-              << "  compact                  : Rebuild data file to save space\n"
-              << "  clear                    : Clear the terminal screen\n"
-              << "  exit                     : Close the database and exit\n\n";
-}
+void print_help()
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
-    // Création du dossier de données
     MKDIR("data");
     const char* db_path = "data/store.kiva";
 
-    // Ouverture de la base de données
     KivaDB* db = kiva_open(db_path);
 
     if (!db) {
@@ -73,7 +58,6 @@ int main(int argc, char* argv[]) {
         if (!std::getline(std::cin, line) || line == "exit") break;
         if (line.empty()) continue;
 
-        // Analyse de la ligne
         std::vector<char> delimiters;
         auto tokens = CommandParser::tokenize(line, delimiters);
         
@@ -82,90 +66,97 @@ int main(int argc, char* argv[]) {
         std::string cmd = tokens[0];
         clock_t start = clock();
         bool show_dur = true;
+        size_t n = tokens.size();
 
-        // --- ROUTAGE ET VALIDATION DES COMMANDES ---
-        
+        // --- ROUTAGE AVEC VALIDATION STRICTE ---
+
         if (cmd == "set") {
-            if (tokens.size() < 3) {
-                std::cerr << "Error: Usage: set <key> <value> [ttl_sec]" << std::endl;
-            } else {
+            // Formats: set k v (3), set k v ttl s (5), set t k v (4), set t k v ttl s (6)
+            if (n == 3 || n == 4 || n == 5 || n == 6) {
                 handle_set(&db, tokens, delimiters);
+            } else {
+                std::cerr << "Error: Usage: set [type] <key> <value> [ttl <sec>]" << std::endl;
+                show_dur = false;
             }
         }
         else if (cmd == "update") {
-            if (tokens.size() < 3) {
-                std::cerr << "Error: Usage: update <key> <new_value>" << std::endl;
-            } else {
+            // Formats: update k v (3), update t k v (4)
+            if (n == 3 || n == 4) {
                 handle_update(&db, tokens, delimiters);
+            } else {
+                std::cerr << "Error: Usage: update [type] <key> <value>" << std::endl;
+                show_dur = false;
             }
         }
         else if (cmd == "get") {
-            if (tokens.size() != 2) {
-                std::cerr << "Error: Usage: get <key>" << std::endl;
-            } else {
+            // Formats: get k (2), get t k (3)
+            if (n == 2 || n == 3) {
                 handle_get(&db, tokens, delimiters);
+            } else {
+                std::cerr << "Error: Usage: get [type] <key>" << std::endl;
+                show_dur = false;
             }
         }
         else if (cmd == "del") {
-            if (tokens.size() != 2) {
-                std::cerr << "Error: Usage: del <key>" << std::endl;
-            } else {
+            // Formats: del k (2), del t k (3)
+            if (n == 2 || n == 3) {
                 handle_del(&db, tokens, db_path);
-            }
-        }
-        else if (cmd == "clear") {
-            if (tokens.size() > 1) {
-                std::cerr << "Error: 'clear' command does not accept arguments." << std::endl;
             } else {
-                system(CLEAR_COMMAND);
+                std::cerr << "Error: Usage: del [type] <key>" << std::endl;
+                show_dur = false;
             }
-            show_dur = false;
         }
         else if (cmd == "change") {
-            // Format attendu : change <old> to <new> (soit 4 tokens)
-            if (tokens.size() != 4 || tokens[2] != "to") {
-                std::cerr << "Error: Usage: change <old_key> to <new_key>" << std::endl;
+            // Format: change <old> to <new> (4 tokens)
+            if (n == 4 && tokens[2] == "to") {
+                handle_change(&db, tokens);
             } else {
-                handle_change(&db, tokens); 
+                std::cerr << "Error: Usage: change <old_key> to <new_key>" << std::endl;
+                show_dur = false;
             }
         }
         else if (cmd == "typeof") {
-            if (tokens.size() != 2) {
-                std::cerr << "Error: Usage: typeof <key>" << std::endl;
-            } else {
+            if (n == 2) {
                 handle_typeof(&db, tokens);
+            } else {
+                std::cerr << "Error: Usage: typeof <key>" << std::endl;
+                show_dur = false;
             }
         }
         else if (cmd == "scan") {
-            if (tokens.size() > 1) {
-                std::cerr << "Error: 'scan' command does not accept arguments." << std::endl;
+            if (n == 1) {
+                index_scan(db);
             } else {
-                index_scan(db); 
+                std::cerr << "Error: 'scan' command does not accept arguments." << std::endl;
             }
             show_dur = false;
         }
         else if (cmd == "stats") {
-            if (tokens.size() > 1) {
-                std::cerr << "Error: 'stats' command does not accept arguments." << std::endl;
+            if (n == 1) {
+                handle_stats(&db);
             } else {
-                handle_stats(&db); 
+                std::cerr << "Error: 'stats' command does not accept arguments." << std::endl;
             }
             show_dur = false;
         }
         else if (cmd == "compact") {
-            if (tokens.size() > 1) {
-                std::cerr << "Error: 'compact' command does not accept arguments." << std::endl;
+            if (n == 1) {
+                kiva_compact(db);
+                std::cout << "Database storage compacted successfully." << std::endl;
             } else {
-                kiva_compact(db); 
-                std::cout << "Database storage compacted successfully.\n";
+                std::cerr << "Error: 'compact' command does not accept arguments." << std::endl;
             }
         }
-        else if (cmd == "help" || cmd == "h") {
-            if (tokens.size() > 1) {
-                std::cerr << "Error: 'help' command does not accept arguments." << std::endl;
+        else if (cmd == "clear") {
+            if (n == 1) {
+                system(CLEAR_COMMAND);
             } else {
-                print_help(); 
+                std::cerr << "Error: 'clear' command does not accept arguments." << std::endl;
             }
+            show_dur = false;
+        }
+        else if (cmd == "help" || cmd == "h") {
+            print_help(); 
             show_dur = false;
         }
         else {
