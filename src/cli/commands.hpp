@@ -26,7 +26,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
 void handle_get(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 // Mise à jour : handle_change ne prend plus 'delimiters'
-void handle_change(KivaDB** db, const std::vector<std::string>& tokens);
+void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens);
 void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char* db_path);
 

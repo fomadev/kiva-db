@@ -180,7 +180,8 @@ int main(int argc, char* argv[]) {
             }
 
             if (n >= 4 && n <= 7 && has_to) {
-                handle_change(&db, tokens);
+                // Appel avec 'delimiters' pour permettre la validation stricte des chaînes
+                handle_change(&db, tokens, delimiters);
             } else {
                 std::cerr << "Error: Invalid change syntax." << std::endl;
                 std::cerr << "Usage: change [type] <old> to [type] <new> [value]" << std::endl;
