@@ -18,8 +18,8 @@ static bool is_kiva_type_local(const std::string& t) {
 }
 
 /**
- * handle_change (v2.1.3 - Strict & Safe Atomic Mode)
- * Gère le renommage et la migration avec protection contre la perte de données.
+ * handle_change (v2.1.3 - Final Robust Mode)
+ * Gère le renommage et la migration avec protection contre l'auto-suppression.
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (!db || !*db) return;
@@ -56,18 +56,15 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         return;
     }
 
-    // Traduction du type réel pour comparaison
     KivaType actual_enum = (std::strcmp(actual_type_str, "number") == 0) ? KIVA_TYPE_NUMBER :
                            (std::strcmp(actual_type_str, "boolean") == 0) ? KIVA_TYPE_BOOLEAN : KIVA_TYPE_STRING;
 
-    // Validation du type source (si spécifié)
     if (forced_old_type != KIVA_TYPE_AUTO && forced_old_type != actual_enum) {
         std::cerr << "Error: Type mismatch for source key. '" << old_key 
                   << "' is actually a '" << actual_type_str << "'." << std::endl;
         return;
     }
 
-    // Validation du mot-clé "to"
     if (to_index >= n || tokens[to_index] != "to") {
         std::cerr << "Error: Missing 'to' keyword. Format: change <old> to <new>" << std::endl;
         return;
@@ -100,9 +97,14 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
     
     // CAS A : Renommage Simple (Valeur préservée)
     if (val_index >= n) {
+        // --- PROTECTION : Identité des clés (Self-Rename) ---
+        if (old_key == new_key) {
+            std::cout << "Renamed: " << old_key << " -> " << new_key << " (No change needed)" << std::endl;
+            return; 
+        }
+
         if (k_type_target != KIVA_TYPE_AUTO && k_type_target != actual_enum) {
-            std::cerr << "Error: Cannot change type to '" << tokens[after_to] 
-                      << "' without providing a new value." << std::endl;
+            std::cerr << "Error: Cannot change type without providing a new value." << std::endl;
             return;
         }
 
@@ -112,12 +114,12 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
             std::cerr << "Error: Failed to rename. Target might already exist." << std::endl;
         }
     } 
-    // CAS B : Migration avec Nouvelle Valeur (Safe Mode)
+    // CAS B : Migration avec Nouvelle Valeur (Safe Pre-Flight Mode)
     else {
         std::string new_value = tokens[val_index];
         char delim = (val_index < delimiters.size()) ? delimiters[val_index] : 0;
 
-        // --- PHASE 1 : VALIDATION (AVANT suppression) ---
+        // --- PHASE 1 : VALIDATION ---
         if (k_type_target == KIVA_TYPE_AUTO) {
             if (new_value == "true" || new_value == "false") {
                 k_type_target = KIVA_TYPE_BOOLEAN;
@@ -128,7 +130,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
             else {
                 if (delim != '\"' && delim != '\'') {
                     std::cerr << "Error: String values must be enclosed in quotes." << std::endl;
-                    return; // ON ARRÊTE TOUT ICI : La donnée 'old_key' est sauvée.
+                    return; 
                 }
                 k_type_target = KIVA_TYPE_STRING;
             }
@@ -136,12 +138,12 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         else if (k_type_target == KIVA_TYPE_STRING) {
             if (delim != '\"' && delim != '\'') {
                 std::cerr << "Error: Explicit string type requires quotes." << std::endl;
-                return; // ON ARRÊTE TOUT ICI.
+                return;
             }
         }
 
         // --- PHASE 2 : EXÉCUTION ---
-        // Si source == cible, on ne supprime pas (kiva_set_ex écrasera proprement)
+        // On ne supprime que si la cible est physiquement différente
         if (old_key != new_key) {
             kiva_delete(*db, old_key.c_str());
         }
