@@ -160,10 +160,30 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "change") {
-            if (n == 4 && tokens[2] == "to") {
+            /* * Validation de structure pour la v2.1.3 :
+             * On accepte entre 4 et 7 jetons pour couvrir les cas :
+             * - change k to k2 (4)
+             * - change t k to k2 (5)
+             * - change k to t k2 (5)
+             * - change k to k2 v (5)
+             * - change t k to t k2 (6)
+             * - change k to t k2 v (6)
+             * - change t k to t k2 v (7)
+             */
+            
+            bool has_to = false;
+            // On cherche le mot-clé "to" entre la position 2 et 3
+            if (n >= 4) {
+                if (tokens[2] == "to" || (n > 3 && tokens[3] == "to")) {
+                    has_to = true;
+                }
+            }
+
+            if (n >= 4 && n <= 7 && has_to) {
                 handle_change(&db, tokens);
             } else {
-                std::cerr << "Error: Usage: change <old_key> to <new_key>" << std::endl;
+                std::cerr << "Error: Invalid change syntax." << std::endl;
+                std::cerr << "Usage: change [type] <old> to [type] <new> [value]" << std::endl;
                 show_dur = false;
             }
         }
