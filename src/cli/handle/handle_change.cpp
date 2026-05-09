@@ -6,16 +6,28 @@
 #include "../commands.hpp"
 #include <iostream>
 #include <cstring>
+#include <algorithm>
+#include <vector>
+#include <string>
+
+/**
+ * Helper local pour la détection de type KivaDB.
+ */
+static bool is_kiva_type_local(const std::string& t) {
+    return (t == "string" || t == "number" || t == "boolean");
+}
 
 /**
  * handle_change (v2.1.3 - Refactoring Mode)
  * Supporte :
  * - change <old> to <new>                  (Simple rename)
- * - change <old> to <new> <val>            (Rename + New Value)
- * - change <old> to <type> <new> <val>     (Rename + Type Change + New Value)
- * - change <type> <old> to <type> <new>    (Explicit rename)
+ * - change <old> to <new> <val>            (Rename + Auto-type New Value)
+ * - change <old> to <type> <new> <val>     (Rename + Explicit Type + New Value)
+ * - change <type> <old> to <type> <new>    (Explicit migration)
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
+    if (!db || !*db) return;
+
     size_t n = tokens.size();
     if (n < 3) {
         std::cerr << "Error: Invalid change syntax.\nUsage: change [type] <old> to [type] <new> [value]" << std::endl;
@@ -26,8 +38,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
     std::string old_key;
     size_t to_index = 0;
 
-    // Si le premier argument est un type (ex: change string u to ...)
-    if (is_kiva_type(tokens[1])) {
+    if (is_kiva_type_local(tokens[1])) {
         if (n < 4) { std::cerr << "Error: Missing source key." << std::endl; return; }
         old_key = tokens[2];
         to_index = 3;
@@ -38,17 +49,17 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
 
     // Validation du mot-clé "to"
     if (to_index >= n || tokens[to_index] != "to") {
-        std::cerr << "Error: Missing 'to' keyword in change command." << std::endl;
+        std::cerr << "Error: Missing 'to' keyword. Format: change <old> to <new>" << std::endl;
         return;
     }
 
-    // 2. Localisation de la nouvelle clé (new_key) et du type forcé
+    // 2. Localisation de la nouvelle clé (new_key) et du type
     std::string new_key;
     KivaType k_type = KIVA_TYPE_AUTO; 
     size_t val_index = 0;
     size_t after_to = to_index + 1;
 
-    if (after_to < n && is_kiva_type(tokens[after_to])) {
+    if (after_to < n && is_kiva_type_local(tokens[after_to])) {
         // Détection du type forcé (ex: to number age 12)
         std::string forced_type = tokens[after_to];
         if (forced_type == "string") k_type = KIVA_TYPE_STRING;
@@ -76,35 +87,40 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens) {
 
     // 4. Logique d'exécution
     
-    // CAS A : On garde la valeur actuelle (Simple Rename)
+    // CAS A : Renommage Simple (on garde la valeur actuelle)
     if (val_index >= n) {
-        KivaStatus status = kiva_rename(*db, old_key.c_str(), new_key.c_str());
-        if (status == KIVA_OK) {
+        if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
             std::cout << "Renamed: " << old_key << " -> " << new_key << " (Value preserved)" << std::endl;
         } else {
-            std::cerr << "Error: Failed to rename. Check if target already exists." << std::endl;
+            std::cerr << "Error: Failed to rename. Check if target key already exists." << std::endl;
         }
     } 
-    // CAS B : Migration avec nouvelle valeur (Atomic Move)
+    // CAS B : Migration avec Nouvelle Valeur (Détection de type intelligente)
     else {
         std::string new_value = tokens[val_index];
         
-        // 1. Récupérer le type original si aucun type n'est forcé
+        // 1. Détection automatique du type si non forcé
         if (k_type == KIVA_TYPE_AUTO) {
-            if (std::strcmp(actual_type_str, "string") == 0) k_type = KIVA_TYPE_STRING;
-            else if (std::strcmp(actual_type_str, "number") == 0) k_type = KIVA_TYPE_NUMBER;
-            else if (std::strcmp(actual_type_str, "boolean") == 0) k_type = KIVA_TYPE_BOOLEAN;
+            if (new_value == "true" || new_value == "false") {
+                k_type = KIVA_TYPE_BOOLEAN;
+            } 
+            else if (!new_value.empty() && std::all_of(new_value.begin(), new_value.end(), ::isdigit)) {
+                k_type = KIVA_TYPE_NUMBER;
+            } 
+            else {
+                k_type = KIVA_TYPE_STRING;
+            }
         }
 
-        // 2. Supprimer l'ancienne clé
+        // 2. Opération atomique : suppression ancienne puis création nouvelle
         kiva_delete(*db, old_key.c_str());
-        
-        // 3. Créer la nouvelle clé avec la nouvelle valeur
-        // On utilise kiva_set_ex avec TTL=0 (persistant)
         KivaStatus status = kiva_set_ex(*db, new_key.c_str(), new_value.c_str(), k_type, 0);
         
         if (status == KIVA_OK) {
-            std::cout << "Migrated: " << old_key << " -> " << new_key << " (New value: " << new_value << ")" << std::endl;
+            std::string t_display = (k_type == KIVA_TYPE_NUMBER) ? "number" : 
+                                   (k_type == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
+            std::cout << "Migrated: " << old_key << " -> " << new_key 
+                      << " (Type: " << t_display << ", Value: " << new_value << ")" << std::endl;
         } else {
             std::cerr << "Error: Failed to create target key with new value." << std::endl;
         }
