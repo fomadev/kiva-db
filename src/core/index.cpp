@@ -159,7 +159,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.1.1.5 | FomaDev Public License) ---" << std::endl;
+    std::cout << "\n--- KivaDB Scan (v2.1.2 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
         std::string status = "";
         if (entry.expires_at > 0) {
