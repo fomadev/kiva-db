@@ -30,4 +30,6 @@ void handle_del(KivaDB** db, const std::vector<std::string>& tokens, const char*
 
 void handle_stats(KivaDB** db);
 
+void handle_has(KivaDB** db, const std::vector<std::string>& tokens);
+
 #endif
