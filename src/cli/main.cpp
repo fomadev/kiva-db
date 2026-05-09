@@ -53,6 +53,25 @@ bool is_number(const std::string& s) {
         [](unsigned char c) { return !std::isdigit(c); }) == s.end();
 }
 
+/**
+ * Sépare les tokens en groupes basés sur le mot-clé "and".
+ * Permet le chaînage de commandes comme 'get a and b'
+ */
+std::vector<std::vector<std::string>> split_by_and(const std::vector<std::string>& tokens) {
+    std::vector<std::vector<std::string>> groups;
+    std::vector<std::string> current;
+    for (const auto& t : tokens) {
+        if (t == "and") {
+            if (!current.empty()) groups.push_back(current);
+            current.clear();
+        } else {
+            current.push_back(t);
+        }
+    }
+    if (!current.empty()) groups.push_back(current);
+    return groups;
+}
+
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
@@ -68,7 +87,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.1.3 (Strict Mode)\nType 'help' or 'h' for command list\n";
+    std::cout << "KivaDB Shell v2.1.3 (Strict Mode with Chaining)\nType 'help' or 'h' for command list\n";
 
     std::string line;
     while (true) {
@@ -87,55 +106,60 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // --- ROUTAGE VERSION 2.1.3 (STRICT ERROR MODE) ---
+        // --- ROUTAGE VERSION 2.1.3 (STRICT ERROR MODE + CHAINING) ---
 
         if (cmd == "set") {
-            // Analyse des jetons pour valider le TTL si présent
-            // Format 5: set <k> <v> ttl <sec>
-            bool has_ttl_5 = (n == 5 && tokens[3] == "ttl" && is_number(tokens[4]));
-            // Format 6: set <t> <k> <v> ttl <sec>
-            bool has_ttl_6 = (n == 6 && is_kiva_type(tokens[1]) && tokens[4] == "ttl" && is_number(tokens[5]));
-            
-            bool ok = (n == 3) || 
-                      (n == 4 && is_kiva_type(tokens[1])) || 
-                      has_ttl_5 || 
-                      has_ttl_6;
+            auto groups = split_by_and(tokens);
+            for (auto& segment : groups) {
+                if (segment[0] != "set") segment.insert(segment.begin(), "set");
+                size_t sn = segment.size();
 
-            if (ok) {
-                handle_set(&db, tokens, delimiters);
-            } else {
-                // Message d'erreur spécifique pour le TTL mal formé
-                if ((n == 5 && tokens[3] == "ttl") || (n == 6 && tokens[4] == "ttl")) {
-                    std::cerr << "Error: TTL must be a positive number." << std::endl;
+                bool has_ttl_5 = (sn == 5 && segment[3] == "ttl" && is_number(segment[4]));
+                bool has_ttl_6 = (sn == 6 && is_kiva_type(segment[1]) && segment[4] == "ttl" && is_number(segment[5]));
+                
+                bool ok = (sn == 3) || (sn == 4 && is_kiva_type(segment[1])) || has_ttl_5 || has_ttl_6;
+
+                if (ok) {
+                    handle_set(&db, segment, delimiters);
                 } else {
-                    std::cerr << "Error: Invalid set syntax.\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
+                    std::cerr << "Error: Invalid set syntax near '" << segment.back() << "'\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
+                    show_dur = false;
+                    break;
                 }
-                show_dur = false;
             }
         }
         else if (cmd == "get") {
-            bool ok = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
-            if (ok) {
-                handle_get(&db, tokens, delimiters);
-            } else {
-                std::cerr << "Error: Invalid get syntax.\nUsage: get [type] <key>" << std::endl;
-                show_dur = false;
+            auto groups = split_by_and(tokens);
+            for (auto& segment : groups) {
+                if (segment[0] != "get") segment.insert(segment.begin(), "get");
+                size_t sn = segment.size();
+                
+                if ((sn == 2) || (sn == 3 && is_kiva_type(segment[1]))) {
+                    handle_get(&db, segment, delimiters);
+                } else {
+                    std::cerr << "Error: Invalid get syntax near '" << segment.back() << "'\nUsage: get [type] <key>" << std::endl;
+                    show_dur = false;
+                    break;
+                }
             }
         }
         else if (cmd == "update") {
-            bool ok = (n == 3) || (n == 4 && is_kiva_type(tokens[1]));
-            if (ok) {
-                handle_update(&db, tokens, delimiters);
-            } else {
-                std::cerr << "Error: Invalid update syntax.\nUsage: update [type] <key> <value>" << std::endl;
-                show_dur = false;
+            auto groups = split_by_and(tokens);
+            for (auto& segment : groups) {
+                if (segment[0] != "update") segment.insert(segment.begin(), "update");
+                size_t sn = segment.size();
+
+                if ((sn == 3) || (sn == 4 && is_kiva_type(segment[1]))) {
+                    handle_update(&db, segment, delimiters);
+                } else {
+                    std::cerr << "Error: Invalid update syntax near '" << segment.back() << "'\nUsage: update [type] <key> <value>" << std::endl;
+                    show_dur = false;
+                    break;
+                }
             }
         }
         else if (cmd == "del") {
-            bool is_reset = (n == 3 && tokens[1] == "all" && tokens[2] == "keys");
-            bool is_standard = (n == 2) || (n == 3 && is_kiva_type(tokens[1]));
-
-            if (is_reset) {
+            if (n == 3 && tokens[1] == "all" && tokens[2] == "keys") {
                 KivaStatus status = kiva_reset(db);
                 if (status == KIVA_OK) {
                     std::cout << "All keys deleted. Database reset." << std::endl;
@@ -143,36 +167,38 @@ int main(int argc, char* argv[]) {
                     std::cerr << "Error: Could not reset database." << std::endl;
                 }
             } 
-            else if (is_standard) {
-                handle_del(&db, tokens, db_path);
-            } 
             else {
-                std::cerr << "Error: Invalid del syntax.\nUsage: del [type] <key> OR del all keys" << std::endl;
-                show_dur = false;
+                auto groups = split_by_and(tokens);
+                for (auto& segment : groups) {
+                    if (segment[0] != "del") segment.insert(segment.begin(), "del");
+                    size_t sn = segment.size();
+                    if ((sn == 2) || (sn == 3 && is_kiva_type(segment[1]))) {
+                        handle_del(&db, segment, db_path);
+                    } else {
+                        std::cerr << "Error: Invalid del syntax near '" << segment.back() << "'" << std::endl;
+                        show_dur = false;
+                        break;
+                    }
+                }
             }
         }
         else if (cmd == "typeof") {
-            if (n == 2) {
-                handle_typeof(&db, tokens);
-            } else {
-                std::cerr << "Error: Usage: typeof <key>" << std::endl;
-                show_dur = false;
+            auto groups = split_by_and(tokens);
+            for (auto& segment : groups) {
+                if (segment[0] != "typeof") segment.insert(segment.begin(), "typeof");
+                if (segment.size() == 2) {
+                    handle_typeof(&db, segment);
+                } else {
+                    std::cerr << "Error: Usage: typeof <key> (near '" << segment.back() << "')" << std::endl;
+                    show_dur = false;
+                    break;
+                }
             }
         }
         else if (cmd == "change") {
-            /* * Validation de structure pour la v2.1.3 :
-             * On accepte entre 4 et 7 jetons pour couvrir les cas :
-             * - change k to k2 (4)
-             * - change t k to k2 (5)
-             * - change k to t k2 (5)
-             * - change k to k2 v (5)
-             * - change t k to t k2 (6)
-             * - change k to t k2 v (6)
-             * - change t k to t k2 v (7)
-             */
-            
+            // La commande 'change' est complexe, on traite le 'and' globalement ou on laisse tel quel.
+            // Ici on garde ta validation stricte v2.1.3 originale.
             bool has_to = false;
-            // On cherche le mot-clé "to" entre la position 2 et 3
             if (n >= 4) {
                 if (tokens[2] == "to" || (n > 3 && tokens[3] == "to")) {
                     has_to = true;
@@ -180,11 +206,9 @@ int main(int argc, char* argv[]) {
             }
 
             if (n >= 4 && n <= 7 && has_to) {
-                // Appel avec 'delimiters' pour permettre la validation stricte des chaînes
                 handle_change(&db, tokens, delimiters);
             } else {
-                std::cerr << "Error: Invalid change syntax." << std::endl;
-                std::cerr << "Usage: change [type] <old> to [type] <new> [value]" << std::endl;
+                std::cerr << "Error: Invalid change syntax.\nUsage: change [type] <old> to [type] <new> [value]" << std::endl;
                 show_dur = false;
             }
         }
@@ -207,16 +231,20 @@ int main(int argc, char* argv[]) {
             show_dur = false;
         }
         else if (cmd == "has") {
-            if (n == 2 || (n == 3 && is_kiva_type(tokens[1]))) {
-                handle_has(&db, tokens);
-            } else {
-                std::cerr << "Error: Usage: has [type] <key>" << std::endl;
-                show_dur = false;
+            auto groups = split_by_and(tokens);
+            for (auto& segment : groups) {
+                if (segment[0] != "has") segment.insert(segment.begin(), "has");
+                size_t sn = segment.size();
+                if (sn == 2 || (sn == 3 && is_kiva_type(segment[1]))) {
+                    handle_has(&db, segment);
+                } else {
+                    std::cerr << "Error: Usage: has [type] <key> (near '" << segment.back() << "')" << std::endl;
+                    show_dur = false;
+                    break;
+                }
             }
         }
         else if (cmd == "print") {
-            // La commande print accepte 0 à N arguments, 
-            // la validation est gérée dynamiquement par handle_print.
             handle_print(&db, tokens, delimiters);
         }
         else {
