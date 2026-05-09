@@ -81,20 +81,30 @@ int main(int argc, char* argv[]) {
         // --- ROUTAGE VERSION 2.1.1.5 (STRICT ERROR MODE) ---
 
         if (cmd == "set") {
-            // Formats supportés: 
-            // set k v (3)
-            // set t k v (4) -> t type
-            // set k v ttl s (5) -> tokens[3] == "ttl"
-            // set t k v ttl s (6) -> t type ET tokens[4] == "ttl"
+            // Analyse des jetons pour valider les formats avec TTL
+            // Format n=5 : set <key> <value> ttl <sec>
+            bool has_ttl_5 = (n == 5 && tokens[3] == "ttl" && is_number(tokens[4]));
+            
+            // Format n=6 : set <type> <key> <value> ttl <sec>
+            bool has_ttl_6 = (n == 6 && is_kiva_type(tokens[1]) && tokens[4] == "ttl" && is_number(tokens[5]));
+            
+            // Validation globale
             bool ok = (n == 3) || 
                       (n == 4 && is_kiva_type(tokens[1])) || 
-                      (n == 5 && tokens[3] == "ttl") || 
-                      (n == 6 && is_kiva_type(tokens[1]) && tokens[4] == "ttl");
-            
+                      has_ttl_5 || 
+                      has_ttl_6;
+
             if (ok) {
                 handle_set(&db, tokens, delimiters);
             } else {
-                std::cerr << "Error: Invalid set syntax.\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
+                // Gestion d'erreur spécifique pour le TTL non numérique
+                if ((n == 5 && tokens[3] == "ttl") || (n == 6 && tokens[4] == "ttl")) {
+                    // On vérifie si l'erreur vient spécifiquement du fait que le dernier token n'est pas un chiffre
+                    std::cerr << "Error: TTL must be a positive number." << std::endl;
+                } else {
+                    // Erreur de syntaxe générale
+                    std::cerr << "Error: Invalid set syntax.\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
+                }
                 show_dur = false;
             }
         }
