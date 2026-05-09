@@ -117,6 +117,8 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         }
 
         char* val_ptr = (char*)malloc(it->second.v_size + 1);
+        if (!val_ptr) { ++it; continue; } // Sécurité mémoire
+        
         fseek(db->file, it->second.offset, SEEK_SET);
         fread(val_ptr, 1, it->second.v_size, db->file);
         val_ptr[it->second.v_size] = '\0';
@@ -141,6 +143,7 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         fwrite(e.key.c_str(), 1, k_size, temp_file);
         fwrite(e.val.c_str(), 1, v_size, temp_file);
 
+        // Calcul de l'offset vers la donnée de valeur pour le prochain index_lookup
         int64_t new_offset = (int64_t)(pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size);
         
         KeyDirEntry updated_entry = { new_offset, v_size, e.type, exp };
@@ -187,7 +190,6 @@ uint32_t index_get_count(KivaDB* db) {
 
 /**
  * Calcule l'usage mémoire approximatif de l'index en RAM.
- * Cette fonction parcourt la map pour estimer la mémoire consommée sur le tas (heap).
  */
 size_t kiva_get_memory_usage(KivaDB* db) {
     if (!db || !db->cpp_index) {
@@ -203,7 +205,7 @@ size_t kiva_get_memory_usage(KivaDB* db) {
     for (auto const& [key, val] : map) {
         // key.capacity() : Mémoire allouée pour le string
         // sizeof(KeyDirEntry) : Structure fixe dans la map
-        // 32 : Overhead moyen d'un nœud d'unordered_map
+        // 32 : Overhead moyen d'un nœud d'unordered_map (pointeurs next/prev, hash)
         total += key.capacity() + sizeof(KeyDirEntry) + 32; 
     }
 
