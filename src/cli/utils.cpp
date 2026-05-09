@@ -7,26 +7,28 @@
 
 /**
  * Affiche l'aide du Shell KivaDB avec les précisions sur le typage strict.
+ * Mise à jour pour la v2.1.3 (Refactoring & Security update).
  */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.1.2 STL) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.1.3 Strict Mode) ---\n"
               << "  RELIABILITY RULES:\n"
               << "  - Strings MUST be quoted: \"value\" or 'value'.\n"
               << "  - Numbers MUST NOT be quoted: 42, 3.14, true.\n"
               << "  - Booleans MUST NOT be quoted: true or false.\n"
-              << "  - Reserved keywords (set, get, string, etc.) cannot be used as keys.\n"
+              << "  - Self-rename (change u to u) is ignored to prevent data loss.\n"
+              << "  - Type mismatch during rename is blocked without a new value.\n"
               << "\n  COMMANDS:\n"
-              << "  set [type] <key> <val> [ttl <sec>]  : Save a value. Quotes define strings.\n"
-              << "  update [type] <key> <val>           : Update value (must match existing type).\n"
-              << "  get [type] <key1> and <key2>        : Retrieve values (optional type check).\n"
-              << "  has [type] <key>                    : Check if a key exists (optional type check).\n"
-              << "  del [type] <key> / del all keys     : Remove data (optional type check).\n"
+              << "  set [type] <key> <val> [ttl <sec>]  : Save a value.\n"
+              << "  update [type] <key> <val>           : Update value (type-safe).\n"
+              << "  get [type] <key1> and <key2>        : Retrieve values.\n"
+              << "  has [type] <key>                    : Check existence.\n"
+              << "  del [type] <key> / del all keys     : Remove data.\n"
               << "  typeof <key>                        : Show the stored data type.\n"
-              << "  change <old> to <new>               : Rename a key (new key must be unique).\n"
+              << "  change [t] <old> to [t] <new> [val] : Advanced Refactoring (Rename/Migrate).\n"
               << "  scan                                : List all keys with types and sizes.\n"
               << "  stats                               : Show DB file and memory statistics.\n"
               << "  compact                             : Reorganize storage and remove stale data.\n"
               << "  clear                               : Clear the terminal screen.\n"
               << "  exit                                : Safely close KivaDB and exit.\n"
-              << "----------------------------------------\n\n";
+              << "----------------------------------------------\n\n";
 }

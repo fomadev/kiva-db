@@ -76,8 +76,15 @@ Once compiled, launch the executable:
         </tr>
         <tr>
             <td><strong>change</strong></td>
-            <td>Rename an existing key to a new name</td>
-            <td><code>change old_key to new_key</code></td>
+            <td>
+                <strong>Refactoring Mode:</strong> Rename keys or migrate data types/values. 
+                <br/><em>Note: Renaming without value preserves type. String values require quotes.</em>
+            </td>
+            <td>
+                <code>change old to new</code><br/>
+                <code>change old to new "new_val"</code><br/>
+                <code>change number old to number new 42</code>
+            </td>
         </tr>
         <tr>
             <td><strong>typeof</strong></td>
