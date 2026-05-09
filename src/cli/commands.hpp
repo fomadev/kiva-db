@@ -19,6 +19,8 @@ bool is_backtick(char d);
 bool is_bare(char d);
 bool is_reserved_keyword(const std::string& key);
 
+bool is_kiva_type(const std::string& t);
+
 // Prototypes des commandes
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 void handle_get(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);

@@ -61,6 +61,7 @@ typedef enum {
  * Types de données supportés par KivaDB
  */
 typedef enum {
+    KIVA_TYPE_AUTO = 0,
     KIVA_TYPE_UNKNOWN = 0,
     KIVA_TYPE_STRING = 1,
     KIVA_TYPE_NUMBER = 2,
