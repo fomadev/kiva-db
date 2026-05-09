@@ -35,14 +35,16 @@ extern "C" {
 /**
  * Affiche l'aide utilisateur pour les commandes du shell.
  */
-void print_help()
+void print_help();
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
 
+    // Initialisation de l'environnement
     MKDIR("data");
     const char* db_path = "data/store.kiva";
 
+    // Ouverture de la base de données
     KivaDB* db = kiva_open(db_path);
 
     if (!db) {
@@ -58,6 +60,7 @@ int main(int argc, char* argv[]) {
         if (!std::getline(std::cin, line) || line == "exit") break;
         if (line.empty()) continue;
 
+        // Analyse de la ligne
         std::vector<char> delimiters;
         auto tokens = CommandParser::tokenize(line, delimiters);
         
@@ -71,7 +74,7 @@ int main(int argc, char* argv[]) {
         // --- ROUTAGE AVEC VALIDATION STRICTE ---
 
         if (cmd == "set") {
-            // Formats: set k v (3), set k v ttl s (5), set t k v (4), set t k v ttl s (6)
+            // Formats supportés: set k v (3), set k v ttl s (5), set t k v (4), set t k v ttl s (6)
             if (n == 3 || n == 4 || n == 5 || n == 6) {
                 handle_set(&db, tokens, delimiters);
             } else {
@@ -80,7 +83,7 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "update") {
-            // Formats: update k v (3), update t k v (4)
+            // Formats supportés: update k v (3), update t k v (4)
             if (n == 3 || n == 4) {
                 handle_update(&db, tokens, delimiters);
             } else {
@@ -89,7 +92,7 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "get") {
-            // Formats: get k (2), get t k (3)
+            // Formats supportés: get k (2), get t k (3)
             if (n == 2 || n == 3) {
                 handle_get(&db, tokens, delimiters);
             } else {
@@ -98,7 +101,7 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "del") {
-            // Formats: del k (2), del t k (3)
+            // Formats supportés: del k (2), del t k (3)
             if (n == 2 || n == 3) {
                 handle_del(&db, tokens, db_path);
             } else {

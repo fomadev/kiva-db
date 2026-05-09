@@ -70,6 +70,7 @@ int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
     auto it = map.find(key);
 
     if (it != map.end()) {
+        // Suppression paresseuse si le TTL est expiré
         if (it->second.expires_at > 0 && it->second.expires_at < std::time(nullptr)) {
             map.erase(it);
             return 0;
@@ -108,6 +109,7 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
     };
     std::vector<ValidEntry> valid_entries;
 
+    // Phase 1 : Extraction des données valides
     for (auto it = map.begin(); it != map.end(); ) {
         if (it->second.expires_at > 0 && it->second.expires_at < now) {
             it = map.erase(it); 
@@ -124,6 +126,7 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         ++it;
     }
 
+    // Phase 2 : Réécriture dans le nouveau fichier et mise à jour de l'index
     for (const auto& e : valid_entries) {
         uint32_t k_size = (uint32_t)e.key.length();
         uint32_t v_size = (uint32_t)e.val.length();
@@ -153,7 +156,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.1.1.5 STL with TTL support) ---\n";
+    std::cout << "\n--- KivaDB Scan (v2.1.1.5 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
         std::string status = "";
         if (entry.expires_at > 0) {
@@ -184,9 +187,6 @@ uint32_t index_get_count(KivaDB* db) {
 
 /**
  * Calcule l'usage mémoire approximatif de l'index en RAM.
- */
-/**
- * Calcule l'usage mémoire approximatif de l'index en RAM.
  * Cette fonction parcourt la map pour estimer la mémoire consommée sur le tas (heap).
  */
 size_t kiva_get_memory_usage(KivaDB* db) {
@@ -194,18 +194,16 @@ size_t kiva_get_memory_usage(KivaDB* db) {
         return 0;
     }
 
-    // Récupération de la référence vers la map C++
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     
     // 1. Taille de base des structures fixes
     size_t total = sizeof(KivaDB) + sizeof(KivaIndex);
     
-    // 2. Itération pour estimer la consommation des données dynamiques
+    // 2. Estimation de la consommation des données dynamiques
     for (auto const& [key, val] : map) {
-        // key.capacity() : La mémoire réelle allouée pour le texte de la clé
-        // sizeof(KeyDirEntry) : La structure contenant offset, v_size, type et expiry
-        // 32 : Estimation de l'overhead par nœud dans une std::unordered_map 
-        //      (pointeurs de chaînage, buckets, et métadonnées d'allocation)
+        // key.capacity() : Mémoire allouée pour le string
+        // sizeof(KeyDirEntry) : Structure fixe dans la map
+        // 32 : Overhead moyen d'un nœud d'unordered_map
         total += key.capacity() + sizeof(KeyDirEntry) + 32; 
     }
 
