@@ -35,7 +35,20 @@ extern "C" {
 /**
  * Affiche l'aide utilisateur pour les commandes du shell.
  */
-void print_help();
+void print_help() {
+    std::cout << "\nAvailable commands:\n"
+              << "  set <key> <value> [TTL]  : Set a key with optional TTL (seconds)\n"
+              << "  get <key>                : Get the value of a key\n"
+              << "  update <key> <new_val>   : Update an existing key\n"
+              << "  del <key>                : Delete a key\n"
+              << "  typeof <key>             : Show the type of a key\n"
+              << "  change <old> to <new>    : Rename a key\n"
+              << "  scan                     : List all keys in memory\n"
+              << "  stats                    : Show database statistics\n"
+              << "  compact                  : Rebuild data file to save space\n"
+              << "  clear                    : Clear the terminal screen\n"
+              << "  exit                     : Close the database and exit\n\n";
+}
 
 int main(int argc, char* argv[]) {
     (void)argc; (void)argv;
@@ -70,44 +83,89 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // Routage des commandes
+        // --- ROUTAGE ET VALIDATION DES COMMANDES ---
+        
         if (cmd == "set") {
-            handle_set(&db, tokens, delimiters);
+            if (tokens.size() < 3) {
+                std::cerr << "Error: Usage: set <key> <value> [ttl_sec]" << std::endl;
+            } else {
+                handle_set(&db, tokens, delimiters);
+            }
         }
         else if (cmd == "update") {
-            handle_update(&db, tokens, delimiters);
+            if (tokens.size() < 3) {
+                std::cerr << "Error: Usage: update <key> <new_value>" << std::endl;
+            } else {
+                handle_update(&db, tokens, delimiters);
+            }
         }
         else if (cmd == "get") {
-            handle_get(&db, tokens, delimiters);
+            if (tokens.size() != 2) {
+                std::cerr << "Error: Usage: get <key>" << std::endl;
+            } else {
+                handle_get(&db, tokens, delimiters);
+            }
         }
         else if (cmd == "del") {
-            handle_del(&db, tokens, db_path);
+            if (tokens.size() != 2) {
+                std::cerr << "Error: Usage: del <key>" << std::endl;
+            } else {
+                handle_del(&db, tokens, db_path);
+            }
         }
         else if (cmd == "clear") {
-            system(CLEAR_COMMAND);
+            if (tokens.size() > 1) {
+                std::cerr << "Error: 'clear' command does not accept arguments." << std::endl;
+            } else {
+                system(CLEAR_COMMAND);
+            }
             show_dur = false;
         }
         else if (cmd == "change") {
-            // Corrigé : Appel avec seulement 2 arguments
-            handle_change(&db, tokens); 
+            // Format attendu : change <old> to <new> (soit 4 tokens)
+            if (tokens.size() != 4 || tokens[2] != "to") {
+                std::cerr << "Error: Usage: change <old_key> to <new_key>" << std::endl;
+            } else {
+                handle_change(&db, tokens); 
+            }
         }
         else if (cmd == "typeof") {
-            handle_typeof(&db, tokens);
+            if (tokens.size() != 2) {
+                std::cerr << "Error: Usage: typeof <key>" << std::endl;
+            } else {
+                handle_typeof(&db, tokens);
+            }
         }
         else if (cmd == "scan") {
-            index_scan(db); 
+            if (tokens.size() > 1) {
+                std::cerr << "Error: 'scan' command does not accept arguments." << std::endl;
+            } else {
+                index_scan(db); 
+            }
             show_dur = false;
         }
         else if (cmd == "stats") {
-            handle_stats(&db); 
+            if (tokens.size() > 1) {
+                std::cerr << "Error: 'stats' command does not accept arguments." << std::endl;
+            } else {
+                handle_stats(&db); 
+            }
             show_dur = false;
         }
         else if (cmd == "compact") {
-            kiva_compact(db); 
-            std::cout << "Database storage compacted successfully.\n";
+            if (tokens.size() > 1) {
+                std::cerr << "Error: 'compact' command does not accept arguments." << std::endl;
+            } else {
+                kiva_compact(db); 
+                std::cout << "Database storage compacted successfully.\n";
+            }
         }
         else if (cmd == "help" || cmd == "h") {
-            print_help(); 
+            if (tokens.size() > 1) {
+                std::cerr << "Error: 'help' command does not accept arguments." << std::endl;
+            } else {
+                print_help(); 
+            }
             show_dur = false;
         }
         else {
