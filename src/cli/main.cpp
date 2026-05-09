@@ -68,7 +68,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.1.2 (Strict Mode)\nType 'help' or 'h' for command list\n";
+    std::cout << "KivaDB Shell v2.1.3 (Strict Mode)\nType 'help' or 'h' for command list\n";
 
     std::string line;
     while (true) {
@@ -87,7 +87,7 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // --- ROUTAGE VERSION 2.1.2 (STRICT ERROR MODE) ---
+        // --- ROUTAGE VERSION 2.1.3 (STRICT ERROR MODE) ---
 
         if (cmd == "set") {
             // Analyse des jetons pour valider le TTL si présent
