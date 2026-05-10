@@ -9,8 +9,9 @@
 
 /**
  * Tokenizer intelligent pour KivaDB.
- * Gère les guillemets (", '), les backticks (`) pour les clés,
- * et remplit le vecteur delimiters pour le contrôle de type strict.
+ * Gère les guillemets (", '), les backticks (`) pour les clés.
+ * MISE À JOUR v2.1.6 : La virgule (,) est désormais un séparateur au même titre que l'espace,
+ * permettant des syntaxes comme print "id",user sans erreur.
  */
 std::vector<std::string> CommandParser::tokenize(const std::string& input, std::vector<char>& delimiters) {
     std::vector<std::string> tokens;
@@ -20,40 +21,52 @@ std::vector<std::string> CommandParser::tokenize(const std::string& input, std::
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
 
-        // Détection de l'ouverture d'un délimiteur (", ', ou `)
+        // 1. Détection de l'ouverture d'un délimiteur (", ', ou `)
         if ((c == '"' || c == '\'' || c == '`') && quote_char == 0) {
+            // Si on a du texte collé avant le guillemet (ex: print, "d"), on le valide d'abord
+            if (!current.empty()) {
+                tokens.push_back(current);
+                delimiters.push_back(0);
+                current.clear();
+            }
             quote_char = c;
         } 
-        // Détection de la fermeture du délimiteur correspondant
+        // 2. Détection de la fermeture du délimiteur correspondant
         else if (c == quote_char && quote_char != 0) {
             tokens.push_back(current);
-            delimiters.push_back(quote_char); // On stocke ', ", ou `
+            delimiters.push_back(quote_char); // Stockage du type de guillemet
             current.clear();
             quote_char = 0;
         } 
-        // Gestion des espaces (séparateurs de tokens hors guillemets)
-        else if (isspace(c) && quote_char == 0) {
+        // 3. Gestion des séparateurs (Espace ou Virgule) hors guillemets
+        else if ((isspace(c) || c == ',') && quote_char == 0) {
             if (!current.empty()) {
                 tokens.push_back(current);
-                delimiters.push_back(0); // 0 indique un token "nu" (bare text)
+                delimiters.push_back(0); // 0 = Bare text / Key / Number
                 current.clear();
             }
+            
+            // Si c'est une virgule, on l'ajoute comme un token propre pour handle_print
+            if (c == ',') {
+                tokens.push_back(",");
+                delimiters.push_back(0);
+            }
         } 
-        // Accumulation des caractères à l'intérieur d'un token
+        // 4. Accumulation des caractères standards
         else {
             current += c;
         }
     }
 
-    // Gestion d'une erreur de syntaxe si un guillemet n'est pas fermé
+    // Gestion d'erreur : Guillemet non fermé
     if (quote_char != 0) {
-        std::cout << "Syntax Error: Unclosed quote detected (" << quote_char << ").\n";
+        std::cerr << "Syntax Error: Unclosed quote detected (" << quote_char << ").\n";
         delimiters.clear();
         tokens.clear();
         return {};
     }
 
-    // Ajout du dernier token si la ligne ne finit pas par un espace ou un guillemet
+    // Ajout du dernier token si nécessaire
     if (!current.empty()) {
         tokens.push_back(current);
         delimiters.push_back(0);
