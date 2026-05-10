@@ -21,28 +21,6 @@ KivaDB is organized into three distinct functional layers:
 2. **The Index (C++)**: A `std::map` based index storing key metadata and file offsets for logarithmic-time lookups.
 3. **The Storage (C)**: Manages binary I/O operations, file format integrity (V2), and the append-only log.
 
-## Getting Started
-
-### Prerequisites
-* `gcc` (C11 support)
-* `g++` (C++17 support)
-* `make`
-
-### Installation
-The project includes a unified Makefile for compilation:
-```bash
-git clone https://github.com/fomadev/kiva-db.git
-cd kiva-db
-make clean
-make
-```
-
-### Running the Shell
-Once compiled, launch the executable:
-```bash
-./kivadb
-```
-
 ## Command Usage
 
 <table>
@@ -144,7 +122,7 @@ KivaDB uses a structured binary format to ensure data reliability and rapid reco
 
 ## ⚖️ License
 
-This project is licensed under the **FomaDev Public License (FPL)**.
+This project is licensed under the **[FomaDev Public License (FPL)](LICENSE)**.
 
 - **Free for use**: You can use the compiled KivaDB CLI for personal and commercial projects for free.
 - **Source Code**: For reproduction, modification, or integration into commercial products, a paid license is required.

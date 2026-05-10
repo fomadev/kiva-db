@@ -11,15 +11,23 @@
 #include <string>
 
 /**
- * Helper local pour la détection de type KivaDB (Shell side).
+ * RÈGLE v2.1.5 : Une clé est valide si elle n'est pas purement numérique.
+ */
+static bool is_valid_key_name(const std::string& key) {
+    if (key.empty()) return false;
+    return !std::all_of(key.begin(), key.end(), ::isdigit);
+}
+
+/**
+ * Helper local pour la détection de type KivaDB.
  */
 static bool is_kiva_type_local(const std::string& t) {
     return (t == "string" || t == "number" || t == "boolean");
 }
 
 /**
- * handle_change (v2.1.3 - Final Robust Mode)
- * Gère le renommage et la migration avec protection contre l'auto-suppression.
+ * handle_change (v2.1.5)
+ * Gère le renommage et la migration avec validation sélective du nom de clé.
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (!db || !*db) return;
@@ -49,7 +57,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         to_index = 2;
     }
 
-    // Vérification de l'existence avant toute chose
+    // Vérification de l'existence de la source
     const char* actual_type_str = kiva_typeof(*db, old_key.c_str());
     if (std::strcmp(actual_type_str, "none") == 0 || std::strcmp(actual_type_str, "undefined") == 0) {
         std::cerr << "Error: Source key '" << old_key << "' not found." << std::endl;
@@ -93,11 +101,16 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         return;
     }
 
+    // --- CORRECTION CRITIQUE v2.1.5 : Validation du NOM de la nouvelle clé uniquement ---
+    if (!is_valid_key_name(new_key)) {
+        std::cerr << "Error: InvalidKeyName: '" << new_key << "' cannot be purely numeric." << std::endl;
+        return;
+    }
+
     // 3. Logique d'exécution SÉCURISÉE
     
     // CAS A : Renommage Simple (Valeur préservée)
     if (val_index >= n) {
-        // --- PROTECTION : Identité des clés (Self-Rename) ---
         if (old_key == new_key) {
             std::cout << "Renamed: " << old_key << " -> " << new_key << " (No change needed)" << std::endl;
             return; 
@@ -119,7 +132,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         std::string new_value = tokens[val_index];
         char delim = (val_index < delimiters.size()) ? delimiters[val_index] : 0;
 
-        // --- PHASE 1 : VALIDATION ---
+        // PHASE 1 : VALIDATION DE LA VALEUR
         if (k_type_target == KIVA_TYPE_AUTO) {
             if (new_value == "true" || new_value == "false") {
                 k_type_target = KIVA_TYPE_BOOLEAN;
@@ -142,8 +155,7 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
             }
         }
 
-        // --- PHASE 2 : EXÉCUTION ---
-        // On ne supprime que si la cible est physiquement différente
+        // PHASE 2 : EXÉCUTION
         if (old_key != new_key) {
             kiva_delete(*db, old_key.c_str());
         }
