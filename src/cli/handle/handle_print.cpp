@@ -13,45 +13,71 @@
 enum PrintTokenType { P_STRING, P_NUMBER, P_ERROR };
 
 /**
- * Évalue une expression : gère les nombres, les clés, et l'arithmétique (+, -, *, /).
- * L'ordre de recherche (find_last_of) respecte la priorité des opérations.
+ * Évalue une expression : gère les parenthèses, les nombres, les clés, 
+ * et l'arithmétique avec priorité des opérateurs.
  */
 std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& out_type) {
-    // 1. Nettoyage des espaces
+    // 1. Nettoyage des espaces pour l'analyse lexicale
     expr.erase(std::remove(expr.begin(), expr.end(), ' '), expr.end());
     if (expr.empty()) { out_type = P_ERROR; return ""; }
 
-    // 2. Analyse des opérateurs (Priorité inverse pour la récursivité)
-    // On cherche d'abord + et - car ils doivent être évalués en dernier (basse priorité)
+    // --- GESTION DES PARENTHÈSES (Priorité absolue) ---
+    // On cherche la dernière parenthèse ouvrante pour évaluer le bloc le plus profond
+    size_t last_open = expr.find_last_of('(');
+    if (last_open != std::string::npos) {
+        size_t close_pos = expr.find(')', last_open);
+        if (close_pos != std::string::npos) {
+            // Extraction du contenu : (sub_expr)
+            std::string sub_expr = expr.substr(last_open + 1, close_pos - last_open - 1);
+            PrintTokenType sub_type;
+            std::string sub_res = evaluate_expression(db, sub_expr, sub_type);
+            
+            if (sub_type == P_ERROR || sub_res == "[DIV_BY_ZERO]" || sub_res == "[TYPE_ERROR]") {
+                out_type = sub_type;
+                return sub_res;
+            }
+            
+            // Remplacement de "(...)" par son résultat et réévaluation
+            expr.replace(last_open, close_pos - last_open + 1, sub_res);
+            return evaluate_expression(db, expr, out_type);
+        } else {
+            // Parenthèse fermante manquante
+            out_type = P_ERROR;
+            return "";
+        }
+    }
+
+    // --- ANALYSE DES OPÉRATEURS (Priorité : +,- puis *,/) ---
+    // On cherche les opérateurs de basse priorité en premier pour la récursivité
     size_t op_pos = expr.find_last_of("+-");
     if (op_pos == std::string::npos) {
-        // Sinon on cherche * et / (haute priorité)
         op_pos = expr.find_last_of("*/");
     }
 
+    // Si on trouve un opérateur (non situé aux extrémités)
     if (op_pos != std::string::npos && op_pos > 0 && op_pos < expr.length() - 1) {
         char op = expr[op_pos];
-        std::string left_part = expr.substr(0, op_pos);
-        std::string right_part = expr.substr(op_pos + 1);
+        std::string left_p = expr.substr(0, op_pos);
+        std::string right_p = expr.substr(op_pos + 1);
 
         PrintTokenType t1, t2;
-        std::string v1 = evaluate_expression(db, left_part, t1);
-        std::string v2 = evaluate_expression(db, right_part, t2);
+        std::string v1 = evaluate_expression(db, left_p, t1);
+        std::string v2 = evaluate_expression(db, right_p, t2);
 
         if (t1 == P_NUMBER && t2 == P_NUMBER) {
             try {
-                int val1 = std::stoi(v1);
-                int val2 = std::stoi(v2);
+                int a = std::stoi(v1);
+                int b = std::stoi(v2);
                 int res = 0;
                 out_type = P_NUMBER;
 
                 switch (op) {
-                    case '+': res = val1 + val2; break;
-                    case '-': res = val1 - val2; break;
-                    case '*': res = val1 * val2; break;
+                    case '+': res = a + b; break;
+                    case '-': res = a - b; break;
+                    case '*': res = a * b; break;
                     case '/': 
-                        if (val2 == 0) return "[DIV_BY_ZERO]";
-                        res = val1 / val2; 
+                        if (b == 0) return "[DIV_BY_ZERO]";
+                        res = a / b; 
                         break;
                 }
                 return std::to_string(res);
@@ -63,13 +89,13 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
         }
     }
 
-    // 3. Est-ce un nombre pur ?
-    if (std::all_of(expr.begin(), expr.end(), ::isdigit)) {
+    // --- NOMBRES BRUTS ---
+    if (std::all_of(expr.begin(), expr.end(), [](char c){ return std::isdigit(c) || c == '-'; }) && expr != "-") {
         out_type = P_NUMBER;
         return expr;
     }
 
-    // 4. Est-ce une clé dans la base ?
+    // --- CLÉS DE LA BASE (Vérification hybride) ---
     char* db_val = kiva_get(*db, expr.c_str());
     if (db_val) {
         std::string res(db_val);
@@ -85,7 +111,7 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
 }
 
 /**
- * handle_print (v2.1.5)
+ * handle_print (v2.1.6 - Support complet expressions parenthésées)
  */
 void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (tokens.size() < 2) {
@@ -101,7 +127,7 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
         std::string token = tokens[i];
         bool is_quoted = is_string_quote(delimiters[i]);
 
-        // RÈGLE 1 : DÉTECTION OBLIGATOIRE DE SÉPARATEUR
+        // Séparateurs obligatoires
         if (i > 1 && !is_quoted && token != "+" && token != ",") {
             if (tokens[i-1] != "+" && tokens[i-1] != ",") {
                 std::cerr << "Error: SyntaxError: missing separator between tokens." << std::endl;
@@ -111,7 +137,6 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
 
         if (!is_quoted && (token == "+" || token == ",")) continue;
 
-        // RÈGLE 2 : ÉVALUATION ET INTERPOLATION
         PrintTokenType current_type;
         std::string evaluated;
 
@@ -128,7 +153,7 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
 
                 if (sub_type == P_ERROR || sub_res == "[TYPE_ERROR]" || sub_res == "[DIV_BY_ZERO]") {
                     std::cerr << "Error: EvaluationError in '${" << sub_expr << "}': " 
-                              << (sub_res == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid reference/type") << std::endl;
+                              << (sub_res == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid syntax/type") << std::endl;
                     return;
                 }
                 content.replace(pos, end_pos - pos + 1, sub_res);
@@ -142,18 +167,17 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
 
         if (current_type == P_ERROR || evaluated == "[TYPE_ERROR]" || evaluated == "[DIV_BY_ZERO]") {
             std::cerr << "Error: NameError/TypeError: " 
-                      << (evaluated == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid operation") 
+                      << (evaluated == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid reference or operation") 
                       << " near '" << token << "'" << std::endl;
             return;
         }
 
-        // RÈGLE 3 : CONCATÉNATION STRICTE
+        // Concaténation stricte
         if (i > 1 && tokens[i-1] == "+") {
             if (last_type != current_type) {
-                std::cerr << "Error: TypeError: can only concatenate " 
-                          << (last_type == P_STRING ? "str" : "int") << " (not \"" 
-                          << (current_type == P_STRING ? "str" : "int") << "\") to "
-                          << (last_type == P_STRING ? "str" : "int") << std::endl;
+                std::cerr << "Error: TypeError: cannot concatenate " 
+                          << (last_type == P_STRING ? "str" : "int") << " and " 
+                          << (current_type == P_STRING ? "str" : "int") << std::endl;
                 return;
             }
         }

@@ -45,11 +45,14 @@ bool is_kiva_type(const std::string& t) {
     return (t == "string" || t == "number" || t == "boolean");
 }
 
+/**
+ * RÈGLE v2.1.5 : Une clé est valide si elle n'est pas purement numérique.
+ * Cela permet '2a' mais interdit '2', évitant les conflits avec le moteur mathématique.
+ */
 bool is_valid_key_name(const std::string& key) {
     if (key.empty()) return false;
-    // Une clé ne peut pas commencer par un chiffre
-    if (std::isdigit(key[0])) return false;
-    return true;
+    // Une clé est invalide UNIQUEMENT si elle ne contient que des chiffres.
+    return !std::all_of(key.begin(), key.end(), ::isdigit);
 }
 
 /**
@@ -94,7 +97,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.1.3 (Strict Mode with Chaining)\nType 'help' or 'h' for command list\n";
+    std::cout << "KivaDB Shell v2.1.5 (Strict Mode with Chaining)\nType 'help' or 'h' for command list\n";
 
     std::string line;
     while (true) {
@@ -113,7 +116,7 @@ int main(int argc, char* argv[]) {
         clock_t start = clock();
         bool show_dur = true;
 
-        // --- ROUTAGE VERSION 2.1.3 (STRICT ERROR MODE + CHAINING) ---
+        // --- ROUTAGE VERSION 2.1.5 (STRICT ERROR MODE + CHAINING) ---
 
         if (cmd == "set") {
             auto groups = split_by_and(tokens);
@@ -121,17 +124,22 @@ int main(int argc, char* argv[]) {
                 if (segment[0] != "set") segment.insert(segment.begin(), "set");
                 size_t sn = segment.size();
 
+                // Validation syntaxique + Validation de la clé (pas purement numérique)
+                std::string key = (sn >= 3 && is_kiva_type(segment[1])) ? segment[2] : (sn >= 2 ? segment[1] : "");
+                
                 bool has_ttl_5 = (sn == 5 && segment[3] == "ttl" && is_number(segment[4]));
                 bool has_ttl_6 = (sn == 6 && is_kiva_type(segment[1]) && segment[4] == "ttl" && is_number(segment[5]));
                 
                 bool ok = (sn == 3) || (sn == 4 && is_kiva_type(segment[1])) || has_ttl_5 || has_ttl_6;
 
-                if (ok) {
+                if (ok && is_valid_key_name(key)) {
                     handle_set(&db, segment, delimiters);
+                } else if (ok && !is_valid_key_name(key)) {
+                    std::cerr << "Error: InvalidKeyName: '" << key << "' cannot be purely numeric." << std::endl;
+                    show_dur = false; break;
                 } else {
                     std::cerr << "Error: Invalid set syntax near '" << segment.back() << "'\nUsage: set [type] <key> <value> [ttl <sec>]" << std::endl;
-                    show_dur = false;
-                    break;
+                    show_dur = false; break;
                 }
             }
         }
@@ -145,8 +153,7 @@ int main(int argc, char* argv[]) {
                     handle_get(&db, segment, delimiters);
                 } else {
                     std::cerr << "Error: Invalid get syntax near '" << segment.back() << "'\nUsage: get [type] <key>" << std::endl;
-                    show_dur = false;
-                    break;
+                    show_dur = false; break;
                 }
             }
         }
@@ -160,8 +167,7 @@ int main(int argc, char* argv[]) {
                     handle_update(&db, segment, delimiters);
                 } else {
                     std::cerr << "Error: Invalid update syntax near '" << segment.back() << "'\nUsage: update [type] <key> <value>" << std::endl;
-                    show_dur = false;
-                    break;
+                    show_dur = false; break;
                 }
             }
         }
@@ -183,8 +189,7 @@ int main(int argc, char* argv[]) {
                         handle_del(&db, segment, db_path);
                     } else {
                         std::cerr << "Error: Invalid del syntax near '" << segment.back() << "'" << std::endl;
-                        show_dur = false;
-                        break;
+                        show_dur = false; break;
                     }
                 }
             }
@@ -197,14 +202,11 @@ int main(int argc, char* argv[]) {
                     handle_typeof(&db, segment);
                 } else {
                     std::cerr << "Error: Usage: typeof <key> (near '" << segment.back() << "')" << std::endl;
-                    show_dur = false;
-                    break;
+                    show_dur = false; break;
                 }
             }
         }
         else if (cmd == "change") {
-            // La commande 'change' est complexe, on traite le 'and' globalement ou on laisse tel quel.
-            // Ici on garde ta validation stricte v2.1.3 originale.
             bool has_to = false;
             if (n >= 4) {
                 if (tokens[2] == "to" || (n > 3 && tokens[3] == "to")) {
@@ -213,7 +215,14 @@ int main(int argc, char* argv[]) {
             }
 
             if (n >= 4 && n <= 7 && has_to) {
-                handle_change(&db, tokens, delimiters);
+                // Validation du nom de la nouvelle clé (Rule v2.1.5)
+                std::string new_key = (tokens[n-1]); 
+                if (is_valid_key_name(new_key)) {
+                    handle_change(&db, tokens, delimiters);
+                } else {
+                    std::cerr << "Error: InvalidKeyName: '" << new_key << "' cannot be purely numeric." << std::endl;
+                    show_dur = false;
+                }
             } else {
                 std::cerr << "Error: Invalid change syntax.\nUsage: change [type] <old> to [type] <new> [value]" << std::endl;
                 show_dur = false;
@@ -246,8 +255,7 @@ int main(int argc, char* argv[]) {
                     handle_has(&db, segment);
                 } else {
                     std::cerr << "Error: Usage: has [type] <key> (near '" << segment.back() << "')" << std::endl;
-                    show_dur = false;
-                    break;
+                    show_dur = false; break;
                 }
             }
         }
