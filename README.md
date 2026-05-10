@@ -34,64 +34,76 @@ KivaDB is organized into three distinct functional layers:
     <tbody>
         <tr>
             <td><strong>set</strong></td>
-            <td>Create a new key with optional TTL</td>
+            <td>Create a new key with optional TTL (Time To Live).</td>
             <td><code>set u1 "Fordi" ttl 3600</code></td>
         </tr>
         <tr>
             <td><strong>get</strong></td>
-            <td>Retrieve values for one or more keys</td>
+            <td>Retrieve values. Supports multiple keys with <code>and</code>.</td>
             <td><code>get u1 and u2</code></td>
         </tr>
         <tr>
             <td><strong>has</strong></td>
-            <td>Check if a key exists without reading value</td>
-            <td><code>has user_123</code></td>
+            <td>Check existence. Supports multiple keys with <code>and</code>.</td>
+            <td><code>has u1 and user_123</code></td>
         </tr>
         <tr>
             <td><strong>update</strong></td>
-            <td>Modify an existing key's value</td>
+            <td>Modify an existing key's value (Strict type-check).</td>
             <td><code>update u1 "New Value"</code></td>
         </tr>
         <tr>
             <td><strong>change</strong></td>
             <td>
-                <strong>Refactoring Mode:</strong> Rename keys or migrate data types/values. 
-                <br/><em>Note: Renaming without value preserves type. String values require quotes.</em>
+                <strong>Refactoring Mode:</strong> Rename keys or migrate data types. 
+                <br/><em>Note: Transactional logic ensures no data loss if migration fails.</em>
             </td>
             <td>
                 <code>change old to new</code><br/>
                 <code>change old to new "new_val"</code><br/>
-                <code>change number old to number new 42</code>
+                <code>change string old to number new 42</code>
+            </td>
+        </tr>
+        <tr>
+            <td><strong>print</strong></td>
+            <td>
+                <strong>Evaluation Mode:</strong> Display values, perform math, or interpolate.
+                <br/><em>Supports: Arithmetic <code>( ) + - * /</code> and <code>${key}</code>.</em>
+            </td>
+            <td>
+                <code>print (2 + 2) * 10</code><br/>
+                <code>print "Hello ${user_name}"</code><br/>
+                <code>print "Val:", u1</code>
             </td>
         </tr>
         <tr>
             <td><strong>typeof</strong></td>
-            <td>Identify the data type of a key</td>
+            <td>Identify the stored data type (string, number, boolean).</td>
             <td><code>typeof u1</code></td>
         </tr>
         <tr>
             <td><strong>del</strong></td>
-            <td>Delete specific keys or all keys</td>
+            <td>Delete specific keys or the entire database.</td>
             <td><code>del u1</code> or <code>del all keys</code></td>
         </tr>
         <tr>
             <td><strong>scan</strong></td>
-            <td>Display all active keys and metadata</td>
+            <td>Display all active keys, types, and byte sizes.</td>
             <td><code>scan</code></td>
         </tr>
         <tr>
             <td><strong>stats</strong></td>
-            <td>Monitor key count, storage size, and memory usage</td>
+            <td>Monitor database health and memory usage.</td>
             <td><code>stats</code></td>
         </tr>
         <tr>
             <td><strong>compact</strong></td>
-            <td>Reorganize storage to reclaim space</td>
+            <td>Reorganize storage to reclaim space and remove stale data.</td>
             <td><code>compact</code></td>
         </tr>
         <tr>
             <td><strong>clear</strong></td>
-            <td>Clear the terminal screen</td>
+            <td>Clear the terminal screen.</td>
             <td><code>clear</code></td>
         </tr>
     </tbody>
