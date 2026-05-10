@@ -7,28 +7,35 @@
 
 /**
  * Affiche l'aide du Shell KivaDB avec les précisions sur le typage strict.
- * Mise à jour pour la v2.1.5 (Refactoring & Security update).
+ * Mise à jour pour la v2.1.5 (Transactionnal Rename, Arithmetic & Interpolation).
  */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.1.5 Strict Mode) ---\n"
-              << "  RELIABILITY RULES:\n"
-              << "  - Strings MUST be quoted: \"value\" or 'value'.\n"
-              << "  - Numbers MUST NOT be quoted: 42, 3.14, true.\n"
-              << "  - Booleans MUST NOT be quoted: true or false.\n"
-              << "  - Self-rename (change u to u) is ignored to prevent data loss.\n"
-              << "  - Type mismatch during rename is blocked without a new value.\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.1.5 Stable) ---\n"
+              << "  RELIABILITY & SYNTAX RULES:\n"
+              << "  - Strings        : MUST be quoted -> \"Hello\" or 'Kiva'.\n"
+              << "  - Numbers/Bools  : MUST NOT be quoted -> 42, 3.14, true, false.\n"
+              << "  - Key Names      : Cannot be purely numeric (e.g., '44' is invalid, 'id44' is OK).\n"
+              << "  - Multi-Keys     : Use 'and' to chain operations -> get u and age.\n"
+              << "  - Transactions   : Renaming ('change') is now atomic (no data loss on failure).\n"
+
+              << "\n  ADVANCED FEATURES:\n"
+              << "  - Arithmetic     : print (10 + 5) * 2 / (key_val - 1)\n"
+              << "  - Interpolation  : print \"User age is ${age_user}\"\n"
+              << "  - Separators     : Use commas in print -> print \"Name:\", user_1\n"
+
               << "\n  COMMANDS:\n"
-              << "  set [type] <key> <val> [ttl <sec>]  : Save a value.\n"
-              << "  update [type] <key> <val>           : Update value (type-safe).\n"
-              << "  get [type] <key1> and <key2>        : Retrieve values.\n"
-              << "  has [type] <key>                    : Check existence.\n"
-              << "  del [type] <key> / del all keys     : Remove data.\n"
-              << "  typeof <key>                        : Show the stored data type.\n"
-              << "  change [t] <old> to [t] <new> [val] : Advanced Refactoring (Rename/Migrate).\n"
-              << "  scan                                : List all keys with types and sizes.\n"
-              << "  stats                               : Show DB file and memory statistics.\n"
-              << "  compact                             : Reorganize storage and remove stale data.\n"
-              << "  clear                               : Clear the terminal screen.\n"
-              << "  exit                                : Safely close KivaDB and exit.\n"
-              << "----------------------------------------------\n\n";
+              << "  set [t] <key> <val> [ttl <sec>]  : Save a value with optional expiration.\n"
+              << "  update [t] <key> <val>           : Update existing value (type-safe).\n"
+              << "  get [t] <k1> [and <k2>...]       : Retrieve one or multiple values.\n"
+              << "  has [t] <k1> [and <k2>...]       : Check if keys exist in the database.\n"
+              << "  del <key> | del all keys         : Remove specific data or wipe the DB.\n"
+              << "  typeof <key>                     : Show the stored data type (string, number, bool).\n"
+              << "  change [t] <old> to [t] <new> [v]: Advanced Rename/Migration (Transactional).\n"
+              << "  print <expr1>, <expr2>           : Evaluate and display expressions/variables.\n"
+              << "  scan                             : List all keys with their types and memory size.\n"
+              << "  stats                            : Show database file health and memory usage.\n"
+              << "  compact                          : Optimize storage and cleanup deleted entries.\n"
+              << "  clear                            : Clear the terminal screen.\n"
+              << "  exit                             : Safely flush buffers and close KivaDB.\n"
+              << "--------------------------------------------------------------------------\n\n";
 }
