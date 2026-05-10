@@ -43,7 +43,6 @@ std::string evaluate_expression(KivaDB** db, std::string expr, PrintTokenType& o
     }
 
     // --- ANALYSE DES OPÉRATEURS (+, -, *, /) ---
-    // On cherche d'abord les opérateurs de plus faible priorité (+, -)
     size_t op_pos = expr.find_last_of("+-");
     if (op_pos == std::string::npos) op_pos = expr.find_last_of("*/");
 
@@ -109,7 +108,7 @@ std::string handle_interpolation(KivaDB** db, std::string content) {
 }
 
 /**
- * handle_print (v2.1.6 - Correction Opérateurs & Virgules)
+ * handle_print (v2.1.6 - Final Release with List & Space Support)
  */
 void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (tokens.size() < 2) {
@@ -125,19 +124,18 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
         std::string token = tokens[i];
         bool is_quoted = is_string_quote(delimiters[i]);
 
-        // --- CORRECTION : Nettoyage des virgules "collées" (ex: "age,") ---
+        // --- 1. NETTOYAGE DES VIRGULES TRAÎNANTES ---
+        // Si l'utilisateur écrit: print age, "ans" -> "age," devient "age"
         if (!is_quoted && token.length() > 1 && token.back() == ',') {
             token.pop_back();
         }
 
-        // --- DÉTECTION DES OPÉRATEURS ET SÉPARATEURS ---
+        // --- 2. DÉTECTION DES OPÉRATEURS ET SÉPARATEURS ---
         bool is_op = (!is_quoted && (token == "+" || token == "-" || token == "*" || token == "/" || token == ","));
         
-        // CORRECTION : Un opérateur est un séparateur valide.
-        // On ne lève une erreur de syntaxe que si deux jetons se suivent sans rien entre eux.
+        // Vérification de la syntaxe : nécessite un séparateur si on n'est pas sur un opérateur
         if (i > 1 && !is_quoted && !is_op) {
             std::string prev = tokens[i-1];
-            // On vérifie si le token précédent était un opérateur
             bool prev_is_op = (prev == "+" || prev == "-" || prev == "*" || prev == "/" || prev == ",");
             
             if (!prev_is_op) {
@@ -146,14 +144,19 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
             }
         }
 
-        // On ignore la virgule physiquement dans l'output
-        if (is_op && token == ",") continue;
+        // --- 3. GESTION SPÉCIFIQUE DE LA VIRGULE (Espace) ---
+        if (is_op && token == ",") {
+            // On ajoute un espace seulement si on a déjà du contenu pour éviter l'espace initial
+            if (has_content) final_output += " ";
+            continue;
+        }
 
-        // Le '+' est traité comme un lien de concaténation ou mathématique.
-        // S'il est seul entre deux jetons, on passe au jeton suivant après avoir noté l'intention.
-        if (is_op && token != "+") continue; 
-        if (is_op && token == "+") continue; 
+        // Sauter le '+' car il sert de lien logique, mais ne produit pas de caractère
+        if (is_op && token == "+") continue;
+        // Sauter les autres opérateurs seuls (ils sont gérés dans evaluate_expression via les jetons adjacents)
+        if (is_op) continue;
 
+        // --- 4. ÉVALUATION DU JETON ---
         PrintTokenType current_type;
         std::string evaluated;
 
@@ -168,7 +171,7 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
             evaluated = evaluate_expression(db, token, current_type);
         }
 
-        // Gestion des erreurs d'évaluation
+        // Erreurs d'exécution
         if (current_type == P_ERROR || evaluated == "[TYPE_ERROR]" || evaluated == "[DIV_BY_ZERO]") {
             std::cerr << "Error: NameError/TypeError: " 
                       << (evaluated == "[DIV_BY_ZERO]" ? "Division by zero" : "Invalid operation") 
@@ -176,8 +179,8 @@ void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std
             return;
         }
 
-        // Vérification de cohérence de type pour la concaténation (+)
-        // Si le jeton précédent était un '+'
+        // --- 5. LOGIQUE DE CONCATÉNATION STRICTE (+) ---
+        // Si le jeton précédent était un '+', on interdit le mélange str/int
         if (i > 1 && tokens[i-1] == "+") {
             if (last_type != P_ERROR && last_type != current_type) {
                 std::cerr << "Error: TypeError: cannot concatenate " 

@@ -207,20 +207,22 @@ int main(int argc, char* argv[]) {
             }
         }
         else if (cmd == "change") {
-            bool has_to = false;
+            // est maintenant gérée exclusivement à l'intérieur de handle_change.
+            
             if (n >= 4) {
-                if (tokens[2] == "to" || (n > 3 && tokens[3] == "to")) {
-                    has_to = true;
+                // On vérifie simplement la présence du mot-clé "to" pour un formatage minimal
+                bool has_to = false;
+                for (const auto& t : tokens) {
+                    if (t == "to") {
+                        has_to = true;
+                        break;
+                    }
                 }
-            }
 
-            if (n >= 4 && n <= 7 && has_to) {
-                // Validation du nom de la nouvelle clé (Rule v2.1.5)
-                std::string new_key = (tokens[n-1]); 
-                if (is_valid_key_name(new_key)) {
+                if (has_to) {
                     handle_change(&db, tokens, delimiters);
                 } else {
-                    std::cerr << "Error: InvalidKeyName: '" << new_key << "' cannot be purely numeric." << std::endl;
+                    std::cerr << "Error: Missing 'to' keyword.\nUsage: change [type] <old> to [type] <new> [value]" << std::endl;
                     show_dur = false;
                 }
             } else {
