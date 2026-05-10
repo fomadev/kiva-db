@@ -7,10 +7,10 @@
 
 /**
  * Affiche l'aide du Shell KivaDB avec les précisions sur le typage strict.
- * Mise à jour pour la v2.1.3 (Refactoring & Security update).
+ * Mise à jour pour la v2.1.5 (Refactoring & Security update).
  */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.1.3 Strict Mode) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.1.5 Strict Mode) ---\n"
               << "  RELIABILITY RULES:\n"
               << "  - Strings MUST be quoted: \"value\" or 'value'.\n"
               << "  - Numbers MUST NOT be quoted: 42, 3.14, true.\n"
