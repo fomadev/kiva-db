@@ -108,7 +108,7 @@ std::string handle_interpolation(KivaDB** db, std::string content) {
 }
 
 /**
- * handle_print (v2.1.6 - Final Release with List & Space Support)
+ * handle_print (v2.1.5 - Final Release with List & Space Support)
  */
 void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (tokens.size() < 2) {

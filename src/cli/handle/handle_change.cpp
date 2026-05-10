@@ -11,8 +11,8 @@
 #include <string>
 
 /**
- * RÈGLE v2.1.6 : Une clé est valide si elle n'est pas purement numérique.
- * Cette fonction ne doit être appelée que sur le NOM de la clé, jamais sur la VALEUR.
+ * RÈGLE v2.1.5+ : Une clé est valide si elle n'est pas purement numérique.
+ * Cette fonction ne doit être appelée que sur le NOM de la clé.
  */
 static bool is_valid_key_name(const std::string& key) {
     if (key.empty()) return false;
@@ -27,9 +27,9 @@ static bool is_kiva_type_local(const std::string& t) {
 }
 
 /**
- * handle_change (v2.1.6)
- * Gère le renommage et la migration avec validation stricte du nom de clé
- * tout en autorisant des valeurs numériques.
+ * handle_change (v2.1.5 - Transactional Update)
+ * Gère le renommage et la migration.
+ * Correction : Logique "Insert-then-Delete" pour éviter la perte de données.
  */
 void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     if (!db || !*db) return;
@@ -59,7 +59,6 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         to_index = 2;
     }
 
-    // Vérification de l'existence de la source dans la base
     const char* actual_type_str = kiva_typeof(*db, old_key.c_str());
     if (std::strcmp(actual_type_str, "none") == 0 || std::strcmp(actual_type_str, "undefined") == 0) {
         std::cerr << "Error: Source key '" << old_key << "' not found." << std::endl;
@@ -76,11 +75,11 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
     }
 
     if (to_index >= n || tokens[to_index] != "to") {
-        std::cerr << "Error: Missing 'to' keyword. Format: change <old> to <new>" << std::endl;
+        std::cerr << "Error: Missing 'to' keyword." << std::endl;
         return;
     }
 
-    // --- 2. LOCALISATION DE LA NOUVELLE CLÉ ET DU TYPE CIBLE ---
+    // --- 2. LOCALISATION DE LA NOUVELLE CLÉ ---
     std::string new_key;
     KivaType k_type_target = KIVA_TYPE_AUTO; 
     size_t val_index = 0;
@@ -103,47 +102,40 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
         return;
     }
 
-    // --- CORRECTION CRITIQUE v2.1.6 : Validation du NOM de la nouvelle clé uniquement ---
-    // On ne valide JAMAIS val_index avec cette fonction.
     if (!is_valid_key_name(new_key)) {
         std::cerr << "Error: InvalidKeyName: '" << new_key << "' cannot be purely numeric." << std::endl;
         return;
     }
 
-    // --- 3. LOGIQUE D'EXÉCUTION ---
+    // --- 3. LOGIQUE D'EXÉCUTION SÉCURISÉE ---
     
-    // CAS A : Renommage Simple (Valeur préservée car aucun argument de valeur fourni)
+    // CAS A : Renommage Simple (Pas de nouvelle valeur fournie)
     if (val_index >= n) {
         if (old_key == new_key) {
             std::cout << "Renamed: " << old_key << " -> " << new_key << " (No change needed)" << std::endl;
             return; 
         }
-
         if (k_type_target != KIVA_TYPE_AUTO && k_type_target != actual_enum) {
             std::cerr << "Error: Cannot change type without providing a new value." << std::endl;
             return;
         }
 
+        // kiva_rename est nativement atomique dans KivaDB
         if (kiva_rename(*db, old_key.c_str(), new_key.c_str()) == KIVA_OK) {
             std::cout << "Renamed: " << old_key << " -> " << new_key << " (Type preserved)" << std::endl;
         } else {
             std::cerr << "Error: Failed to rename. Target might already exist." << std::endl;
         }
     } 
-    // CAS B : Migration avec Nouvelle Valeur (ex: change u to k 44)
+    // CAS B : Migration avec Nouvelle Valeur
     else {
         std::string new_value = tokens[val_index];
         char delim = (val_index < delimiters.size()) ? delimiters[val_index] : 0;
 
-        // PHASE 1 : DÉTERMINATION DU TYPE DE LA VALEUR (Sans valider le nom)
+        // Inférence du type
         if (k_type_target == KIVA_TYPE_AUTO) {
-            if (new_value == "true" || new_value == "false") {
-                k_type_target = KIVA_TYPE_BOOLEAN;
-            } 
-            else if (!new_value.empty() && std::all_of(new_value.begin(), new_value.end(), ::isdigit)) {
-                // Ici, 44 est accepté car on est dans la section valeur
-                k_type_target = KIVA_TYPE_NUMBER;
-            } 
+            if (new_value == "true" || new_value == "false") k_type_target = KIVA_TYPE_BOOLEAN;
+            else if (!new_value.empty() && std::all_of(new_value.begin(), new_value.end(), ::isdigit)) k_type_target = KIVA_TYPE_NUMBER;
             else {
                 if (delim != '\"' && delim != '\'') {
                     std::cerr << "Error: String values must be enclosed in quotes." << std::endl;
@@ -151,28 +143,28 @@ void handle_change(KivaDB** db, const std::vector<std::string>& tokens, const st
                 }
                 k_type_target = KIVA_TYPE_STRING;
             }
-        }
-        else if (k_type_target == KIVA_TYPE_STRING) {
-            if (delim != '\"' && delim != '\'') {
-                std::cerr << "Error: Explicit string type requires quotes." << std::endl;
-                return;
-            }
+        } else if (k_type_target == KIVA_TYPE_STRING && (delim != '\"' && delim != '\'')) {
+            std::cerr << "Error: Explicit string type requires quotes." << std::endl;
+            return;
         }
 
-        // PHASE 2 : EXÉCUTION DE LA MIGRATION
-        // Si les noms diffèrent, on supprime l'ancienne pour éviter les doublons
-        if (old_key != new_key) {
-            kiva_delete(*db, old_key.c_str());
-        }
-
+        // --- TRANSACTION SECURE ---
+        // 1. On tente l'insertion de la nouvelle donnée D'ABORD
         KivaStatus status = kiva_set_ex(*db, new_key.c_str(), new_value.c_str(), k_type_target, 0);
         
         if (status == KIVA_OK) {
+            // 2. SEULEMENT si l'insertion a réussi, on peut supprimer l'ancienne clé safely
+            if (old_key != new_key) {
+                kiva_delete(*db, old_key.c_str());
+            }
+
             std::string t_final = (k_type_target == KIVA_TYPE_NUMBER) ? "number" : 
                                   (k_type_target == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
             std::cout << "Migrated: " << old_key << " -> " << new_key << " (Type: " << t_final << ")" << std::endl;
         } else {
-            std::cerr << "Error: Migration failed during insertion." << std::endl;
+            // 3. En cas d'erreur (ex: valeur 'kk' pour un booléen), on ne supprime rien
+            std::cerr << "Error: Migration failed (Invalid value for type). Source key '" 
+                      << old_key << "' has been preserved." << std::endl;
         }
     }
 }
