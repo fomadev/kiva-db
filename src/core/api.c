@@ -30,19 +30,25 @@ KivaStatus kiva_set_ex(KivaDB* db, const char* key, const char* value, KivaType 
     uint32_t v_size = (uint32_t)strlen(value);
     
     int64_t expires_at = (ttl_sec > 0) ? ((int64_t)time(NULL) + ttl_sec) : 0;
+    time_t current_timestamp = time(NULL); // Capture de l'horodatage d'insertion/modification
 
     fseek(db->file, 0, SEEK_END);
     int64_t pos = ftell(db->file);
 
+    // Écriture du bloc d'en-tête de la clé incluant le timestamp
     fwrite(&k_size, sizeof(uint32_t), 1, db->file);
     fwrite(&v_size, sizeof(uint32_t), 1, db->file);
     fwrite(&type_byte, sizeof(uint8_t), 1, db->file);
     fwrite(&expires_at, sizeof(int64_t), 1, db->file);
+    fwrite(&current_timestamp, sizeof(time_t), 1, db->file); // Persistance des 8 octets du timestamp
     fwrite(key, 1, k_size, db->file);
     fwrite(value, 1, v_size, db->file);
     fflush(db->file);
 
-    int64_t value_offset = pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size;
+    // Calcul du décalage (offset) de la valeur sur le disque prenant en compte le nouveau champ time_t
+    int64_t value_offset = pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + sizeof(time_t) + k_size;
+    
+    // Mise à jour de l'index en mémoire
     index_set_ex(db, key, value_offset, v_size, type, ttl_sec);
 
     return KIVA_OK;
@@ -73,6 +79,7 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     uint32_t k_size = (uint32_t)strlen(key);
     uint32_t v_size = 0; 
     int64_t expires_at = 0;
+    time_t current_timestamp = time(NULL);
     uint8_t type_byte = (uint8_t)KIVA_TYPE_UNKNOWN;
 
     fseek(db->file, 0, SEEK_END);
@@ -80,6 +87,7 @@ KivaStatus kiva_delete(KivaDB* db, const char* key) {
     fwrite(&v_size, sizeof(uint32_t), 1, db->file);
     fwrite(&type_byte, sizeof(uint8_t), 1, db->file);
     fwrite(&expires_at, sizeof(int64_t), 1, db->file);
+    fwrite(&current_timestamp, sizeof(time_t), 1, db->file); // Alignement du Tombstone avec le format
     fwrite(key, 1, k_size, db->file);
     fflush(db->file);
 

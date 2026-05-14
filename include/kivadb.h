@@ -6,13 +6,14 @@
 #ifndef KIVADB_H
 #define KIVADB_H
 
-#define KIVADB_VERSION "2.1.5"
+#define KIVADB_VERSION "2.1.6"
 #define MAGIC_SIGNATURE "KIVA"
 #define FORMAT_V1 1
 #define FORMAT_V2 2
 
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 
 /* Macros de création de dossier cross-platform */
 #ifdef _WIN32
@@ -24,8 +25,7 @@
     #define MKDIR(dir) mkdir(dir, 0755)
 #endif
 
-/* 
- * Pour assurer la compatibilité C++, on englobe les déclarations 
+/* * Pour assurer la compatibilité C++, on englobe les déclarations 
  * si le header est inclus dans un fichier .cpp
  */
 #ifdef __cplusplus
@@ -76,6 +76,7 @@ typedef struct {
     uint32_t v_size;     // Taille de la valeur
     KivaType type;       // Type de donnée
     int64_t expires_at;  // Timestamp Unix d'expiration (0 si infini)
+    time_t timestamp;    // Horodatage : Instant exact de création/modification
 } KeyDirEntry;
 
 /* --- API PUBLIQUE --- */

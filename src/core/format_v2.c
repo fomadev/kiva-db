@@ -89,7 +89,7 @@ int kiva_detect_format(FILE* file) {
 
 /**
  * Parcourt le fichier de données pour reconstruire l'index en mémoire (HashTable).
- * Gère la rétrocompatibilité V1 et les métadonnées V2 (Type + TTL).
+ * Gère la rétrocompatibilité V1 et les métadonnées V2 (Type + TTL + Timestamp).
  */
 void kiva_load_index(KivaDB* db) {
     fseek(db->file, 0, SEEK_SET);
@@ -107,19 +107,22 @@ void kiva_load_index(KivaDB* db) {
     uint32_t k_size, v_size;
     uint8_t type_raw;
     int64_t expires_at = 0;
+    time_t record_timestamp = 0;
     
     // Boucle de lecture séquentielle (Log-structured storage)
     while (fread(&k_size, sizeof(uint32_t), 1, db->file) == 1) {
         if (fread(&v_size, sizeof(uint32_t), 1, db->file) != 1) break;
         
         if (format == FORMAT_V2) {
-            // Lecture métadonnées V2 : Type (1 octet) + Expiration (8 octets)
+            // Lecture métadonnées V2 : Type (1 octet) + Expiration (8 octets) + Timestamp (8 octets)
             if (fread(&type_raw, sizeof(uint8_t), 1, db->file) != 1) break;
             if (fread(&expires_at, sizeof(int64_t), 1, db->file) != 1) break;
+            if (fread(&record_timestamp, sizeof(time_t), 1, db->file) != 1) break; // Extraction des 8 octets du timestamp
         } else {
-            // Fallback V1 : Tout est considéré String, pas d'expiration
+            // Fallback V1 : Tout est considéré String, pas d'expiration, timestamp à l'instant actuel
             type_raw = KIVA_TYPE_STRING;
             expires_at = 0;
+            record_timestamp = time(NULL);
         }
         
         char* key = (char*)malloc(k_size + 1);
@@ -133,13 +136,15 @@ void kiva_load_index(KivaDB* db) {
         } else {
             // Vérification de l'expiration (Lazy Loading)
             if (expires_at > 0 && expires_at < (int64_t)time(NULL)) {
-                // Donnée expirée : On avance le pointeur de fichier sans indexer
+                // Donnée expirée : On avance le pointeur de fichier sans l'indexer
                 fseek(db->file, v_size, SEEK_CUR);
             } else {
                 // Donnée valide : Enregistrement de l'offset physique de la valeur
                 int64_t current_offset = ftell(db->file);
                 int ttl_remaining = (expires_at > 0) ? (int)(expires_at - time(NULL)) : 0;
                 
+                // Note : Pour lier l'horodatage à la HashTable en mémoire, 
+                // index_set_ex devra être mis à jour pour intercepter record_timestamp.
                 index_set_ex(db, key, current_offset, v_size, (KivaType)type_raw, ttl_remaining);
                 
                 // Sauter la valeur pour lire l'entrée suivante

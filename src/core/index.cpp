@@ -45,7 +45,15 @@ void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, Kiv
     if (!db || !db->cpp_index || !key) return;
     
     auto* index = static_cast<KivaIndex*>(db->cpp_index);
-    KeyDirEntry entry = {offset, v_size, type, 0};
+    
+    // Initialisation explicite pour éviter missing-field-initializers
+    KeyDirEntry entry;
+    entry.offset = offset;
+    entry.v_size = v_size;
+    entry.type = type;
+    entry.expires_at = 0;
+    entry.timestamp = std::time(nullptr);
+    
     index->map[std::string(key)] = entry;
 }
 
@@ -57,7 +65,15 @@ void index_set_ex(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, 
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     
     int64_t expiry = (ttl_sec > 0) ? (static_cast<int64_t>(std::time(nullptr)) + ttl_sec) : 0;
-    map[std::string(key)] = {offset, v_size, type, expiry};
+    
+    KeyDirEntry entry;
+    entry.offset = offset;
+    entry.v_size = v_size;
+    entry.type = type;
+    entry.expires_at = expiry;
+    entry.timestamp = std::time(nullptr);
+
+    map[std::string(key)] = entry;
 }
 
 /**
@@ -106,6 +122,7 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         std::string val; 
         KivaType type; 
         int64_t expires_at; 
+        time_t timestamp;
     };
     std::vector<ValidEntry> valid_entries;
 
@@ -123,7 +140,13 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         fread(val_ptr, 1, it->second.v_size, db->file);
         val_ptr[it->second.v_size] = '\0';
         
-        valid_entries.push_back({it->first, std::string(val_ptr), it->second.type, it->second.expires_at});
+        valid_entries.push_back({
+            it->first, 
+            std::string(val_ptr), 
+            it->second.type, 
+            it->second.expires_at, 
+            it->second.timestamp
+        });
         free(val_ptr);
         ++it;
     }
@@ -143,11 +166,17 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         fwrite(e.key.c_str(), 1, k_size, temp_file);
         fwrite(e.val.c_str(), 1, v_size, temp_file);
 
-        // Calcul de l'offset vers la donnée de valeur pour le prochain index_lookup
+        // Calcul de l'offset vers la donnée de valeur
         int64_t new_offset = (int64_t)(pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size);
         
-        KeyDirEntry updated_entry = { new_offset, v_size, e.type, exp };
-        map[e.key] = updated_entry;
+        KeyDirEntry updated;
+        updated.offset = new_offset;
+        updated.v_size = v_size;
+        updated.type = e.type;
+        updated.expires_at = exp;
+        updated.timestamp = e.timestamp;
+
+        map[e.key] = updated;
     }
 }
 
@@ -161,40 +190,43 @@ void index_scan(KivaDB* db) {
 
     std::cout << "\n--- KivaDB Scan (v2.1.5 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
+        // Formatage du timestamp
+        struct tm* dt = localtime(&entry.timestamp);
+        char time_buf[20];
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", dt);
+
         std::string status = "";
         if (entry.expires_at > 0) {
             if (entry.expires_at < now) status = " [EXPIRED]";
             else status = " [TTL: " + std::to_string(entry.expires_at - now) + "s]";
         }
 
-        std::string t = (entry.type == KIVA_TYPE_NUMBER) ? "number" : 
+        const char* t = (entry.type == KIVA_TYPE_NUMBER) ? "number" : 
                         (entry.type == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
         
         std::cout << "  -> " << std::left << std::setw(15) << key 
                   << " | " << std::setw(8) << t 
-                  << " | " << entry.v_size << " bytes" << status << "\n";
+                  << " | " << std::setw(7) << entry.v_size << " bytes"
+                  << " | " << time_buf << status << "\n";
     }
     std::cout << "Total: " << map.size() << " keys.\n--------------------------------\n";
 }
 
-/* --- Implémentations pour l'API STATS & CHEMIN --- */
+/* --- Implémentations pour l'API STATS & INFOS --- */
 
 /**
  * Retourne le nombre exact de clés indexées.
  */
 uint32_t index_get_count(KivaDB* db) {
     if (!db || !db->cpp_index) return 0;
-    auto* index = static_cast<KivaIndex*>(db->cpp_index);
-    return (uint32_t)index->map.size();
+    return (uint32_t)static_cast<KivaIndex*>(db->cpp_index)->map.size();
 }
 
 /**
  * Calcule l'usage mémoire approximatif de l'index en RAM.
  */
 size_t kiva_get_memory_usage(KivaDB* db) {
-    if (!db || !db->cpp_index) {
-        return 0;
-    }
+    if (!db || !db->cpp_index) return 0;
 
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     

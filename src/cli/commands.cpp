@@ -42,13 +42,6 @@ void handle_typeof(KivaDB** db, const std::vector<std::string>& tokens) {
 }
 
 /**
- * Gère SCAN
- */
-void handle_scan(KivaDB** db) {
-    kiva_scan(*db);
-}
-
-/**
  * Gère COMPACT
  */
 void handle_compact(KivaDB** db) {
