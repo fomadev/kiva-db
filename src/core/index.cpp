@@ -46,13 +46,13 @@ void index_set(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, Kiv
     
     auto* index = static_cast<KivaIndex*>(db->cpp_index);
     
-    // Initialisation explicite pour éviter missing-field-initializers
+    // Initialisation explicite de tous les champs (évite missing-field-initializers)
     KeyDirEntry entry;
     entry.offset = offset;
     entry.v_size = v_size;
     entry.type = type;
     entry.expires_at = 0;
-    entry.timestamp = std::time(nullptr);
+    entry.timestamp = (int64_t)std::time(nullptr);
     
     index->map[std::string(key)] = entry;
 }
@@ -71,7 +71,7 @@ void index_set_ex(KivaDB* db, const char* key, int64_t offset, uint32_t v_size, 
     entry.v_size = v_size;
     entry.type = type;
     entry.expires_at = expiry;
-    entry.timestamp = std::time(nullptr);
+    entry.timestamp = (int64_t)std::time(nullptr);
 
     map[std::string(key)] = entry;
 }
@@ -87,7 +87,7 @@ int index_lookup(KivaDB* db, const char* key, KeyDirEntry* out_entry) {
 
     if (it != map.end()) {
         // Suppression paresseuse si le TTL est expiré
-        if (it->second.expires_at > 0 && it->second.expires_at < std::time(nullptr)) {
+        if (it->second.expires_at > 0 && it->second.expires_at < (int64_t)std::time(nullptr)) {
             map.erase(it);
             return 0;
         }
@@ -122,19 +122,19 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         std::string val; 
         KivaType type; 
         int64_t expires_at; 
-        time_t timestamp;
+        int64_t timestamp;
     };
     std::vector<ValidEntry> valid_entries;
 
-    // Phase 1 : Extraction des données valides
+    // Phase 1 : Extraction des données valides du fichier actuel
     for (auto it = map.begin(); it != map.end(); ) {
-        if (it->second.expires_at > 0 && it->second.expires_at < now) {
+        if (it->second.expires_at > 0 && it->second.expires_at < (int64_t)now) {
             it = map.erase(it); 
             continue;
         }
 
         char* val_ptr = (char*)malloc(it->second.v_size + 1);
-        if (!val_ptr) { ++it; continue; } // Sécurité mémoire
+        if (!val_ptr) { ++it; continue; }
         
         fseek(db->file, it->second.offset, SEEK_SET);
         fread(val_ptr, 1, it->second.v_size, db->file);
@@ -143,7 +143,7 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         valid_entries.push_back({
             it->first, 
             std::string(val_ptr), 
-            it->second.type, 
+            (KivaType)it->second.type, 
             it->second.expires_at, 
             it->second.timestamp
         });
@@ -151,37 +151,40 @@ void kiva_internal_compact_step(KivaDB* db, FILE* temp_file) {
         ++it;
     }
 
-    // Phase 2 : Réécriture dans le nouveau fichier et mise à jour de l'index
+    // Phase 2 : Réécriture compacte dans le nouveau fichier temp_file
     for (const auto& e : valid_entries) {
         uint32_t k_size = (uint32_t)e.key.length();
         uint32_t v_size = (uint32_t)e.val.length();
         uint8_t t_byte = (uint8_t)e.type;
         int64_t exp = e.expires_at;
+        int64_t ts = e.timestamp;
 
         long pos = ftell(temp_file);
         fwrite(&k_size, sizeof(uint32_t), 1, temp_file);
         fwrite(&v_size, sizeof(uint32_t), 1, temp_file);
         fwrite(&t_byte, sizeof(uint8_t), 1, temp_file);
         fwrite(&exp, sizeof(int64_t), 1, temp_file);
+        fwrite(&ts, sizeof(int64_t), 1, temp_file); // On préserve le timestamp d'origine
         fwrite(e.key.c_str(), 1, k_size, temp_file);
         fwrite(e.val.c_str(), 1, v_size, temp_file);
 
-        // Calcul de l'offset vers la donnée de valeur
-        int64_t new_offset = (int64_t)(pos + (sizeof(uint32_t) * 2) + sizeof(uint8_t) + sizeof(int64_t) + k_size);
+        // Calcul du nouvel offset pointant vers la valeur
+        int64_t header_size = (sizeof(uint32_t) * 2) + sizeof(uint8_t) + (sizeof(int64_t) * 2);
+        int64_t new_offset = (int64_t)(pos + header_size + k_size);
         
         KeyDirEntry updated;
         updated.offset = new_offset;
         updated.v_size = v_size;
-        updated.type = e.type;
+        updated.type = (KivaType)e.type;
         updated.expires_at = exp;
-        updated.timestamp = e.timestamp;
+        updated.timestamp = ts;
 
         map[e.key] = updated;
     }
 }
 
 /**
- * Affiche l'état actuel de la base (Debug).
+ * Affiche l'état actuel de la base (Debug / CLI Scan).
  */
 void index_scan(KivaDB* db) {
     if (!db || !db->cpp_index) return;
@@ -190,26 +193,27 @@ void index_scan(KivaDB* db) {
 
     std::cout << "\n--- KivaDB Scan (v2.1.5 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
-        // Formatage du timestamp
-        struct tm* dt = localtime(&entry.timestamp);
+        // Conversion du timestamp Unix en format lisible YYYY-MM-DD HH:MM:SS
+        time_t raw_time = (time_t)entry.timestamp;
+        struct tm* dt = localtime(&raw_time);
         char time_buf[20];
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", dt);
 
         std::string status = "";
         if (entry.expires_at > 0) {
-            if (entry.expires_at < now) status = " [EXPIRED]";
+            if (entry.expires_at < (int64_t)now) status = " [EXPIRED]";
             else status = " [TTL: " + std::to_string(entry.expires_at - now) + "s]";
         }
 
-        const char* t = (entry.type == KIVA_TYPE_NUMBER) ? "number" : 
-                        (entry.type == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
+        const char* type_str = (entry.type == KIVA_TYPE_NUMBER) ? "number" : 
+                               (entry.type == KIVA_TYPE_BOOLEAN) ? "boolean" : "string";
         
         std::cout << "  -> " << std::left << std::setw(15) << key 
-                  << " | " << std::setw(8) << t 
+                  << " | " << std::setw(8) << type_str 
                   << " | " << std::setw(7) << entry.v_size << " bytes"
                   << " | " << time_buf << status << "\n";
     }
-    std::cout << "Total: " << map.size() << " keys.\n--------------------------------\n";
+    std::cout << "Total: " << map.size() << " keys.\n--------------------------------\n" << std::endl;
 }
 
 /* --- Implémentations pour l'API STATS & INFOS --- */
@@ -235,9 +239,9 @@ size_t kiva_get_memory_usage(KivaDB* db) {
     
     // 2. Estimation de la consommation des données dynamiques
     for (auto const& [key, val] : map) {
-        // key.capacity() : Mémoire allouée pour le string
+        // key.capacity() : Mémoire allouée pour le string (clé)
         // sizeof(KeyDirEntry) : Structure fixe dans la map
-        // 32 : Overhead moyen d'un nœud d'unordered_map (pointeurs next/prev, hash)
+        // 32 : Overhead moyen d'un nœud d'unordered_map (pointeurs internes, hash, buckets)
         total += key.capacity() + sizeof(KeyDirEntry) + 32; 
     }
 
@@ -245,7 +249,7 @@ size_t kiva_get_memory_usage(KivaDB* db) {
 }
 
 /**
- * Retourne le chemin de la base de données.
+ * Retourne le chemin vers le fichier de données de la base.
  */
 const char* kiva_get_db_path(KivaDB* db) {
     return (db) ? db->path : "Unknown";
