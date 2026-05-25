@@ -233,7 +233,7 @@ int main(int argc, char* argv[]) {
         else if (cmd == "scan" || cmd == "stats" || cmd == "compact" || cmd == "clear") {
             if (n == 1) {
                 if (cmd == "scan") index_scan(db);
-                else if (cmd == "stats") handle_stats(&db);
+                else if (cmd == "stats") handle_stats(&db, tokens, delimiters);
                 else if (cmd == "compact") { 
                     kiva_compact(db); 
                     std::cout << "Database storage compacted successfully." << std::endl; 
