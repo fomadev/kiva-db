@@ -12,6 +12,7 @@ RM_DIR = rm -rf
 
 # --- Configuration des Dossiers ---
 CORE_DIR = src/core
+INDEX_DIR = src/core/index
 CLI_DIR = src/cli
 HANDLE_DIR = src/cli/handle
 OBJ_DIR = obj
@@ -19,16 +20,18 @@ OBJ_DIR = obj
 # --- Détection des Sources ---
 C_CORE_SRCS = $(wildcard $(CORE_DIR)/*.c)
 CPP_CORE_SRCS = $(wildcard $(CORE_DIR)/*.cpp)
+CPP_INDEX_SRCS = $(wildcard $(INDEX_DIR)/*.cpp)
 CPP_CLI_SRCS = $(wildcard $(CLI_DIR)/*.cpp)
 CPP_HANDLE_SRCS = $(wildcard $(HANDLE_DIR)/*.cpp)
 
 # --- Génération de la Liste des Objets ---
 C_CORE_OBJS = $(patsubst $(CORE_DIR)/%.c, $(OBJ_DIR)/%.o, $(C_CORE_SRCS))
 CPP_CORE_OBJS = $(patsubst $(CORE_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(CPP_CORE_SRCS))
+CPP_INDEX_OBJS = $(patsubst $(INDEX_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(CPP_INDEX_SRCS))
 CPP_CLI_OBJS = $(patsubst $(CLI_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(CPP_CLI_SRCS))
 CPP_HANDLE_OBJS = $(patsubst $(HANDLE_DIR)/%.cpp, $(OBJ_DIR)/%.o, $(CPP_HANDLE_SRCS))
 
-OBJS = $(C_CORE_OBJS) $(CPP_CORE_OBJS) $(CPP_CLI_OBJS) $(CPP_HANDLE_OBJS)
+OBJS = $(C_CORE_OBJS) $(CPP_CORE_OBJS) $(CPP_INDEX_OBJS) $(CPP_CLI_OBJS) $(CPP_HANDLE_OBJS)
 
 TARGET = kivadb.exe
 
@@ -40,7 +43,6 @@ $(TARGET): $(OBJS)
 	$(CXX) $(OBJS) -o $(TARGET) $(LDFLAGS)
 
 # --- Gestion Automatique du Dossier d'Objets ---
-# Cette règle crée le dossier obj s'il n'existe pas
 $(OBJ_DIR):
 	@$(MKDIR_P) $(OBJ_DIR)
 
@@ -52,6 +54,10 @@ $(OBJ_DIR)/%.o: $(CORE_DIR)/%.c | $(OBJ_DIR)
 
 # Compilation C++ (Core)
 $(OBJ_DIR)/%.o: $(CORE_DIR)/%.cpp | $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compilation C++ (Index modulaire dans src/core/index)
+$(OBJ_DIR)/%.o: $(INDEX_DIR)/%.cpp | $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 # Compilation C++ (CLI principal)
