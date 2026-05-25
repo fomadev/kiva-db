@@ -64,9 +64,9 @@ size_t kiva_get_memory_usage(KivaDB* db) {
 
 /**
  * Calcule le volume utile des données vivantes en mémoire.
- * Additionne la longueur brute de la clé et la taille stockée de la valeur.
+ * Alignée sur la signature C sans const pour correspondre au reste de l'API.
  */
-size_t index_get_live_size(const KivaDB* db) {
+size_t index_get_live_size(KivaDB* db) {
     if (!db || !db->cpp_index) return 0;
 
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;

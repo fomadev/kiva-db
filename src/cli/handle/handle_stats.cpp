@@ -9,13 +9,10 @@
 #include <vector>
 #include <string>
 
-// Enveloppement des fonctions de l'API C / Core pour garantir le linkage correct
+// Déclare uniquement la fonction de télémétrie manquante dans kivadb.h.
+// Les autres fonctions (index_get_count, etc.) sont déjà héritées via commands.hpp.
 extern "C" {
-    uint32_t index_get_count(const KivaDB* db);
-    size_t index_get_live_size(const KivaDB* db);
-    const char* kiva_get_db_path(const KivaDB* db);
-    long long kiva_get_file_size(const char* path);
-    size_t kiva_get_memory_usage(const KivaDB* db);
+    size_t index_get_live_size(KivaDB* db);
 }
 
 /**
@@ -32,7 +29,7 @@ void handle_stats(KivaDB** db, const std::vector<std::string>& tokens, const std
         return;
     }
 
-    // 1. Récupération des métriques matérielles et logiques
+    // 1. Récupération des métriques matérielles et logiques (conformes à kivadb.h)
     uint32_t keys = index_get_count(*db);
     const char* path = kiva_get_db_path(*db); 
     long long f_size = kiva_get_file_size(path);       // Taille physique sur disque (Size_disk)
