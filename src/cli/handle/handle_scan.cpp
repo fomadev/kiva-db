@@ -27,7 +27,7 @@ void handle_scan(KivaDB** db, const std::vector<std::string>& tokens) {
     uint32_t count = index_get_count(*db);
     
     // En-tête du Shell pour le rendu utilisateur
-    std::cout << "\n--- KivaDB Scan (v2.1.6 | FomaDev Public License) ---" << std::endl;
+    std::cout << "\n--- KivaDB Scan (v2.1.8 | FomaDev Public License) ---" << std::endl;
     
     if (count == 0) {
         std::cout << " [!] Database is currently empty." << std::endl;

@@ -9,12 +9,14 @@
 #include <vector>
 #include <string>
 
-// Déclarations des fonctions de l'API externe (core/api.c et index/index_telemetry.cpp)
-uint32_t index_get_count(const KivaDB* db);
-size_t index_get_live_size(const KivaDB* db); // Renvoie la somme des tailles des clés + valeurs actives
-const char* kiva_get_db_path(const KivaDB* db);
-long long kiva_get_file_size(const char* path);
-size_t kiva_get_memory_usage(const KivaDB* db);
+// Enveloppement des fonctions de l'API C / Core pour garantir le linkage correct
+extern "C" {
+    uint32_t index_get_count(const KivaDB* db);
+    size_t index_get_live_size(const KivaDB* db);
+    const char* kiva_get_db_path(const KivaDB* db);
+    long long kiva_get_file_size(const char* path);
+    size_t kiva_get_memory_usage(const KivaDB* db);
+}
 
 /**
  * Affiche les statistiques détaillées de la base de données (v2.1.8).

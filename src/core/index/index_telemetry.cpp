@@ -18,7 +18,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.1.7 | FomaDev Public License) ---" << std::endl;
+    std::cout << "\n--- KivaDB Scan (v2.1.8 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
         time_t raw_time = (time_t)entry.timestamp;
         struct tm* dt = std::localtime(&raw_time);
@@ -60,6 +60,24 @@ size_t kiva_get_memory_usage(KivaDB* db) {
     }
 
     return total;
+}
+
+/**
+ * Calcule le volume utile des données vivantes en mémoire.
+ * Additionne la longueur brute de la clé et la taille stockée de la valeur.
+ */
+size_t index_get_live_size(const KivaDB* db) {
+    if (!db || !db->cpp_index) return 0;
+
+    auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
+    size_t total_live_size = 0;
+
+    for (const auto& [key, entry] : map) {
+        total_live_size += key.size();       // Taille de la clé en octets
+        total_live_size += entry.v_size;     // Taille de la valeur en octets
+    }
+
+    return total_live_size;
 }
 
 } // extern "C"

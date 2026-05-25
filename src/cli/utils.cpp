@@ -11,7 +11,7 @@
  * l'arithmétique, l'interpolation et le suivi de la persistance .kiva.
  */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.1.7 Stable) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.1.8 Stable) ---\n"
               << "  RELIABILITY & SYNTAX RULES:\n"
               << "  - Strings        : MUST be quoted -> \"Hello\" or 'Kiva'.\n"
               << "  - Numbers/Bools  : MUST NOT be quoted -> 42, 3.14, true, false.\n"

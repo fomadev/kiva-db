@@ -97,7 +97,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "KivaDB Shell v2.1.7 (Strict Mode with Chaining)\nType 'help' or 'h' for command list\n";
+    std::cout << "KivaDB Shell v2.1.8 (Strict Mode with Chaining)\nType 'help' or 'h' for command list\n";
 
     std::string line;
     while (true) {
