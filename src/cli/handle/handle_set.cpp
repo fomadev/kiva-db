@@ -22,7 +22,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
     int global_ttl = 0;
     
     // 1. Pré-scan pour extraire le TTL global s'il existe
-    for (size_size j = 0; j < tokens.size(); j++) {
+    for (size_t j = 0; j < tokens.size(); j++) {
         if (tokens[j] == "ttl" && j + 1 < tokens.size()) {
             try { 
                 global_ttl = std::stoi(tokens[j+1]); 
