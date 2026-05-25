@@ -16,7 +16,7 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande SET avec support du TTL, du typage forcé et du chaînage 'and'.
- * Alignement immédiat de l'index sur la clé pour garantir la synchronisation avec le parser.
+ * Version sécurisée contre les désynchronisations du tableau de délimiteurs.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
@@ -41,19 +41,19 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             continue; 
         }
         
-        // Ignorer le bloc "ttl <val>" qui a déjà été traité au pré-scan
+        // Ignorer le bloc "ttl <val>" (déjà traité au pré-scan)
         if (tokens[i] == "ttl") {
             i += 2; 
             continue;
         }
 
         KivaType forced = KIVA_TYPE_UNKNOWN;
+        bool has_type_modifier = false;
 
         // Si le token actuel est un modificateur de type, on l'enregistre et on avance i.
-        // Après ce bloc, 'i' pointe STRUCTURELLEMENT et TOUJOURS sur la clé physique.
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; has_type_modifier = true; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; has_type_modifier = true; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; has_type_modifier = true; }
 
         // Sécurité : Vérifie qu'il reste bien une clé et une valeur à consommer
         if (i >= tokens.size() || i + 1 >= tokens.size()) {
@@ -61,14 +61,23 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             break;
         }
 
-        // L'index 'i' étant parfaitement aligné, la correspondance est absolue
-        char key_delim = delimiters[i];
-        char val_delim = delimiters[i+1];
+        // Extraction sécurisée par index aligné
+        char key_delim = (i < delimiters.size()) ? delimiters[i] : 0;
+        char val_delim = ((i + 1) < delimiters.size()) ? delimiters[i+1] : 0;
         std::string key_str = tokens[i];
         std::string val_str = tokens[i+1];
 
-        // Calcul de la position de la paire suivante (i + Clé + Valeur)
+        // Calcul de la position de la paire suivante (Clé + Valeur)
         size_t next_i = i + 2;
+
+        // --- CORRECTION DES FAUX POSITIFS DE DÉLIMITAGE ---
+        // Si on vient de sauter un modificateur de type ("number", etc.) et que le handler 
+        // lit un guillemet pour la clé alors que la clé est un texte brut (ex: b), on redresse.
+        if (has_type_modifier && is_string_quote(key_delim)) {
+            if (key_str != "string" && key_str != "number" && key_str != "boolean") {
+                key_delim = 0; // Forçage en bare text (Zéro décalage résiduel)
+            }
+        }
 
         // --- VALIDATION DE LA CLÉ ---
         if (is_reserved_keyword(key_str)) {

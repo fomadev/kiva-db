@@ -17,7 +17,7 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande UPDATE avec support du typage forcé et du chaînage 'and'.
- * Alignement immédiat de l'index sur la clé pour éliminer les faux positifs de typage.
+ * Immunisé contre les décalages d'index de délimiteurs provoqués par le tokenizer.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     for (size_t i = 1; i < tokens.size(); ) {
@@ -29,11 +29,12 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
         }
 
         KivaType forced = KIVA_TYPE_UNKNOWN;
+        bool has_type_modifier = false;
         
         // Aligner immédiatement 'i' sur la clé en consommant le type en amont
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; has_type_modifier = true; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; has_type_modifier = true; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; has_type_modifier = true; }
 
         // Sécurité anti-débordement
         if (i >= tokens.size() || i + 1 >= tokens.size()) {
@@ -41,13 +42,20 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             break;
         }
 
-        // Accès synchrone direct via l'index 'i' recalibré
-        char key_delim = delimiters[i];
-        char val_delim = delimiters[i+1];
+        // Accès synchrone sécurisé aux vecteurs
+        char key_delim = (i < delimiters.size()) ? delimiters[i] : 0;
+        char val_delim = ((i + 1) < delimiters.size()) ? delimiters[i+1] : 0;
         std::string key_str = tokens[i];
         std::string val_str = tokens[i+1];
 
         size_t next_i = i + 2;
+
+        // --- CORRECTION DES FAUX POSITIFS DE DÉLIMITAGE ---
+        if (has_type_modifier && is_string_quote(key_delim)) {
+            if (key_str != "string" && key_str != "number" && key_str != "boolean") {
+                key_delim = 0;
+            }
+        }
 
         // 1. Protection contre les mots-clés réservés
         if (is_reserved_keyword(key_str)) {
@@ -61,7 +69,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             i = next_i; continue;
         }
 
-        // 2. Vérification de l'existence (UPDATE requiert une clé présente)
+        // 2. Vérification de l'existence
         const char* current_type_str = kiva_typeof(*db, key_str.c_str());
         if (std::strcmp(current_type_str, "none") == 0) {
             std::cout << "Error: Key '" << key_str << "' not found. Use 'set' to create it.\n";
