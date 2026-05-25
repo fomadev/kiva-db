@@ -16,8 +16,8 @@ bool is_bare(char d);
 bool is_backtick(char d);
 
 /**
- * Gère la mise à jour des clés existantes.
- * Synchronisation absolue des délimiteurs par indexation relative.
+ * Gère la commande UPDATE avec support du typage forcé et du chaînage 'and'.
+ * Alignement immédiat de l'index sur la clé pour éliminer les faux positifs de typage.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     for (size_t i = 1; i < tokens.size(); ) {
@@ -28,30 +28,26 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             continue; 
         }
 
-        // --- CALCUL DES INDEX RELATIFS (Zéro décalage) ---
         KivaType forced = KIVA_TYPE_UNKNOWN;
-        size_t key_index = i;
         
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  key_index = i + 1; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  key_index = i + 1; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; key_index = i + 1; }
-
-        size_t val_index = key_index + 1;
+        // Aligner immédiatement 'i' sur la clé en consommant le type en amont
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
 
         // Sécurité anti-débordement
-        if (key_index >= tokens.size() || val_index >= tokens.size()) {
+        if (i >= tokens.size() || i + 1 >= tokens.size()) {
             std::cout << "Error: Syntax error. Missing key or value.\n";
             break;
         }
 
-        // Extraction isolée et synchronisée
-        char key_delim = delimiters[key_index];
-        char val_delim = delimiters[val_index];
-        std::string key_str = tokens[key_index];
-        std::string val_str = tokens[val_index];
+        // Accès synchrone direct via l'index 'i' recalibré
+        char key_delim = delimiters[i];
+        char val_delim = delimiters[i+1];
+        std::string key_str = tokens[i];
+        std::string val_str = tokens[i+1];
 
-        // Index d'avancement pour sécuriser les 'continue'
-        size_t next_i = val_index + 1;
+        size_t next_i = i + 2;
 
         // 1. Protection contre les mots-clés réservés
         if (is_reserved_keyword(key_str)) {
@@ -65,7 +61,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             i = next_i; continue;
         }
 
-        // 2. Vérification de l'existence
+        // 2. Vérification de l'existence (UPDATE requiert une clé présente)
         const char* current_type_str = kiva_typeof(*db, key_str.c_str());
         if (std::strcmp(current_type_str, "none") == 0) {
             std::cout << "Error: Key '" << key_str << "' not found. Use 'set' to create it.\n";
@@ -114,7 +110,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             }
         }
 
-        // 5. Validation du format par rapport au type en base
+        // 5. Validation du format par rapport au type physique en base
         if ((actual == "string" && detected_type != KIVA_TYPE_STRING) ||
             (actual == "number" && detected_type != KIVA_TYPE_NUMBER) ||
             (actual == "boolean" && detected_type != KIVA_TYPE_BOOLEAN)) {
@@ -132,7 +128,6 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             std::cout << "Error: Could not update '" << key_str << "' (Internal error).\n";
         }
         
-        // Avancement dynamique précis
         i = next_i; 
     }
 }

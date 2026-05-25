@@ -16,13 +16,13 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande SET avec support du TTL, du typage forcé et du chaînage 'and'.
- * Utilise un calcul d'index relatifs pour garantir une synchronisation parfaite avec les délimiteurs.
+ * Alignement immédiat de l'index sur la clé pour garantir la synchronisation avec le parser.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
     
     // 1. Pré-scan pour extraire le TTL global s'il existe
-    for (size_t j = 0; j < tokens.size(); j++) {
+    for (size_size j = 0; j < tokens.size(); j++) {
         if (tokens[j] == "ttl" && j + 1 < tokens.size()) {
             try { 
                 global_ttl = std::stoi(tokens[j+1]); 
@@ -41,36 +41,34 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             continue; 
         }
         
-        // Ignorer le bloc "ttl <val>" (déjà traité au pré-scan)
+        // Ignorer le bloc "ttl <val>" qui a déjà été traité au pré-scan
         if (tokens[i] == "ttl") {
             i += 2; 
             continue;
         }
 
-        // --- CALCUL DES INDEX REALTIFS (Zéro décalage) ---
         KivaType forced = KIVA_TYPE_UNKNOWN;
-        size_t key_index = i;
-        
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  key_index = i + 1; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  key_index = i + 1; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; key_index = i + 1; }
 
-        size_t val_index = key_index + 1;
+        // Si le token actuel est un modificateur de type, on l'enregistre et on avance i.
+        // Après ce bloc, 'i' pointe STRUCTURELLEMENT et TOUJOURS sur la clé physique.
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
 
-        // Vérification de sécurité anti-débordement
-        if (key_index >= tokens.size() || val_index >= tokens.size()) {
+        // Sécurité : Vérifie qu'il reste bien une clé et une valeur à consommer
+        if (i >= tokens.size() || i + 1 >= tokens.size()) {
             std::cout << "Error: Syntax error. Missing key or value.\n";
             break;
         }
 
-        // Extraction synchronisée des données et délimiteurs
-        char key_delim = delimiters[key_index];
-        char val_delim = delimiters[val_index];
-        std::string key_str = tokens[key_index];
-        std::string val_str = tokens[val_index];
+        // L'index 'i' étant parfaitement aligné, la correspondance est absolue
+        char key_delim = delimiters[i];
+        char val_delim = delimiters[i+1];
+        std::string key_str = tokens[i];
+        std::string val_str = tokens[i+1];
 
-        // Mettre à jour l'index d'avancement pour les cas de 'continue'
-        size_t next_i = val_index + 1;
+        // Calcul de la position de la paire suivante (i + Clé + Valeur)
+        size_t next_i = i + 2;
 
         // --- VALIDATION DE LA CLÉ ---
         if (is_reserved_keyword(key_str)) {
@@ -133,7 +131,6 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             std::cout << "Error: Could not save '" << key_str << "' (Internal error).\n";
         }
         
-        // Avancement dynamique
         i = next_i; 
     }
 }
