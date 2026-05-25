@@ -16,7 +16,7 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande SET avec support du TTL, du typage forcé et du chaînage 'and'.
- * Avancement contrôlé de l'index pour éviter les décalages de jetons.
+ * Utilise un calcul d'index relatifs pour garantir une synchronisation parfaite avec les délimiteurs.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
@@ -32,7 +32,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
         }
     }
 
-    // 2. Traitement des paires Clé/Valeur (i piloté manuellement)
+    // 2. Traitement des paires Clé/Valeur
     for (size_t i = 1; i < tokens.size(); ) {
         
         // Ignorer le mot-clé de liaison "and"
@@ -41,39 +41,46 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             continue; 
         }
         
-        // Ignorer le bloc "ttl <val>" qui a déjà été traité au pré-scan
+        // Ignorer le bloc "ttl <val>" (déjà traité au pré-scan)
         if (tokens[i] == "ttl") {
             i += 2; 
             continue;
         }
 
-        // Détection d'un type forcé (ex: set string ma_cle "123")
+        // --- CALCUL DES INDEX REALTIFS (Zéro décalage) ---
         KivaType forced = KIVA_TYPE_UNKNOWN;
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
+        size_t key_index = i;
+        
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  key_index = i + 1; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  key_index = i + 1; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; key_index = i + 1; }
 
-        // Vérification de sécurité après extraction du type forcé
-        if (i >= tokens.size() || i + 1 >= tokens.size()) {
+        size_t val_index = key_index + 1;
+
+        // Vérification de sécurité anti-débordement
+        if (key_index >= tokens.size() || val_index >= tokens.size()) {
             std::cout << "Error: Syntax error. Missing key or value.\n";
             break;
         }
 
-        // Extraction synchronisée des données courantes
-        char key_delim = delimiters[i];
-        char val_delim = delimiters[i+1];
-        std::string key_str = tokens[i];
-        std::string val_str = tokens[i+1];
+        // Extraction synchronisée des données et délimiteurs
+        char key_delim = delimiters[key_index];
+        char val_delim = delimiters[val_index];
+        std::string key_str = tokens[key_index];
+        std::string val_str = tokens[val_index];
+
+        // Mettre à jour l'index d'avancement pour les cas de 'continue'
+        size_t next_i = val_index + 1;
 
         // --- VALIDATION DE LA CLÉ ---
         if (is_reserved_keyword(key_str)) {
             std::cout << "Error: '" << key_str << "' is a reserved keyword and cannot be used as a key.\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         if (is_string_quote(key_delim)) {
             std::cout << "Error: Key '" << key_str << "' cannot use quotes. Use bare text or backticks (``).\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         // --- VALIDATION DU TYPE ET DU FORMAT DE LA VALEUR ---
@@ -85,7 +92,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
                 KivaType inferred = kiva_identify_type(val_str.c_str()); 
                 if (inferred == KIVA_TYPE_STRING) {
                     std::cout << "Error: String values like '" << val_str << "' must be quoted (\"\" or '').\n";
-                    i += 2; continue;
+                    i = next_i; continue;
                 }
                 forced = inferred;
             }
@@ -94,20 +101,20 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
                 if (!is_bare(val_delim)) {
                     std::cout << "Error: Numbers and Booleans must not be quoted.\n";
-                    i += 2; continue;
+                    i = next_i; continue;
                 }
             } 
             else if (forced == KIVA_TYPE_STRING) {
                 if (!is_string_quote(val_delim)) {
                     std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
-                    i += 2; continue;
+                    i = next_i; continue;
                 }
             }
         }
 
         if (is_backtick(val_delim)) {
             std::cout << "Error: Value for '" << key_str << "' cannot use backticks.\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         // --- VÉRIFICATION D'EXISTENCE ---
@@ -115,7 +122,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
         if (exists) {
             std::cout << "Error: Key '" << key_str << "' already exists. Use 'update' to change it.\n";
             free(exists); 
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         // --- PERSISTENCE ---
@@ -126,7 +133,7 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
             std::cout << "Error: Could not save '" << key_str << "' (Internal error).\n";
         }
         
-        // Avancement strict : consomme la clé et la valeur validées
-        i += 2; 
+        // Avancement dynamique
+        i = next_i; 
     }
 }

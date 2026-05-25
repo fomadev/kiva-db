@@ -16,12 +16,10 @@ bool is_bare(char d);
 bool is_backtick(char d);
 
 /**
- * Gère la mise à jour des clés existantes avec chaînage dynamique.
- * Avancement contrôlé de l'index pour éliminer les décalages d'analyse.
+ * Gère la mise à jour des clés existantes.
+ * Synchronisation absolue des délimiteurs par indexation relative.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
-    
-    // i++ supprimé pour un contrôle manuel rigoureux de la progression
     for (size_t i = 1; i < tokens.size(); ) {
         
         // Ignorer le mot-clé de liaison "and"
@@ -30,47 +28,54 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             continue; 
         }
 
-        // Détection du type forcé par l'utilisateur
+        // --- CALCUL DES INDEX RELATIFS (Zéro décalage) ---
         KivaType forced = KIVA_TYPE_UNKNOWN;
-        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  i++; }
-        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  i++; }
-        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; i++; }
+        size_t key_index = i;
+        
+        if (tokens[i] == "string")       { forced = KIVA_TYPE_STRING;  key_index = i + 1; }
+        else if (tokens[i] == "number")  { forced = KIVA_TYPE_NUMBER;  key_index = i + 1; }
+        else if (tokens[i] == "boolean") { forced = KIVA_TYPE_BOOLEAN; key_index = i + 1; }
 
-        // Sécurité anti-débordement après décalage potentiel du type
-        if (i >= tokens.size() || i + 1 >= tokens.size()) {
+        size_t val_index = key_index + 1;
+
+        // Sécurité anti-débordement
+        if (key_index >= tokens.size() || val_index >= tokens.size()) {
             std::cout << "Error: Syntax error. Missing key or value.\n";
             break;
         }
 
-        // Isolement synchronisé des variables locales
-        char key_delim = delimiters[i];
-        char val_delim = delimiters[i+1];
-        std::string key_str = tokens[i];
-        std::string val_str = tokens[i+1];
+        // Extraction isolée et synchronisée
+        char key_delim = delimiters[key_index];
+        char val_delim = delimiters[val_index];
+        std::string key_str = tokens[key_index];
+        std::string val_str = tokens[val_index];
+
+        // Index d'avancement pour sécuriser les 'continue'
+        size_t next_i = val_index + 1;
 
         // 1. Protection contre les mots-clés réservés
         if (is_reserved_keyword(key_str)) {
             std::cout << "Error: '" << key_str << "' is a reserved keyword.\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
-        // Garantir que la clé n'est pas encapsulée par des guillemets
+        // Vérification des guillemets sur la clé
         if (is_string_quote(key_delim)) {
             std::cout << "Error: Key '" << key_str << "' cannot use quotes. Use bare text or backticks (``).\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
-        // 2. Vérification de l'existence (Spécifique à UPDATE)
+        // 2. Vérification de l'existence
         const char* current_type_str = kiva_typeof(*db, key_str.c_str());
         if (std::strcmp(current_type_str, "none") == 0) {
             std::cout << "Error: Key '" << key_str << "' not found. Use 'set' to create it.\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         // Interdiction des backticks sur les valeurs
         if (is_backtick(val_delim)) {
             std::cout << "Error: Value for '" << key_str << "' cannot use backticks.\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         KivaType detected_type = KIVA_TYPE_UNKNOWN;
@@ -82,7 +87,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             detected_type = kiva_identify_type(val_str.c_str());
             if (detected_type == KIVA_TYPE_STRING) {
                 std::cout << "Error: String values like '" << val_str << "' must be quoted (\"\" or '').\n";
-                i += 2; continue;
+                i = next_i; continue;
             }
         }
 
@@ -93,30 +98,30 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
                 (forced == KIVA_TYPE_NUMBER && actual != "number") ||
                 (forced == KIVA_TYPE_BOOLEAN && actual != "boolean")) {
                 std::cout << "Error: Type mismatch. '" << key_str << "' is a [" << actual << "].\n";
-                i += 2; continue;
+                i = next_i; continue;
             }
             
             if (forced == KIVA_TYPE_NUMBER || forced == KIVA_TYPE_BOOLEAN) {
                 if (!is_bare(val_delim)) {
                     std::cout << "Error: Numbers and Booleans must not be quoted.\n";
-                    i += 2; continue;
+                    i = next_i; continue;
                 }
             } else if (forced == KIVA_TYPE_STRING) {
                 if (!is_string_quote(val_delim)) {
                     std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
-                    i += 2; continue;
+                    i = next_i; continue;
                 }
             }
         }
 
-        // 5. Validation du format par rapport au type physique en base
+        // 5. Validation du format par rapport au type en base
         if ((actual == "string" && detected_type != KIVA_TYPE_STRING) ||
             (actual == "number" && detected_type != KIVA_TYPE_NUMBER) ||
             (actual == "boolean" && detected_type != KIVA_TYPE_BOOLEAN)) {
             std::cout << "Error: Cannot update [" << actual << "] with a value formatted as [" 
                       << (detected_type == KIVA_TYPE_NUMBER ? "number" : (detected_type == KIVA_TYPE_BOOLEAN ? "boolean" : "string")) 
                       << "].\n";
-            i += 2; continue;
+            i = next_i; continue;
         }
 
         // 6. Exécution de la mise à jour
@@ -127,7 +132,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
             std::cout << "Error: Could not update '" << key_str << "' (Internal error).\n";
         }
         
-        // Avancement contrôlé
-        i += 2; 
+        // Avancement dynamique précis
+        i = next_i; 
     }
 }
