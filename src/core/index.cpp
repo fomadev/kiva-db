@@ -191,7 +191,7 @@ void index_scan(KivaDB* db) {
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
     time_t now = std::time(nullptr);
 
-    std::cout << "\n--- KivaDB Scan (v2.1.5 | FomaDev Public License) ---" << std::endl;
+    std::cout << "\n--- KivaDB Scan (v2.1.7 | FomaDev Public License) ---" << std::endl;
     for (const auto& [key, entry] : map) {
         // Conversion du timestamp Unix en format lisible YYYY-MM-DD HH:MM:SS
         time_t raw_time = (time_t)entry.timestamp;
@@ -246,6 +246,45 @@ size_t kiva_get_memory_usage(KivaDB* db) {
     }
 
     return total;
+}
+
+/**
+ * Exécute l'opération BUMP sur une clé existante.
+ * mode: 1 pour 'add' (prolongation), 2 pour 'set' (réinitialisation)
+ * Retourne true si la clé existait et a été mise à jour, false sinon.
+ */
+bool index_bump(KivaDB* db, const char* key, int mode, int64_t ttl_sec) {
+    if (!db || !db->cpp_index || !key) return false;
+    
+    auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
+    auto it = map.find(key);
+    
+    // Si la clé n'existe pas ou est déjà expirée (Lazy deletion)
+    if (it == map.end()) return false;
+    if (it->second.expires_at > 0 && it->second.expires_at < (int64_t)time(NULL)) {
+        map.erase(it);
+        return false;
+    }
+
+    int64_t now = (int64_t)time(NULL);
+
+    if (mode == 1) { // Mode 'add'
+        // Si la clé n'avait pas de TTL, on part de 'now', sinon on cumule
+        if (it->second.expires_at == 0) {
+            it->second.expires_at = now + ttl_sec;
+        } else {
+            it->second.expires_at += ttl_sec;
+        }
+    } 
+    else if (mode == 2) { // Mode 'set'
+        // Réinitialisation brute par rapport au timestamp actuel
+        it->second.expires_at = now + ttl_sec;
+    }
+
+    // TODO: Écrire le changement dans le fichier d'archivage .kiva pour la persistance
+    // kiva_write_bump_journal(db, key, it->second.expires_at);
+
+    return true;
 }
 
 /**

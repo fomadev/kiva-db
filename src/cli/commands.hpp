@@ -39,4 +39,6 @@ void handle_has(KivaDB** db, const std::vector<std::string>& tokens);
 void handle_print(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters);
 
 void handle_scan(KivaDB** db, const std::vector<std::string>& tokens);
+
+void handle_bump(KivaDB** db, const std::vector<std::string>& tokens);
 #endif

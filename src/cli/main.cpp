@@ -264,6 +264,9 @@ int main(int argc, char* argv[]) {
         else if (cmd == "print") {
             handle_print(&db, tokens, delimiters);
         }
+        else if (cmd == "bump") {
+            handle_bump(&db, tokens);
+        }
         else {
             std::cout << "Unknown command: '" << cmd << "'. Try 'help'." << std::endl;
             show_dur = false;

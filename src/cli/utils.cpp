@@ -10,7 +10,7 @@
  * Mise à jour pour la v2.1.5 (Transactionnal Rename, Arithmetic & Interpolation).
  */
 void print_help() {
-    std::cout << "\n--- KivaDB Shell Help (v2.1.5 Stable) ---\n"
+    std::cout << "\n--- KivaDB Shell Help (v2.1.7 Stable) ---\n"
               << "  RELIABILITY & SYNTAX RULES:\n"
               << "  - Strings        : MUST be quoted -> \"Hello\" or 'Kiva'.\n"
               << "  - Numbers/Bools  : MUST NOT be quoted -> 42, 3.14, true, false.\n"
