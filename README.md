@@ -1,143 +1,146 @@
-# KivaDB (v2.1.5)
+# KivaDB (v2.1.6)
 
-KivaDB is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid C/C++ architecture. It combines the low-level efficiency of C for storage operations with the power of C++ STL for advanced indexing and TTL (Time To Live) management.
+KivaDB is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid C/C++ architecture. It combines the low-level efficiency of C for storage operations with the power of C++ STL structures for advanced memory-mapped indexing, validation, and lazy TTL (Time To Live) management.
 
-Designed for speed and simplicity, KivaDB utilizes an Append-Only File (AOF) storage strategy and a memory-mapped index to ensure high read performance.
+Designed for embedded or local operational velocity, KivaDB utilizes an Append-Only File (AOF) transactional logging strategy and an in-memory directory schema to guarantee immediate, predictable lookup performance.
 
 ## Key Features
 
-* **Hybrid Engine**: Core storage and transaction management implemented in C11, with optimized indexing in C++17.
-* **Persistent Storage**: Data persistence across restarts using a robust binary format with a signature-based header (`KIVA`).
-* **Smart TTL Support**: Native support for expiring keys, managed via lazy deletion during boot and data access.
-* **Type Safety**: Built-in type inference and validation for String, Number, and Boolean types.
-* **Advanced Shell**: A feature-rich CLI supporting quoted strings (`""`, `''`), reserved keyword protection, and command chaining.
-* **Maintenance Suite**: Integrated tools for database scanning, real-time statistics, and automatic compaction to optimize disk usage.
+* **Hybrid Architecture Engine**: Core persistence, disk serialization, and storage formats implemented in optimized C11; structural indexing and shell logic decoupled into type-safe C++17.
+* **Persistent Index Telemetry**: Data persistence across application cycles using a robust binary format with a signature-based header validation (`KIVA`).
+* **Persistent Horodatage**: Native transactional tracking of creation and modification dates embedded directly into disk records and mapped seamlessly to the active directory.
+* **Smart Lazy TTL Management**: Native tracking for expiring keys, dynamically invalidated during boot recovery sequences or upon explicit record lookup phases.
+* **Type Inference Framework**: Built-in validation constraints for structured `String`, `Number` (integers/floats), and `Boolean` types.
+* **Deterministic Name Validation**: Implementation of strict layout policies prohibiting purely numeric key identifiers to prevent logical indexing overlaps.
+* **Advanced Command Shell**: A feature-rich CLI environment supporting string literal delimiters (`""`, `''`), key backticks (`` ` ``), keyword safety guards, and functional command chaining.
+* **Maintenance Suite**: Integrated subroutines for structural database scanning, low-overhead memory mapping, and zero-downtime database file compaction.
 
 ## Architecture
 
-KivaDB is organized into three distinct functional layers:
+KivaDB isolates system responsibilities into three distinct operational boundaries:
 
-1. **The Shell (CLI)**: Manages user input, command parsing, and request validation.
-2. **The Index (C++)**: A `std::map` based index storing key metadata and file offsets for logarithmic-time lookups.
-3. **The Storage (C)**: Manages binary I/O operations, file format integrity (V2), and the append-only log.
+1. **The Shell Environment (CLI)**: Interprets user instructions, governs token syntax parsing via an advanced lexer, and handles direct user-space routing.
+2. **The Index Layer (C++)**: Utilizes a highly efficient `std::unordered_map` hash table to map unique keys directly to physical file offsets (`int64_t`) and metadata configurations in $O(1)$ constant time.
+3. **The Core Storage Engine (C)**: Manages pure sequential binary I/O operations, disk compaction, database telemetry, and structural format validation (V2 Format).
 
-## Command Usage
+## Command Reference Manual
 
 <table>
     <thead>
         <tr>
             <th>Command</th>
             <th>Description</th>
-            <th>Example</th>
+            <th>Example Syntax</th>
         </tr>
     </thead>
     <tbody>
         <tr>
             <td><strong>set</strong></td>
-            <td>Create a new key with optional TTL (Time To Live).</td>
-            <td><code>set u1 "Fordi" ttl 3600</code></td>
+            <td>Stores a key-value record. Accepts optional TTL limits in seconds.</td>
+            <td><code>set user_session "Active" ttl 3600</code></td>
         </tr>
         <tr>
             <td><strong>get</strong></td>
-            <td>Retrieve values. Supports multiple keys with <code>and</code>.</td>
-            <td><code>get u1 and u2</code></td>
+            <td>Retrieves stored record payloads. Supports command chaining using <code>and</code> keywords.</td>
+            <td><code>get user_session and login_retry</code></td>
         </tr>
         <tr>
             <td><strong>has</strong></td>
-            <td>Check existence. Supports multiple keys with <code>and</code>.</td>
-            <td><code>has u1 and user_123</code></td>
+            <td>Validates structural key existence or filters by type constraints. Supports chaining with <code>and</code>.</td>
+            <td><code>has string user_session and has login_retry</code></td>
         </tr>
         <tr>
             <td><strong>update</strong></td>
-            <td>Modify an existing key's value (Strict type-check).</td>
-            <td><code>update u1 "New Value"</code></td>
+            <td>Modifies an existing record value while enforcing structural type-safety guarantees.</td>
+            <td><code>update login_retry 5</code></td>
         </tr>
         <tr>
             <td><strong>change</strong></td>
             <td>
-                <strong>Refactoring Mode:</strong> Rename keys or migrate data types. 
-                <br/><em>Note: Transactional logic ensures no data loss if migration fails.</em>
+                <strong>Refactoring Subroutine:</strong> Renames key pointers or migrates data types.
+                <br/><em>Transactional Integrity: Ensures zero data loss if migration fails midway.</em>
             </td>
             <td>
-                <code>change old to new</code><br/>
-                <code>change old to new "new_val"</code><br/>
-                <code>change string old to number new 42</code>
+                <code>change active_id to session_id</code><br/>
+                <code>change session_id to system_id "sys-99"</code><br/>
+                <code>change string legacy_code to number system_code 1044</code>
             </td>
         </tr>
         <tr>
             <td><strong>print</strong></td>
             <td>
-                <strong>Evaluation Mode:</strong> Display values, perform math, or interpolate.
-                <br/><em>Supports: Arithmetic <code>( ) + - * /</code> and <code>${key}</code>.</em>
+                <strong>Evaluation Utility:</strong> Computes arithmetic expressions or executes string interpolations.
+                <br/><em>Grammar Rules: Supports bracket priority <code>( )</code>, arithmetic operators <code>+ - * /</code>, and <code>${key}</code> interpolation.</em>
             </td>
             <td>
-                <code>print (2 + 2) * 10</code><br/>
-                <code>print "Hello ${user_name}"</code><br/>
-                <code>print "Val:", u1</code>
+                <code>print (4 + 8) * 10</code><br/>
+                <code>print "Connected to node: ${node_name}"</code><br/>
+                <code>print "Logs:", system_id</code>
             </td>
         </tr>
         <tr>
             <td><strong>typeof</strong></td>
-            <td>Identify the stored data type (string, number, boolean).</td>
-            <td><code>typeof u1</code></td>
+            <td>Extracts and displays the current registered type signature (<code>string</code>, <code>number</code>, <code>boolean</code>).</td>
+            <td><code>typeof user_session</code></td>
         </tr>
         <tr>
             <td><strong>del</strong></td>
-            <td>Delete specific keys or the entire database.</td>
-            <td><code>del u1</code> or <code>del all keys</code></td>
+            <td>Appends a tombstone deletion marker for individual keys, or purges the complete storage tree.</td>
+            <td><code>del legacy_code</code> or <code>del all keys</code></td>
         </tr>
         <tr>
             <td><strong>scan</strong></td>
-            <td>Display all active keys, types, and byte sizes.</td>
+            <td>Outputs a real-time matrix of the memory index: keys, type descriptors, raw byte sizes, and local creation timestamps or remaining TTL boundaries.</td>
             <td><code>scan</code></td>
         </tr>
         <tr>
             <td><strong>stats</strong></td>
-            <td>Monitor database health and memory usage.</td>
+            <td>Monitors engine operational health, displaying key statistics, file sizes, and exact RAM footprints consumed by the directory hash map.</td>
             <td><code>stats</code></td>
         </tr>
         <tr>
             <td><strong>compact</strong></td>
-            <td>Reorganize storage to reclaim space and remove stale data.</td>
+            <td>Performs an on-line defragmentation of the <code>.kiva</code> file, discarding tombstones and historical logs to minimize disk wastage.</td>
             <td><code>compact</code></td>
         </tr>
         <tr>
             <td><strong>clear</strong></td>
-            <td>Clear the terminal screen.</td>
+            <td>Flushes the interface output using standard system console instructions.</td>
             <td><code>clear</code></td>
         </tr>
     </tbody>
 </table>
 
-## File Format (v2.1.5)
-KivaDB uses a structured binary format to ensure data reliability and rapid recovery:
+## Binary File Layout Specifications (Format V2)
 
-### Header (12 bytes)
-* **Signature** (4 bytes): `KIVA`
+Database instances serialize sequentially into a raw `.kiva` binary stream, ensuring cross-platform stability through strict data alignment layouts:
 
-* **Version** (4 bytes): Format version (V1 or V2)  
+### Global File Header Structure (12 Bytes)
+* **Magic Signature** (4 Bytes): Character array matching `KIVA`.
+* **Format Version** (4 Bytes): 32-bit unsigned integer defining structural encoding layer (set to `2` for V2).
+* **Reserved Boundary** (4 Bytes): Aligned null-padded buffer reserved for transactional sequence numbering or future cluster extensions.
 
-* **Reserved** (4 bytes): Aligned for future extensions
+### Individual Record Structure (Data Entry Block)
+When records are written, updated, or marked for deletion, they are appended using the following binary layout:
 
-### Data Entry
-* **k_size** (uint32): Length of the key  
+| Field Name | Data Type | Byte Boundary | Description |
+| :--- | :--- | :--- | :--- |
+| **k_size** | `uint32_t` | 4 Bytes | Length constraint of the target Key string |
+| **v_size** | `uint32_t` | 4 Bytes | Length constraint of the Value string payload (`0` denotes an active Tombstone/Deletion marker) |
+| **type** | `uint8_t` | 1 Byte | Data type identifier mapping to native Enum structures |
+| **timestamp** | `int64_t` | 8 Bytes | 64-bit Unix epoch boundary indicating exact record instantiation or write time |
+| **expires_at** | `int64_t` | 8 Bytes | 64-bit Unix timestamp limit for TTL validation (`0` denotes permanent persistence) |
+| **key** | `char[]` | `k_size` Bytes | Variable-length string representing the identifier key |
+| **value** | `char[]` | `v_size` Bytes | Variable-length byte array or structured payload string |
 
-* **v_size** (uint32): Length of the value (0 indicates a deletion marker)  
+> **Compatibility Warning**: Due to the introduction of persistent 8-byte key timestamps within the binary header block, data storage files generated by **KivaDB v2.1.5 or lower are incompatible** with the v2.1.6 runtime engine. Please back up or purge old `.kiva` telemetry targets prior to starting a new session instance.
 
-* **type** (uint8): Data type identifier (String, Number, Boolean)
+## License
 
-* **expires_at** (int64): Unix timestamp for expiration (0 for permanent)
+This repository is published under and protected by the **[FomaDev Public License (FPL)](LICENSE)**.
 
-* **key**: Variable length key name  
+* **Binary Utilization**: Permissions are granted to execute compiled KivaDB CLI binaries within personal, academic, and industrial production environments free of charge.
+* **Source Modification**: Redistribution, compilation, or integration of source fragments into third-party commercial applications or competitive data frameworks requires an official paid licensing agreement.
+* **Contributions**: Forks are exclusively permitted for creating pull requests targeting the primary branch of the official repository.
 
-* **value**: Variable length value data
-
-## ⚖️ License
-
-This project is licensed under the **[FomaDev Public License (FPL)](LICENSE)**.
-
-- **Free for use**: You can use the compiled KivaDB CLI for personal and commercial projects for free.
-- **Source Code**: For reproduction, modification, or integration into commercial products, a paid license is required.
-- **Contributions**: Forks are permitted only for contributing back to the official repository via Pull Requests.
-
-See the [LICENSE](LICENSE) file for full details.
+For more information, consult the comprehensive [LICENSE](LICENSE) text located at the project root directory.
