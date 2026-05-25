@@ -6,8 +6,9 @@
 #include <iostream>
 
 /**
- * Affiche l'aide du Shell KivaDB avec les précisions sur le typage strict.
- * Mise à jour pour la v2.1.5 (Transactionnal Rename, Arithmetic & Interpolation).
+ * Affiche l'aide complète et enrichie du Shell KivaDB.
+ * Intègre le typage strict, la v2.1.7 modulaire, les métadonnées de scan étendues,
+ * l'arithmétique, l'interpolation et le suivi de la persistance .kiva.
  */
 void print_help() {
     std::cout << "\n--- KivaDB Shell Help (v2.1.7 Stable) ---\n"
@@ -22,6 +23,7 @@ void print_help() {
               << "  - Arithmetic     : print (10 + 5) * 2 / (key_val - 1)\n"
               << "  - Interpolation  : print \"User age is ${age_user}\"\n"
               << "  - Separators     : Use commas in print -> print \"Name:\", user_1\n"
+              << "  - Time Tracking  : Active monitoring of creation timestamps & expiration counts.\n"
 
               << "\n  COMMANDS:\n"
               << "  set [t] <key> <val> [ttl <sec>]  : Save a value with optional expiration.\n"
@@ -31,11 +33,12 @@ void print_help() {
               << "  del <key> | del all keys         : Remove specific data or wipe the DB.\n"
               << "  typeof <key>                     : Show the stored data type (string, number, bool).\n"
               << "  change [t] <old> to [t] <new> [v]: Advanced Rename/Migration (Transactional).\n"
+              << "  bump <key> <add|set> <ttl_sec>   : Adjust or extend TTL for active keys.\n"
               << "  print <expr1>, <expr2>           : Evaluate and display expressions/variables.\n"
-              << "  scan                             : List all keys with their types and memory size.\n"
-              << "  stats                            : Show database file health and memory usage.\n"
-              << "  compact                          : Optimize storage and cleanup deleted entries.\n"
+              << "  scan                             : List all keys with types, byte size & creation dates.\n"
+              << "  stats                            : Diagnostic tool for RAM footprint & physical file health.\n"
+              << "  compact                          : Heavy physical disk compaction (.kiva journal optimization).\n"
               << "  clear                            : Clear the terminal screen.\n"
-              << "  exit                             : Safely flush buffers and close KivaDB.\n"
+              << "  exit                             : Safely flush buffers, journal operations & close KivaDB.\n"
               << "--------------------------------------------------------------------------\n\n";
 }
