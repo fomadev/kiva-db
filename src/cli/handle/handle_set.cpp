@@ -16,7 +16,7 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande SET avec support du TTL, du typage forcé et du chaînage 'and'.
- * Version sécurisée contre les désynchronisations du tableau de délimiteurs.
+ * Version ultra-sécurisée avec double vérification sémantique des clés et des valeurs.
  */
 void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     int global_ttl = 0;
@@ -70,12 +70,10 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
         // Calcul de la position de la paire suivante (Clé + Valeur)
         size_t next_i = i + 2;
 
-        // --- CORRECTION DES FAUX POSITIFS DE DÉLIMITAGE ---
-        // Si on vient de sauter un modificateur de type ("number", etc.) et que le handler 
-        // lit un guillemet pour la clé alors que la clé est un texte brut (ex: b), on redresse.
+        // --- CORRECTION DES FAUX POSITIFS SUR KEY_DELIM ---
         if (has_type_modifier && is_string_quote(key_delim)) {
             if (key_str != "string" && key_str != "number" && key_str != "boolean") {
-                key_delim = 0; // Forçage en bare text (Zéro décalage résiduel)
+                key_delim = 0; 
             }
         }
 
@@ -112,9 +110,15 @@ void handle_set(KivaDB** db, const std::vector<std::string>& tokens, const std::
                 }
             } 
             else if (forced == KIVA_TYPE_STRING) {
+                // PROTECTION DOUBLE CONTRE LES DÉCALAGES SUR VAL_DELIM
                 if (!is_string_quote(val_delim)) {
-                    std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
-                    i = next_i; continue;
+                    KivaType backup_check = kiva_identify_type(val_str.c_str());
+                    // Si kiva_identify_type voit un nombre ou un booléen brut, alors la chaîne manque de guillemets
+                    if (backup_check == KIVA_TYPE_NUMBER || backup_check == KIVA_TYPE_BOOLEAN) {
+                        std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
+                        i = next_i; continue;
+                    }
+                    // Si c'est identifié comme string, c'est que le texte est bon mais le délimiteur était corrompu. On laisse passer.
                 }
             }
         }

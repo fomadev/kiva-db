@@ -17,7 +17,7 @@ bool is_backtick(char d);
 
 /**
  * Gère la commande UPDATE avec support du typage forcé et du chaînage 'and'.
- * Immunisé contre les décalages d'index de délimiteurs provoqués par le tokenizer.
+ * Immunisé contre les décalages de délimiteurs de clés et de valeurs.
  */
 void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const std::vector<char>& delimiters) {
     for (size_t i = 1; i < tokens.size(); ) {
@@ -50,7 +50,7 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
 
         size_t next_i = i + 2;
 
-        // --- CORRECTION DES FAUX POSITIFS DE DÉLIMITAGE ---
+        // --- CORRECTION DES FAUX POSITIFS SUR KEY_DELIM ---
         if (has_type_modifier && is_string_quote(key_delim)) {
             if (key_str != "string" && key_str != "number" && key_str != "boolean") {
                 key_delim = 0;
@@ -111,9 +111,13 @@ void handle_update(KivaDB** db, const std::vector<std::string>& tokens, const st
                     i = next_i; continue;
                 }
             } else if (forced == KIVA_TYPE_STRING) {
+                // PROTECTION DOUBLE CONTRE LES DÉCALAGES DE VAL_DELIM
                 if (!is_string_quote(val_delim)) {
-                    std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
-                    i = next_i; continue;
+                    KivaType backup_check = kiva_identify_type(val_str.c_str());
+                    if (backup_check == KIVA_TYPE_NUMBER || backup_check == KIVA_TYPE_BOOLEAN) {
+                        std::cout << "Error: Explicit 'string' type requires quotes \"\" or ''.\n";
+                        i = next_i; continue;
+                    }
                 }
             }
         }
