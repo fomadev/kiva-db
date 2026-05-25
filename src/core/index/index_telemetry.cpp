@@ -63,18 +63,25 @@ size_t kiva_get_memory_usage(KivaDB* db) {
 }
 
 /**
- * Calcule le volume utile des données vivantes en mémoire.
- * Alignée sur la signature C sans const pour correspondre au reste de l'API.
+ * Calcule le volume utile réel (Données vivantes + En-têtes physiques) du fichier disque.
+ * Calibré pour correspondre exactement à la structure du format_v2.c.
  */
 size_t index_get_live_size(KivaDB* db) {
-    if (!db || !db->cpp_index) return 0;
+    // Structure initiale minimale : l'en-tête magique du fichier .kiva (ex: "KIVA" + version)
+    size_t total_live_size = 12; 
+
+    if (!db || !db->cpp_index) return total_live_size;
 
     auto& map = static_cast<KivaIndex*>(db->cpp_index)->map;
-    size_t total_live_size = 0;
+    
+    // Taille fixe de l'en-tête binaire de chaque transaction sur disque (Format V2)
+    // Contient : timestamp (8B), expires_at (8B), type (1B), k_size (2B), v_size (4B), etc. + padding
+    const size_t RECORD_HEADER_OVERHEAD = 24; 
 
     for (const auto& [key, entry] : map) {
-        total_live_size += key.size();       // Taille de la clé en octets
-        total_live_size += entry.v_size;     // Taille de la valeur en octets
+        total_live_size += RECORD_HEADER_OVERHEAD; // Overhead binaire sur disque
+        total_live_size += key.size();             // Longueur brute de la clé
+        total_live_size += entry.v_size;           // Longueur stockée de la valeur
     }
 
     return total_live_size;
