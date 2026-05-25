@@ -1,4 +1,8 @@
-# KivaDB (v2.1.7)
+<p align="center">
+  <img src="ban.png" alt="KivaDB Logo">
+</p>
+
+# KivaDB (v2.1.8)
 
 KivaDB is a lightweight, high-performance NoSQL Key-Value database engine built with a hybrid C/C++ architecture. It combines the low-level efficiency of C for storage operations with the power of C++ STL structures for advanced memory-mapped indexing, validation, and dynamic TTL (Time To Live) management.
 
@@ -14,7 +18,7 @@ Designed for embedded or local operational velocity, KivaDB utilizes an Append-O
 * **Type Inference Framework**: Built-in validation constraints for structured `String`, `Number` (integers/floats), and `Boolean` types.
 * **Deterministic Name Validation**: Implementation of strict layout policies prohibiting purely numeric key identifiers to prevent logical indexing overlaps.
 * **Advanced Command Shell**: A feature-rich CLI environment supporting string literal delimiters (`""`, `''`), key backticks (`` ` ``), keyword safety guards, and functional command chaining.
-* **Maintenance Suite**: Integrated subroutines for structural database scanning, low-overhead memory mapping, and zero-downtime database file compaction.
+* **Maintenance Suite**: Integrated subroutines for structural database scanning, low-overhead memory mapping, real-time disk fragmentation auditing, and zero-downtime database file compaction.
 
 ## Architecture
 
@@ -37,7 +41,7 @@ KivaDB isolates system responsibilities into three distinct operational boundari
     <tbody>
         <tr>
             <td><strong>set</strong></td>
-            <td>Stores a key-value record. Accepts optional TTL limits in seconds.</td>
+            <td>Stores a key-value record. Accepts optional TTL limits in seconds. Supports command chaining.</td>
             <td><code>set user_session "Active" ttl 3600</code></td>
         </tr>
         <tr>
@@ -107,12 +111,15 @@ KivaDB isolates system responsibilities into three distinct operational boundari
         </tr>
         <tr>
             <td><strong>stats</strong></td>
-            <td>Monitors engine operational health, displaying key statistics, file sizes, and exact RAM footprints consumed by the directory hash map.</td>
+            <td>
+                <strong>Telemetry Dashboard:</strong> Monitors engine operational health, displaying active key count, database path, precise RAM footprint consumed by the map, and the <strong>live disk fragmentation ratio</strong>. 
+                <br/><em>Features a diagnostic prompt <code>[Action Needed: 'compact']</code> if fragmentation breaches $\ge 20\%$.</em>
+            </td>
             <td><code>stats</code></td>
         </tr>
         <tr>
             <td><strong>compact</strong></td>
-            <td>Performs an on-line defragmentation of the <code>.kiva</code> file, discarding tombstones and historical logs to minimize disk wastage.</td>
+            <td>Performs an on-line defragmentation of the <code>.kiva</code> file, discarding tombstones and historical logs to minimize disk wastage and restore the fragmentation ratio to 0.0%.</td>
             <td><code>compact</code></td>
         </tr>
         <tr>
@@ -130,18 +137,19 @@ Database instances serialize sequentially into a raw `.kiva` binary stream, ensu
 ### Global File Header Structure (12 Bytes)
 * **Magic Signature** (4 Bytes): Character array matching `KIVA`.
 * **Format Version** (4 Bytes): 32-bit unsigned integer defining structural encoding layer (set to `2` for V2).
-* **Reserved Boundary** (4 Bytes): Aligned null-padded buffer reserved for transactional sequence numbering or future cluster extensions.
+* **Reserved Boundary** (4 Bytes): Aligned null-padded buffer reserved for transactional sequence numbering or future extensions.
 
 ### Individual Record Structure (Data Entry Block)
-When records are written, updated, or marked for deletion, they are appended using the following binary layout:
+When records are written, updated, or marked for deletion, they are appended using a layout consisting of a **24-byte fixed binary header overhead** followed by the variable payload segments:
 
 | Field Name | Data Type | Byte Boundary | Description |
 | :--- | :--- | :--- | :--- |
-| **k_size** | `uint32_t` | 4 Bytes | Length constraint of the target Key string |
-| **v_size** | `uint32_t` | 4 Bytes | Length constraint of the Value string payload (`0` denotes an active Tombstone/Deletion marker) |
+| **k_size** | `uint16_t` | 2 Bytes | Length constraint of the target Key string |
+| **v_size** | `uint32_t` | 4 Bytes | Length constraint of the Value string payload (`0` denotes an active Tombstone) |
 | **type** | `uint8_t` | 1 Byte | Data type identifier mapping to native Enum structures |
-| **timestamp** | `int64_t` | 8 Bytes | 64-bit Unix epoch boundary indicating exact record instantiation or write time |
+| **timestamp** | `int64_t` | 8 Bytes | 64-bit Unix epoch indicating exact record instantiation or write time |
 | **expires_at** | `int64_t` | 8 Bytes | 64-bit Unix timestamp limit for TTL validation (`0` denotes permanent persistence) |
+| **padding** | `uint8_t` | 1 Byte | Internal padding block to guarantee structured 24-byte header alignment |
 | **key** | `char[]` | `k_size` Bytes | Variable-length string representing the identifier key |
 | **value** | `char[]` | `v_size` Bytes | Variable-length byte array or structured payload string |
 
