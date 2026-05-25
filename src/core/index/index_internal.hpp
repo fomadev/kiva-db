@@ -6,7 +6,7 @@
 #ifndef KIVADB_INDEX_INTERNAL_HPP
 #define KIVADB_INDEX_INTERNAL_HPP
 
-#include "kivadb_internal.h"
+#include "../kivadb_internal.h" 
 #include <unordered_map>
 #include <string>
 
