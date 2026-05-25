@@ -2,11 +2,12 @@
  * Licensed under FomaDev Public License.
  */
 
-#include \"../commands.hpp\"
+#include "../commands.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
 #include <cstdlib>
+#include <cstdint>
 
 extern "C" {
     bool index_bump(KivaDB* db, const char* key, int mode, int64_t ttl_sec);
