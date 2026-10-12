@@ -1,14 +1,14 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 use kivadb::config::default_home;
 use kivadb::instance::{Instance, Options, VERSION};
 use kivadb::shell::{self, ShellOpts};
 use kivadb::util::is_loopback;
 use kivadb::{auth, http, repl, server, KivaError};
-use std::path::PathBuf;
-use std::process::exit;
+use std::path::{Path, PathBuf};
+use std::process::{exit, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,8 +17,11 @@ const USAGE: &str = "\
 KivaDB - typed key-value and document database
 
 USAGE:
+  kivadb start [OPTIONS]      Start the database in the background
+  kivadb stop                 Stop the running database
+  kivadb status               Tell whether the database is running
   kivadb [OPTIONS]            Open the interactive shell
-  kivadb serve [OPTIONS]      Run the server (TCP protocol + REST API)
+  kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
 SHELL OPTIONS:
   -w, --workspace <name>      Workspace to open (default: your home workspace)
@@ -28,7 +31,7 @@ SHELL OPTIONS:
       --connect <host:port>   Connect to a running server instead of opening files
       --no-listen             Do not accept other local shells on this instance
 
-SERVER OPTIONS:
+SERVER OPTIONS (start, serve):
       --port <n>              TCP port (default: [network] port, 2911)
       --bind <address>        Listen address (default: [network] bind, 127.0.0.1)
       --http-port <n>         REST API port (default: [http] port, 8080)
@@ -45,6 +48,7 @@ COMMON OPTIONS:
 #[derive(Default)]
 struct Args {
     serve: bool,
+    action: Option<&'static str>,
     home: Option<PathBuf>,
     connect: Option<String>,
     no_listen: bool,
@@ -73,6 +77,9 @@ fn parse_args() -> Args {
     while let Some(a) = it.next() {
         match a.as_str() {
             "serve" | "server" => args.serve = true,
+            "start" => args.action = Some("start"),
+            "stop" => args.action = Some("stop"),
+            "status" => args.action = Some("status"),
             "shell" => {}
             "-h" | "--help" | "help" => {
                 print!("{USAGE}");
@@ -171,12 +178,149 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
 
     let stop = Arc::new(AtomicBool::new(false));
     on_ctrl_c(&inst, Some(stop.clone()));
-    while !stop.load(Ordering::SeqCst) {
+    while !stop.load(Ordering::SeqCst) && !inst.stop_requested.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
     }
     println!("Shutting down...");
     inst.shutdown();
     0
+}
+
+/// Port of the KivaDB process that currently owns `home`, if there is one.
+fn running_port(home: &Path) -> Option<u16> {
+    let lock = std::fs::OpenOptions::new().write(true).open(home.join("instance.lock")).ok()?;
+    if lock.try_lock().is_ok() {
+        // Nobody holds the lock: whatever the port file says is stale.
+        return None;
+    }
+    std::fs::read_to_string(home.join("instance.port")).ok()?.trim().parse().ok()
+}
+
+fn running_pid(home: &Path) -> String {
+    std::fs::read_to_string(home.join("instance.pid")).map(|p| p.trim().to_string()).unwrap_or_else(|_| "?".into())
+}
+
+/// `kivadb start`: launches `kivadb serve` detached from this terminal.
+fn start(home: &Path, args: &Args) -> i32 {
+    if let Some(port) = running_port(home) {
+        println!("KivaDB is already running (pid {}) on port {port}.", running_pid(home));
+        return 0;
+    }
+    if let Err(e) = std::fs::create_dir_all(home) {
+        eprintln!("Error: cannot create {}: {e}", home.display());
+        return 1;
+    }
+    let log_path = home.join("server.log");
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path);
+    let (Ok(exe), Ok(log)) = (std::env::current_exe(), log) else {
+        eprintln!("Error: cannot prepare the server process.");
+        return 1;
+    };
+    let Ok(log_err) = log.try_clone() else { return 1 };
+    let mut cmd = Command::new(exe);
+    cmd.arg("serve").arg("--home").arg(home);
+    if let Some(p) = args.port {
+        cmd.arg("--port").arg(p.to_string());
+    }
+    if let Some(p) = args.http_port {
+        cmd.arg("--http-port").arg(p.to_string());
+    }
+    if let Some(b) = &args.bind {
+        cmd.arg("--bind").arg(b);
+    }
+    if args.no_http {
+        cmd.arg("--no-http");
+    }
+    if args.opts.skip_auth {
+        cmd.arg("--skip-auth");
+    }
+    if args.opts.lua_debug {
+        cmd.arg("--lua-debug");
+    }
+    cmd.stdin(Stdio::null()).stdout(log).stderr(log_err);
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
+        extern "system" {
+            fn SetHandleInformation(handle: *mut std::ffi::c_void, mask: u32, flags: u32) -> i32;
+        }
+        // The server must not inherit this terminal's handles: whoever is
+        // waiting for `kivadb start` to finish would wait for the server too.
+        let handles =
+            [std::io::stdin().as_raw_handle(), std::io::stdout().as_raw_handle(), std::io::stderr().as_raw_handle()];
+        for h in handles {
+            // SAFETY: plain Win32 call on our own standard handles; a null or
+            // invalid handle makes it fail harmlessly.
+            unsafe { SetHandleInformation(h.cast(), 1, 0) };
+        }
+        // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP: survives this terminal.
+        cmd.creation_flags(0x0800_0000 | 0x0000_0200);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: cannot start the server: {e}");
+            return 1;
+        }
+    };
+    for _ in 0..100 {
+        if let Some(port) = running_port(home) {
+            println!("KivaDB started (pid {}).", child.id());
+            println!("  TCP port : {port}");
+            println!("  Home     : {}", home.display());
+            println!("  Log      : {}", log_path.display());
+            println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");
+            return 0;
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!("Error: the server stopped right away ({status}). Last lines of {}:", log_path.display());
+            let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+            for l in text.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev() {
+                eprintln!("  {l}");
+            }
+            return 1;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("Error: the server did not come up within 10 seconds. See {}.", log_path.display());
+    1
+}
+
+fn stop(home: &Path, args: &Args) -> i32 {
+    let Some(port) = running_port(home) else {
+        println!("KivaDB is not running.");
+        return 0;
+    };
+    let mut opts = args.shell.clone();
+    opts.commands = vec!["shutdown".to_string()];
+    if shell::run_client(&format!("127.0.0.1:{port}"), opts) != 0 {
+        return 1;
+    }
+    for _ in 0..100 {
+        if running_port(home).is_none() {
+            println!("KivaDB stopped.");
+            return 0;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    eprintln!("Error: KivaDB is still shutting down after 10 seconds.");
+    1
+}
+
+fn status(home: &Path) -> i32 {
+    match running_port(home) {
+        Some(port) => {
+            println!("KivaDB is running (pid {}).", running_pid(home));
+            println!("  TCP port : {port}");
+            println!("  Home     : {}", home.display());
+            0
+        }
+        None => {
+            println!("KivaDB is not running. Start it with: kivadb start");
+            1
+        }
+    }
 }
 
 fn main() {
@@ -185,14 +329,18 @@ fn main() {
         exit(shell::run_client(addr, args.shell.clone()));
     }
     let home = args.home.clone().unwrap_or_else(default_home);
+    match args.action {
+        Some("start") => exit(start(&home, &args)),
+        Some("stop") => exit(stop(&home, &args)),
+        Some("status") => exit(status(&home)),
+        _ => {}
+    }
     let inst = match Instance::open(&home, args.opts.clone()) {
         Ok(i) => i,
         Err(KivaError::Locked(_)) if !args.serve => {
-            // Another KivaDB process owns this home: join it instead of
+            // KivaDB is already running on this home: join it instead of
             // fighting over the files, so every terminal sees the same data.
-            let port =
-                std::fs::read_to_string(home.join("instance.port")).ok().and_then(|p| p.trim().parse::<u16>().ok());
-            match port {
+            match running_port(&home) {
                 Some(p) => exit(shell::run_client(&format!("127.0.0.1:{p}"), args.shell.clone())),
                 None => fail(&format!(
                     "{} is in use by another KivaDB process that does not accept connections.",
@@ -201,7 +349,7 @@ fn main() {
             }
         }
         Err(KivaError::Locked(_)) => {
-            fail(&format!("a KivaDB server or shell is already running on {}.", home.display()))
+            fail(&format!("KivaDB is already running on {} (see 'kivadb status').", home.display()))
         }
         Err(e) => fail(&e.to_string()),
     };
@@ -209,12 +357,28 @@ fn main() {
         exit(serve(inst, &args));
     }
     if !args.no_listen {
-        // Let other local shells attach to this instance.
-        if let Err(e) = server::start_tcp(&inst, "127.0.0.1", 0) {
-            eprintln!("[WARN] other shells will not be able to attach: {e}");
+        // While this shell is open the database is reachable like a started
+        // one: on the configured port if it is free, on any free port otherwise.
+        // One-shot `-e` runs stay out of the way and take any free port.
+        let port = if args.shell.commands.is_empty() { inst.cfg().get_u64("network", "port") as u16 } else { 0 };
+        let listening =
+            server::start_tcp(&inst, "127.0.0.1", port).or_else(|_| server::start_tcp(&inst, "127.0.0.1", 0));
+        if let Err(e) = listening {
+            eprintln!("[WARN] other programs will not be able to connect: {e}");
         }
     }
     on_ctrl_c(&inst, None);
+    {
+        // A `shutdown` sent by another terminal ends this process too.
+        let inst = inst.clone();
+        std::thread::spawn(move || loop {
+            if inst.stop_requested.load(Ordering::SeqCst) {
+                inst.shutdown();
+                exit(0);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        });
+    }
     let code = shell::run_embedded(inst.clone(), args.shell.clone());
     inst.shutdown();
     exit(code);

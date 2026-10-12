@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 //! A session: one authenticated user working in one workspace, possibly
 //! inside a transaction. Every front end (shell, TCP, HTTP, Lua) goes

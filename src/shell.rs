@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 //! The interactive shell. It either drives a local instance directly or
 //! talks to a running one over the binary protocol; the experience is the same.

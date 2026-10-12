@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 //! TCP server. Each connection gets its own thread and session; the number
 //! of commands executing at once is bounded by `[server] threads`.
@@ -26,6 +26,7 @@ pub fn start_tcp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
     let port = listener.local_addr()?.port();
     inst.tcp_port.store(port as u64, Ordering::SeqCst);
     let _ = std::fs::write(inst.home.join("instance.port"), port.to_string());
+    let _ = std::fs::write(inst.home.join("instance.pid"), std::process::id().to_string());
     let inst = inst.clone();
     std::thread::Builder::new().name("kiva-tcp".into()).spawn(move || {
         for conn in listener.incoming() {

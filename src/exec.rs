@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 //! The command interpreter: turns one line of shell syntax into operations
 //! on a `Session` and collects the text to show.
@@ -477,7 +477,7 @@ const HELP: &str = r#"
   wait <N> [timeout_ms] | failover to <replica>
   subscribe <pattern> | unsubscribe [pattern]
 
-  clear | help | exit
+  clear | help | exit | shutdown (stops the whole database, admin)
 --------------------------------------------------------------------------
 "#;
 
@@ -600,6 +600,13 @@ impl Session {
                 Ok(())
             }
             "exit" | "quit" => {
+                out.action = Action::Exit;
+                Ok(())
+            }
+            "shutdown" => {
+                self.inst.audit.log(self.user_name(), "shutdown", true);
+                self.inst.stop_requested.store(true, Ordering::SeqCst);
+                out.say("KivaDB is shutting down.");
                 out.action = Action::Exit;
                 Ok(())
             }
@@ -1360,7 +1367,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,
         "compact" | "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica"
-        | "failover" | "bench" => Need::Admin,
+        | "failover" | "bench" | "shutdown" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         "workspace" if sub("create") || sub("remove") => Need::Admin,

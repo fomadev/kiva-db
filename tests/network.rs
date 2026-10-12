@@ -456,3 +456,77 @@ fn a_killed_process_loses_nothing() {
     assert!(text.starts_with("k000: value 0 [string]\nk299: value 299 [string]\nin_txn: (nil)\n"), "{text}");
     assert!(text.contains("Checking 300 entries...") && text.contains("CORRUPTED: 0"));
 }
+
+#[test]
+fn rust_client() {
+    use kivadb::client::Client;
+    use kivadb::Value;
+    let dir = TempDir::new("client");
+    let inst = instance(&dir);
+    let port = server::start_tcp(&inst, "127.0.0.1", 0).unwrap();
+    let mut db = Client::connect(("127.0.0.1", port)).unwrap();
+    assert!(db.hello().unwrap().contains("auth=none"));
+    db.ping().unwrap();
+    db.set("greeting", &Value::Str("hello".into()), 0).unwrap();
+    db.set("user:1", &Value::Doc(json!({"name": "Alice", "role": "admin"})), 60).unwrap();
+    db.set("blob", &Value::Bytes(vec![0, 1, 2, 255]), 0).unwrap();
+    assert_eq!(db.get("greeting").unwrap(), Some(Value::Str("hello".into())));
+    assert_eq!(db.get("user:1").unwrap(), Some(Value::Doc(json!({"name": "Alice", "role": "admin"}))));
+    assert_eq!(db.get("blob").unwrap(), Some(Value::Bytes(vec![0, 1, 2, 255])));
+    assert_eq!(db.get("ghost").unwrap(), None);
+    assert_eq!(db.exec(r#"count where user:*.role = "admin""#).unwrap(), "Count: 1");
+    assert!(db.exec("update greeting 5").unwrap_err().to_string().contains("Cannot update [string]"));
+    assert!(db.set("123", &Value::Null, 0).is_err());
+    db.exec("subscribe user:*").unwrap();
+    assert!(db.del("user:1").unwrap());
+    assert!(!db.del("user:1").unwrap());
+    // Notifications travel on their own: keep talking until it shows up.
+    wait_for("the notification", || {
+        db.ping().unwrap();
+        !db.events.is_empty()
+    });
+    assert_eq!(db.events, ["del user:1"]);
+    assert!(db.auth("root", "wrong").is_err());
+}
+
+#[test]
+fn start_status_stop() {
+    let dir = TempDir::new("daemon");
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port().to_string();
+    let run = |args: &[&str]| {
+        let out = kivadb(dir.path()).args(args).stdin(Stdio::null()).output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).replace('\r', "") + &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+    let (code, text) = run(&["status"]);
+    assert_eq!(code, Some(1));
+    assert!(text.contains("not running"));
+    assert!(run(&["stop"]).1.contains("not running"));
+
+    let (code, text) = run(&["start", "--port", &port, "--no-http"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("KivaDB started") && text.contains(&format!("TCP port : {port}")));
+    assert!(run(&["start", "--port", &port, "--no-http"]).1.contains("already running"));
+    let (code, text) = run(&["status"]);
+    assert_eq!(code, Some(0));
+    assert!(text.contains("KivaDB is running") && text.contains(&port));
+
+    // The started database serves programs and shells alike.
+    let mut db = kivadb::client::Client::connect(format!("127.0.0.1:{port}")).unwrap();
+    db.set("from_code", &kivadb::Value::Num("7".into()), 0).unwrap();
+    let (_, text) = run(&["-e", "get from_code", "-e", "set from_shell 1"]);
+    assert_eq!(text, "from_code: 7 [number]\nOK: from_shell saved.\n");
+    assert_eq!(db.get("from_shell").unwrap(), Some(kivadb::Value::Num("1".into())));
+    assert!(run(&["serve"]).1.contains("already running"));
+
+    let (code, text) = run(&["stop"]);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(text.contains("KivaDB stopped."));
+    assert!(db.ping().is_err());
+    assert_eq!(run(&["status"]).0, Some(1));
+    // Data written while it ran is there after a stop.
+    assert_eq!(run(&["-e", "get from_code and from_shell"]).1, "from_code: 7 [number]\nfrom_shell: 1 [number]\n");
+    assert!(std::fs::read_to_string(dir.path().join("server.log")).unwrap().contains("TCP protocol"));
+}

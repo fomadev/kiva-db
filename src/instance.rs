@@ -1,6 +1,6 @@
-// Copyright (c) 2026 Fordi / FomaDev.
-// Licensed under FomaDev Public License.
-// See LICENSE file in the project root for full license information.
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
 
 //! A running KivaDB instance: configuration, the system database, every open
 //! workspace, and the services shared by all sessions.
@@ -211,6 +211,8 @@ pub struct Instance {
     pub started: Instant,
     pub exec_slots: Semaphore,
     pub shutting_down: AtomicBool,
+    /// Set by the `shutdown` command; the process hosting the instance exits.
+    pub stop_requested: AtomicBool,
     /// Port of the TCP listener, once one is running.
     pub tcp_port: AtomicU64,
     weak: Weak<Instance>,
@@ -227,6 +229,7 @@ impl Instance {
             return Err(KivaError::Locked(home.display().to_string()));
         }
         let _ = fs::remove_file(home.join("instance.port"));
+        let _ = fs::remove_file(home.join("instance.pid"));
         let config = Config::load(home)?;
         let system = Engine::open(
             home.join("system").join("system.kiva"),
@@ -252,6 +255,7 @@ impl Instance {
             started: Instant::now(),
             exec_slots: Semaphore::new(threads),
             shutting_down: AtomicBool::new(false),
+            stop_requested: AtomicBool::new(false),
             tcp_port: AtomicU64::new(0),
             weak: weak.clone(),
             _lock: lock,
@@ -456,5 +460,6 @@ impl Instance {
         }
         self.system.close();
         let _ = fs::remove_file(self.home.join("instance.port"));
+        let _ = fs::remove_file(self.home.join("instance.pid"));
     }
 }
