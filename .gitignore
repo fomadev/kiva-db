@@ -3,6 +3,9 @@
 # See LICENSE file in the project root for full license information.
 
 
+# --- Rust ---
+target/
+
 # --- Compilations et Binaires ---
 *.o
 *.obj
@@ -20,6 +23,8 @@ bin/
 # --- Bases de données (Données de test) ---
 # On ignore les fichiers .kiva ou .db créés localement
 *.kiva
+*.kiva.*
+scratch-home/
 *.db
 *.log
 data/

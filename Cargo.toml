@@ -1,0 +1,41 @@
+[package]
+name = "kivadb"
+version = "1.0.0"
+edition = "2021"
+description = "KivaDB - a typed, persistent key-value and document database engine"
+authors = ["Fordi / FomaDev"]
+license-file = "LICENSE"
+repository = "https://github.com/fomadev/kiva-db"
+readme = "README.md"
+
+[lib]
+name = "kivadb"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kivadb"
+path = "src/main.rs"
+
+[dependencies]
+crc32fast = "1"
+lz4_flex = "0.11"
+flate2 = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+rmp-serde = "1"
+sha2 = "0.10"
+sha1 = "0.10"
+pbkdf2 = "0.12"
+getrandom = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rpassword = "7"
+ctrlc = "3"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Dependencies (hashing, compression, Lua) are optimised even in debug builds
+# so that the test suite stays fast.
+[profile.dev.package."*"]
+opt-level = 2

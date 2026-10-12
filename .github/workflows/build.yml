@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Fordi / FomaDev. 
+# Copyright (c) 2026 Fordi / FomaDev.
 # Licensed under FomaDev Public License.
 # See LICENSE file in the project root for full license information.
 
@@ -10,7 +10,7 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
   build:
@@ -23,19 +23,19 @@ jobs:
             os-name: windows
             arch: x64
             output_name: kivadb_win_x64
-            binary_ext: .exe
+            binary: kivadb.exe
 
-          - os: macos-latest 
+          - os: macos-latest
             os-name: macos
             arch: arm64
             output_name: kivadb_mac_arm64
-            binary_ext: ""
+            binary: kivadb
 
           - os: ubuntu-latest
             os-name: linux
             arch: x64
             output_name: kivadb_linux_x64
-            binary_ext: ""
+            binary: kivadb
 
     runs-on: ${{ matrix.os }}
 
@@ -43,53 +43,42 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- Configuration Windows (MSYS2) ---
-      - name: Setup MSYS2 (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make
-
-      # --- Compilation ---
-      - name: Compile KivaDB
+      - name: Install Rust (stable)
         shell: bash
         run: |
-          mkdir -p obj
-          
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Windows : Compilation statique avec MinGW[cite: 11]
-            mingw32-make
-          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            # macOS : Pas de statique, utilisation de Clang[cite: 10]
-            make CC=clang CXX=clang++ LDFLAGS="-lstdc++"
-          else
-            # Linux : Compilation standard[cite: 11]
-            make
-          fi
-          
-          # On uniformise le nom du binaire produit par le Makefile (kivadb.exe)[cite: 11]
-          # vers un nom simple 'kivadb' (ou 'kivadb.exe' sur Windows)
-          if [ -f "kivadb.exe" ]; then
-            if [[ "${{ matrix.os }}" != "windows-latest" ]]; then
-               mv kivadb.exe kivadb
-            fi
-          fi
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
 
-      # --- Archivage intelligent ---
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+      - name: Compile KivaDB
+        run: cargo build --release
+
+      # --- Archivage ---
       - name: Archive Binary
         shell: bash
         run: |
-          # Le nom du fichier à l'intérieur de l'archive sera "kivadb" (ou kivadb.exe)
-          # Mais le nom du pack (l'archive) contiendra l'architecture.
-          
+          # The file inside the archive is always "kivadb" (or kivadb.exe);
+          # the archive name carries the platform.
+          cd target/release
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            # Archive : kivadb_win_x64.zip | Contenu : kivadb.exe
-            7z a ${{ matrix.output_name }}.zip kivadb.exe
+            7z a ../../${{ matrix.output_name }}.zip ${{ matrix.binary }}
             echo "ASSET=${{ matrix.output_name }}.zip" >> $GITHUB_ENV
           else
-            # Archive : kivadb_macos_arm64.tar.gz | Contenu : kivadb
-            tar -czvf ${{ matrix.output_name }}.tar.gz kivadb
+            tar -czvf ../../${{ matrix.output_name }}.tar.gz ${{ matrix.binary }}
             echo "ASSET=${{ matrix.output_name }}.tar.gz" >> $GITHUB_ENV
           fi
 

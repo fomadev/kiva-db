@@ -35,7 +35,7 @@ The most effective way to get a bug fixed is to provide a reduced test case. Ple
 
 ## Proposing Changes
 
-If you intend to modify the public API (kivadb.h) or make non-trivial changes to the storage engine or indexing logic, we recommend opening an issue first. This allows us to reach an agreement on the design before you invest significant effort.
+If you intend to modify the public API, the wire protocol or make non-trivial changes to the storage engine or indexing logic, we recommend opening an issue first. This allows us to reach an agreement on the design before you invest significant effort.
 
 ## Sending a Pull Request
 
@@ -44,22 +44,23 @@ The core team monitors Pull Requests regularly. We will review your code and eit
 ### Pull Request Checklist
 Before submitting, please ensure:
 1. You have forked the repository and created your branch from `main`.
-2. Your code adheres to the project's style (C11 for core, C++17 for CLI/Index).
+2. Your code is formatted with `cargo fmt` and passes `cargo clippy --all-targets` without warnings.
 3. You have updated the documentation if you added new commands or flags.
-4. You have verified your changes by running the build process.
+4. You have added tests for your change and `cargo test` passes.
 
 ### Development Workflow
-KivaDB uses a `Makefile` for its build system.
-- To compile the project: `make`
-- To clean build artifacts: `make clean`
-- To test the shell: `./kivadb`
+KivaDB is built with Cargo.
+- To compile the project: `cargo build --release`
+- To run the test suites: `cargo test`
+- To try the shell on a throwaway database: `cargo run -- --home ./scratch-home`
 
 ## Style Guide
 
 Consistency is key to a maintainable database engine.
-- **C Core**: Follow a strict procedural style with clear manual memory management. Use `kiva_` prefixes for public API functions.
-- **C++ CLI**: Use modern C++17 features where appropriate, but keep the interface with the C core through `extern "C"` blocks.
-- **Formatting**: Keep indentation consistent (4 spaces). Use descriptive variable names.
+- **Storage engine** (`src/engine.rs`, `format.rs`, `hint.rs`): any change to the on-disk format must stay readable by existing files, or bump the format number and say so in the pull request.
+- **Command language** (`src/exec.rs`, `exec_admin.rs`): every new command needs an entry in `help`, in the README and in the privilege table (`required`).
+- **Errors**: return `KivaError` values; never panic on user input or on corrupted data.
+- **Formatting**: `cargo fmt`. Use descriptive names and comment the reasoning, not the mechanics.
 
 ## Contributor License Agreement (CLA)
 
