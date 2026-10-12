@@ -211,10 +211,24 @@ pub fn list_users(sys: &Engine) -> Result<Vec<User>> {
     Ok(out)
 }
 
-/// Creates the built-in `root` administrator (empty password) on first run.
-pub fn ensure_root(sys: &Engine) -> Result<()> {
-    if get_user(sys, "root")?.is_none() {
-        save_user(sys, &User::new("root", "", Role::Admin))?;
+/// Name of the built-in administrator account.
+pub const DEFAULT_ADMIN: &str = "kiva";
+
+/// Creates the built-in `kiva` administrator (empty password) on first run.
+/// Homes created when that account was still called `root` are migrated:
+/// the account is renamed and keeps its password.
+pub fn ensure_admin(sys: &Engine) -> Result<()> {
+    if get_user(sys, DEFAULT_ADMIN)?.is_some() {
+        return Ok(());
+    }
+    match get_user(sys, "root")? {
+        Some(mut legacy) => {
+            legacy.name = DEFAULT_ADMIN.to_string();
+            legacy.role = Role::Admin;
+            save_user(sys, &legacy)?;
+            delete_user(sys, "root")?;
+        }
+        None => save_user(sys, &User::new(DEFAULT_ADMIN, "", Role::Admin))?,
     }
     Ok(())
 }

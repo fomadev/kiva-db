@@ -20,6 +20,8 @@ pub const CMD_PING: u16 = 4;
 pub const CMD_GET: u16 = 5;
 pub const CMD_SET: u16 = 6;
 pub const CMD_DEL: u16 = 7;
+/// Structured request: a JSON object in, a JSON object out (see the api module).
+pub const CMD_API: u16 = 8;
 pub const CMD_REPL_SYNC: u16 = 20;
 pub const CMD_REPL_ACK: u16 = 21;
 

@@ -6,14 +6,14 @@ use kivadb::session::Session;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-fn root(dir: &TempDir) -> Session {
+fn kiva(dir: &TempDir) -> Session {
     Session::new(instance(dir), true, None)
 }
 
 #[test]
 fn set_get_update_follow_the_typing_rules() {
     let dir = TempDir::new("typing");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     assert_eq!(ok(&mut s, "set a 4 and string be 'f'"), "OK: a saved.\nOK: be saved.");
     assert_eq!(ok(&mut s, "get a and be"), "a: 4 [number]\nbe: f [string]");
     assert_eq!(ok(&mut s, "get number a"), "a: 4 [number]");
@@ -62,7 +62,7 @@ fn set_get_update_follow_the_typing_rules() {
 #[test]
 fn structured_types() {
     let dir = TempDir::new("structured");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     ok(&mut s, r#"set colors ["red", "green", "blue"]"#);
     ok(
         &mut s,
@@ -117,7 +117,7 @@ fn structured_types() {
 #[test]
 fn print_evaluates_expressions() {
     let dir = TempDir::new("print");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     ok(&mut s, r#"set age 30 and name "Fordi" and price 2.5 and u {"n": 4}"#);
     assert_eq!(ok(&mut s, "print (4 + 8) * 10"), "120");
     assert_eq!(ok(&mut s, "print (10 + 5) * 2 / (age - 28)"), "15");
@@ -135,7 +135,7 @@ fn print_evaluates_expressions() {
 #[test]
 fn change_and_bump() {
     let dir = TempDir::new("change");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     ok(&mut s, r#"set active_id 7 and legacy "old" and other 1"#);
     assert_eq!(ok(&mut s, "change active_id to session_id"), "Renamed: active_id -> session_id (Type preserved)");
     assert_eq!(ok(&mut s, "get active_id and session_id"), "active_id: (nil)\nsession_id: 7 [number]");
@@ -167,7 +167,7 @@ fn change_and_bump() {
 #[test]
 fn queries_ranges_and_indexes() {
     let dir = TempDir::new("queries");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     for i in 1..=30 {
         let role = if i % 5 == 0 { "admin" } else { "dev" };
         ok(
@@ -293,7 +293,7 @@ fn committed_transactions_survive_a_restart() {
         drop(s);
         inst.shutdown();
     }
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     assert_eq!(
         ok(&mut s, "get a and b and c and never"),
         "a: 1 [number]\nb: two [string]\nc: [3] [array]\nnever: (nil)"
@@ -319,7 +319,7 @@ fn users_roles_and_workspaces() {
     assert!(fails(&mut s, "auth fordi wrong").contains("invalid username or password"));
     assert!(fails(&mut s, "auth nobody x").contains("invalid username or password"));
     // Root still has an empty password: refused over the network, allowed locally.
-    assert!(fails(&mut s, "auth root").contains("only log in from the local shell"));
+    assert!(fails(&mut s, "auth kiva").contains("only log in from the local shell"));
     assert_eq!(ok(&mut s, "auth fordi s3cret"), "Welcome fordi (editor)");
     assert_eq!(ok(&mut s, "whoami"), "fordi (editor) @ workspace 'u_fordi'");
 
@@ -364,14 +364,14 @@ fn users_roles_and_workspaces() {
     let mut again = Session::new(inst.clone(), false, None);
     assert!(fails(&mut again, "auth fordi s3cret").contains("invalid"));
     ok(&mut again, "auth fordi n3w");
-    ok(&mut admin, r#"modify user "root" password "rootpw""#);
-    assert_eq!(ok(&mut again, "auth root rootpw"), "Welcome root (admin)");
+    ok(&mut admin, r#"modify user "kiva" password "rootpw""#);
+    assert_eq!(ok(&mut again, "auth kiva rootpw"), "Welcome kiva (admin)");
 
-    assert!(fails(&mut admin, r#"drop user "root""#).contains("cannot be dropped"));
+    assert!(fails(&mut admin, r#"drop user "kiva""#).contains("cannot be dropped"));
     ok(&mut admin, r#"drop user "guest""#);
     assert!(fails(&mut g, "auth guest g").contains("invalid"));
     let users = ok(&mut admin, "users");
-    assert!(users.contains("fordi") && users.contains("root") && !users.contains("guest"));
+    assert!(users.contains("fordi") && users.contains("kiva") && !users.contains("guest"));
 
     // Everything sensitive is in the audit log, without the passwords.
     let audit = ok(&mut admin, "audit last 100");
@@ -445,7 +445,7 @@ fn workspaces_and_configuration() {
     drop(inst);
 
     // Configuration and workspaces persist.
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     assert_eq!(ok(&mut s, "config get compact_threshold"), "storage.compact_threshold = 40");
     ok(&mut s, "workspace switch projet_b");
     assert_eq!(ok(&mut s, "get loc"), "loc: b [string]");
@@ -454,7 +454,7 @@ fn workspaces_and_configuration() {
 #[test]
 fn maintenance_commands() {
     let dir = TempDir::new("maint");
-    let mut s = root(&dir);
+    let mut s = kiva(&dir);
     let text = "compressible ".repeat(50);
     for i in 0..30 {
         ok(&mut s, &format!("set k{i:02} \"{text}\""));

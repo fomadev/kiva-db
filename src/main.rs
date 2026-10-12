@@ -132,10 +132,11 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     };
     // Never expose an unauthenticated database to the network.
     if !is_loopback(&bind) {
-        let root_open = auth::get_user(&inst.system, "root").ok().flatten().is_some_and(|u| u.has_empty_password());
+        let root_open =
+            auth::get_user(&inst.system, auth::DEFAULT_ADMIN).ok().flatten().is_some_and(|u| u.has_empty_password());
         if !inst.auth_required() || root_open {
             eprintln!("Error: refusing to listen on {bind} without authentication.");
-            eprintln!("  1. kivadb -e \"modify user \\\"root\\\" password \\\"<a strong password>\\\"\"");
+            eprintln!("  1. kivadb -e \"modify user \\\"kiva\\\" password \\\"<a strong password>\\\"\"");
             eprintln!("  2. kivadb -e \"config set auth_required true\"");
             return 1;
         }

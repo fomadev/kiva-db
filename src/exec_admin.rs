@@ -200,8 +200,8 @@ impl Session {
         if c.eat("user") {
             let name = word(c.next(), "a user name")?;
             c.finish("drop user \"<name>\"")?;
-            if name == "root" {
-                return Err("the root account cannot be dropped.".into());
+            if name == auth::DEFAULT_ADMIN {
+                return Err("the built-in kiva account cannot be dropped.".into());
             }
             if name == self.user_name() {
                 return Err("you cannot drop your own account.".into());
@@ -266,8 +266,8 @@ impl Session {
             return Err(format!("a grant needs a scope.\nUsage: {usage}"));
         }
         let mut user = auth::get_user(&self.inst.system, &name)?.ok_or(format!("user '{name}' does not exist."))?;
-        if name == "root" {
-            return Err("the privileges of root cannot be changed.".into());
+        if name == auth::DEFAULT_ADMIN {
+            return Err("the privileges of the built-in kiva account cannot be changed.".into());
         }
         let where_ = match scope.as_deref() {
             Some("*") | None => "all workspaces".to_string(),
@@ -350,8 +350,8 @@ impl Session {
             let role = Role::from_name(&word(c.next(), "a role")?).ok_or("role must be admin, editor or viewer")?;
             c.finish(USAGE)?;
             self.check(Need::Admin)?;
-            if name == "root" {
-                return Err("the role of root cannot be changed.".into());
+            if name == auth::DEFAULT_ADMIN {
+                return Err("the role of the built-in kiva account cannot be changed.".into());
             }
             user.role = role;
             auth::save_user(&self.inst.system, &user)?;

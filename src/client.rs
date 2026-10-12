@@ -108,6 +108,14 @@ impl Client {
         }
     }
 
+    /// Sends a structured request (see the `api` module) and returns its JSON answer.
+    pub fn api(&mut self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        match self.call(CMD_API, request.to_string().as_bytes())? {
+            (ST_OK, b) => Ok(serde_json::from_slice(&b)?),
+            (_, b) => Err(KivaError::Other(Self::text(&b))),
+        }
+    }
+
     /// Deletes a key. Returns whether it existed.
     pub fn del(&mut self, key: &str) -> Result<bool> {
         match self.call(CMD_DEL, key.as_bytes())? {

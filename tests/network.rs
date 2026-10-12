@@ -98,7 +98,7 @@ fn network_logins() {
     let dir = TempDir::new("tcpauth");
     let inst = instance(&dir);
     let mut admin = Session::new(inst.clone(), true, None);
-    ok(&mut admin, r#"modify user "root" password "pw""#);
+    ok(&mut admin, r#"modify user "kiva" password "pw""#);
     ok(&mut admin, r#"create user "eve" identified by "evepw" role viewer"#);
     ok(&mut admin, "config set auth_required true");
     ok(&mut admin, r#"set secret "42""#);
@@ -110,8 +110,8 @@ fn network_logins() {
     assert_eq!(code, ST_ERR);
     assert!(body.contains("authentication required"));
     assert_eq!(call(&mut c, CMD_GET, b"secret").0, ST_ERR);
-    assert_eq!(call(&mut c, CMD_AUTH, b"root\0wrong").0, ST_ERR);
-    assert_eq!(call(&mut c, CMD_AUTH, b"root\0pw"), (ST_OK, "Welcome root (admin)".into()));
+    assert_eq!(call(&mut c, CMD_AUTH, b"kiva\0wrong").0, ST_ERR);
+    assert_eq!(call(&mut c, CMD_AUTH, b"kiva\0pw"), (ST_OK, "Welcome kiva (admin)".into()));
     assert_eq!(call(&mut c, CMD_EXEC, b"get secret"), (ST_OK, "+secret: 42 [string]".into()));
 
     // A viewer cannot start a replication stream.
@@ -129,9 +129,9 @@ fn network_logins() {
     lines.read_line(&mut line).unwrap();
     assert!(line.contains("authentication required"));
     line.clear();
-    t.write_all(b"auth root pw\n").unwrap();
+    t.write_all(b"auth kiva pw\n").unwrap();
     lines.read_line(&mut line).unwrap();
-    assert_eq!(line.trim_end(), "Welcome root (admin)");
+    assert_eq!(line.trim_end(), "Welcome kiva (admin)");
 }
 
 struct HttpReply {
@@ -414,7 +414,7 @@ fn command_line_and_shared_terminals() {
     // ...and terminal 2 works on the very same data, live.
     let out = kivadb(dir.path()).args(["-e", "set from_two 2", "-e", "update a 5", "-e", "whoami"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("root (admin) @ workspace 'default'"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("kiva (admin) @ workspace 'default'"));
     assert_eq!(recv(), "[event] set from_two (number)");
     send("get a and from_two");
     assert_eq!(recv(), "a: 5 [number]");
@@ -486,7 +486,7 @@ fn rust_client() {
         !db.events.is_empty()
     });
     assert_eq!(db.events, ["del user:1"]);
-    assert!(db.auth("root", "wrong").is_err());
+    assert!(db.auth("kiva", "wrong").is_err());
 }
 
 #[test]
@@ -529,4 +529,113 @@ fn start_status_stop() {
     // Data written while it ran is there after a stop.
     assert_eq!(run(&["-e", "get from_code and from_shell"]).1, "from_code: 7 [number]\nfrom_shell: 1 [number]\n");
     assert!(std::fs::read_to_string(dir.path().join("server.log")).unwrap().contains("TCP protocol"));
+}
+
+#[test]
+fn structured_api() {
+    use kivadb::client::Client;
+    let dir = TempDir::new("api");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, r#"create user "eve" identified by "evepw" role viewer"#);
+    ok(&mut admin, r#"grant read on workspace "default" to "eve""#);
+    let port = server::start_tcp(&inst, "127.0.0.1", 0).unwrap();
+    let mut db = Client::connect(("127.0.0.1", port)).unwrap();
+
+    let me = db.api(&json!({"op": "whoami"})).unwrap();
+    assert_eq!(
+        (&me["user"], &me["role"], &me["workspace"], &me["can_write"]),
+        (&json!("kiva"), &json!("admin"), &json!("default"), &json!(true))
+    );
+
+    // Typed writes: no quoting rules to worry about.
+    let put = |db: &mut Client, key: &str, ty: &str, value: Json, extra: Json| {
+        let mut req = json!({"op": "put", "key": key, "type": ty, "value": value});
+        for (k, v) in extra.as_object().unwrap() {
+            req[k] = v.clone();
+        }
+        db.api(&req)
+    };
+    put(&mut db, "quote", "string", json!("both \" and ' quotes"), json!({"mode": "create"})).unwrap();
+    put(&mut db, "user:1", "object", json!({"name": "Alice"}), json!({"ttl": 3600})).unwrap();
+    put(&mut db, "n", "number", json!("3.14"), json!({})).unwrap();
+    put(&mut db, "blob", "bytes", json!("AAEC/w=="), json!({})).unwrap();
+    assert!(put(&mut db, "quote", "string", json!("x"), json!({"mode": "create"}))
+        .unwrap_err()
+        .to_string()
+        .contains("already exists"));
+    assert!(put(&mut db, "ghost", "string", json!("x"), json!({"mode": "update"}))
+        .unwrap_err()
+        .to_string()
+        .contains("not found"));
+    assert!(put(&mut db, "n2", "number", json!("abc"), json!({})).is_err());
+    assert!(put(&mut db, "123", "null", Json::Null, json!({})).unwrap_err().to_string().contains("purely numeric"));
+
+    let got = db.api(&json!({"op": "get", "key": "quote"})).unwrap();
+    assert_eq!(
+        (&got["found"], &got["type"], &got["value"]),
+        (&json!(true), &json!("string"), &json!("both \" and ' quotes"))
+    );
+    let got = db.api(&json!({"op": "get", "key": "user:1"})).unwrap();
+    assert_eq!(got["value"]["name"], "Alice");
+    assert!(got["ttl"].as_i64().unwrap() > 3500);
+    // Updating without a ttl keeps the expiry; ttl 0 removes it.
+    put(&mut db, "user:1", "object", json!({"name": "Alicia"}), json!({})).unwrap();
+    assert!(db.api(&json!({"op": "get", "key": "user:1"})).unwrap()["ttl"].as_i64().unwrap() > 3500);
+    put(&mut db, "user:1", "object", json!({"name": "Alicia"}), json!({"ttl": 0})).unwrap();
+    assert!(db.api(&json!({"op": "get", "key": "user:1"})).unwrap()["ttl"].is_null());
+    assert_eq!(db.api(&json!({"op": "get", "key": "blob"})).unwrap()["value"], "AAEC/w==");
+    assert_eq!(db.get("blob").unwrap(), Some(kivadb::Value::Bytes(vec![0, 1, 2, 255])));
+    assert_eq!(db.api(&json!({"op": "get", "key": "ghost"})).unwrap()["found"], false);
+
+    let scan = db.api(&json!({"op": "scan", "pattern": "*", "limit": 2})).unwrap();
+    assert_eq!(
+        (scan["keys"].as_array().unwrap().len(), &scan["truncated"], &scan["total"]),
+        (2, &json!(true), &json!(4))
+    );
+    let scan = db.api(&json!({"op": "scan", "pattern": "user:*"})).unwrap();
+    assert_eq!(
+        (&scan["keys"][0]["key"], &scan["keys"][0]["type"], &scan["truncated"]),
+        (&json!("user:1"), &json!("object"), &json!(false))
+    );
+
+    let stats = db.api(&json!({"op": "stats"})).unwrap();
+    assert_eq!((&stats["keys"], &stats["role"], &stats["version"]), (&json!(4), &json!("master"), &json!("1.0.0")));
+    let users = db.api(&json!({"op": "users"})).unwrap();
+    let names: Vec<&str> = users["users"].as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["eve", "kiva"]);
+    assert_eq!((&users["users"][1]["builtin"], &users["users"][1]["empty_password"]), (&json!(true), &json!(true)));
+    assert_eq!(users["users"][0]["grants"]["default"], "read");
+    let ws = db.api(&json!({"op": "workspaces"})).unwrap();
+    assert!(ws["workspaces"].as_array().unwrap().iter().any(|w| w["name"] == "default" && w["current"] == true));
+
+    assert_eq!(db.api(&json!({"op": "del", "key": "n"})).unwrap()["deleted"], true);
+    assert_eq!(db.api(&json!({"op": "del", "key": "n"})).unwrap()["deleted"], false);
+    assert!(db.api(&json!({"op": "nonsense"})).unwrap_err().to_string().contains("unknown operation"));
+    assert!(db.api(&json!({"nop": 1})).is_err());
+
+    // The same permissions as the shell apply.
+    db.auth("eve", "evepw").unwrap();
+    db.exec("workspace switch default").unwrap();
+    let me = db.api(&json!({"op": "whoami"})).unwrap();
+    assert_eq!((&me["role"], &me["can_write"]), (&json!("viewer"), &json!(false)));
+    assert_eq!(db.api(&json!({"op": "get", "key": "quote"})).unwrap()["found"], true);
+    assert!(put(&mut db, "x", "null", Json::Null, json!({})).unwrap_err().to_string().contains("read-only"));
+    assert!(db.api(&json!({"op": "del", "key": "quote"})).unwrap_err().to_string().contains("read-only"));
+    assert!(db.api(&json!({"op": "users"})).unwrap_err().to_string().contains("admin role"));
+}
+
+#[test]
+fn legacy_root_account_is_renamed() {
+    let dir = TempDir::new("legacy");
+    {
+        // A home created when the built-in administrator was called root.
+        let sys = kivadb::Engine::open(dir.path().join("system").join("system.kiva"), Default::default()).unwrap();
+        kivadb::auth::save_user(&sys, &kivadb::auth::User::new("root", "old-secret", kivadb::auth::Role::Admin))
+            .unwrap();
+    }
+    let inst = instance(&dir);
+    assert!(kivadb::auth::get_user(&inst.system, "root").unwrap().is_none());
+    let admin = kivadb::auth::get_user(&inst.system, "kiva").unwrap().unwrap();
+    assert!(admin.verify("old-secret") && admin.role == kivadb::auth::Role::Admin);
 }

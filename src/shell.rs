@@ -163,13 +163,15 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts) -> i32 {
 fn login(opts: &ShellOpts, mut try_login: impl FnMut(&str, &str) -> (Vec<(bool, String)>, bool)) -> bool {
     let scripted = opts.user.is_some() && opts.password.is_some();
     for _ in 0..3 {
-        let Some(user) = opts.user.clone().or_else(|| read_line("Username: ")) else {
+        let Some(user) = opts.user.clone().or_else(|| read_line("Username [kiva]: ")) else {
             return false;
         };
         let Some(password) = opts.password.clone().or_else(read_password) else {
             return false;
         };
-        let (lines, ok) = try_login(user.trim(), &password);
+        // Just pressing Enter picks the built-in administrator.
+        let user = if user.trim().is_empty() { crate::auth::DEFAULT_ADMIN } else { user.trim() };
+        let (lines, ok) = try_login(user, &password);
         show(&lines);
         if ok {
             return true;

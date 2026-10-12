@@ -31,7 +31,7 @@ pub const KNOWN: &[(&str, &str, &str, &str)] = &[
     ("replication", "role", "master", "master or replica"),
     ("replication", "master_host", "", "Host of the master (replica only)"),
     ("replication", "master_port", "2911", "Port of the master (replica only)"),
-    ("replication", "master_user", "root", "User the replica authenticates as"),
+    ("replication", "master_user", "kiva", "User the replica authenticates as"),
     ("replication", "master_password", "", "Password the replica authenticates with"),
     ("replication", "sync_mode", "async", "async or sync"),
     ("replication", "min_slaves_ack", "1", "Replica acknowledgements required in sync mode"),

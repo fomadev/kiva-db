@@ -195,6 +195,15 @@ fn binary_loop(
                     Err(e) => reply(ST_ERR, e.to_string().as_bytes()),
                 }
             }
+            CMD_API => {
+                let res = serde_json::from_slice::<serde_json::Value>(&payload)
+                    .map_err(KivaError::from)
+                    .and_then(|req| crate::api::handle(&mut sess, &req));
+                match res {
+                    Ok(j) => reply(ST_OK, j.to_string().as_bytes()),
+                    Err(e) => reply(ST_ERR, e.to_string().as_bytes()),
+                }
+            }
             CMD_REPL_SYNC => {
                 if let Err(e) = sess.check(Need::Admin) {
                     let _ = reply(ST_ERR, e.to_string().as_bytes());

@@ -235,7 +235,7 @@ impl Instance {
             home.join("system").join("system.kiva"),
             EngineOptions { auto_compact_min_bytes: 16 * 1024, ..Default::default() },
         )?;
-        auth::ensure_root(&system)?;
+        auth::ensure_admin(&system)?;
         let threads = config.get_u64("server", "threads") as usize;
 
         let inst = Arc::new_cyclic(|weak| Instance {

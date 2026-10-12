@@ -1350,7 +1350,7 @@ cors = true
 role = master
 master_host =
 master_port = 2911
-master_user = root
+master_user = kiva
 master_password =
 sync_mode = async
 min_slaves_ack = 1
@@ -1415,11 +1415,11 @@ network.port = 2911
 
 ### 15.1 The starting point
 
-A fresh KivaDB has one account, `root`, which is an administrator with an **empty password**, and authentication is **off**: anyone who can run `kivadb` on the machine is `root`. That is convenient on your own computer. Before sharing the machine or opening the network, secure it ([section 15.6](#156-turning-authentication-on)).
+A fresh KivaDB has one account, `kiva`, which is an administrator with an **empty password**, and authentication is **off**: anyone who can run `kivadb` on the machine is `kiva`. That is convenient on your own computer. Before sharing the machine or opening the network, secure it ([section 15.6](#156-turning-authentication-on)).
 
 ```text
 kiva> whoami
-root (admin) @ workspace 'default'
+kiva (admin) @ workspace 'default'
 ```
 
 ### 15.2 Roles
@@ -1446,7 +1446,7 @@ kiva> users
 ------------------------------------------------------------------------------
  fordi                | editor  | 2026-10-12 09:44:55 | u_fordi=write
  guest                | viewer  | 2026-10-12 09:44:55 | u_guest=write
- root                 | admin   | 2026-10-12 09:44:53 | all (admin)
+ kiva                 | admin   | 2026-10-12 09:44:53 | all (admin)
 ```
 
 A new user is an `editor` unless you say otherwise. User names may contain letters, digits, `_`, `-` and `.`.
@@ -1462,7 +1462,7 @@ kiva> drop user "guest"
 User 'guest' dropped.
 ```
 
-Anyone may change their own password; only an admin may change someone else's password or a role. The `root` account cannot be dropped or demoted.
+Anyone may change their own password; only an admin may change someone else's password or a role. The `kiva` account cannot be dropped or demoted.
 
 ### 15.4 Workspaces and grants
 
@@ -1499,14 +1499,14 @@ When authentication is on, the shell asks who you are:
 
 ```text
 $ kivadb
-Username: fordi
+Username [kiva]: fordi
 Password: ********
 Welcome fordi (editor)
 kiva> whoami
 fordi (editor) @ workspace 'u_fordi'
 ```
 
-On the command line: `kivadb -u fordi` asks for the password; `kivadb -u fordi -p mon_pass` gives it directly (convenient in scripts, but the password is then visible in your command history).
+Pressing Enter at the user name prompt chooses `kiva`, the built-in administrator. On the command line: `kivadb -u fordi` asks for the password; `kivadb -u fordi -p mon_pass` gives it directly (convenient in scripts, but the password is then visible in your command history).
 
 Inside any session, `auth <user> <password>` logs in or switches user. This is also how you log in over a plain-text connection ([Chapter 18](#chapter-18--the-tcp-server)).
 
@@ -1515,8 +1515,8 @@ Inside any session, `auth <user> <password>` logs in or switches user. This is a
 Do it in this order, so you do not lock yourself out:
 
 ```text
-kiva> modify user "root" password "a-long-and-secret-password"
-Password updated for 'root'.
+kiva> modify user "kiva" password "a-long-and-secret-password"
+Password updated for 'kiva'.
 kiva> config set auth_required true
 OK: security.auth_required = true
 ```
@@ -1524,18 +1524,18 @@ OK: security.auth_required = true
 From now on every new shell, connection and HTTP request must present a user name and password. As long as an account has an empty password, KivaDB reminds you at login:
 
 ```text
-[WARN] root password is empty. Please run: modify user "root" password "..."
+[WARN] kiva password is empty. Please run: modify user "kiva" password "..."
 ```
 
 ### 15.7 Opening KivaDB to the network
 
 By default KivaDB only listens on `127.0.0.1`, which means only programs on the same computer can connect. To accept connections from other machines:
 
-1. Turn authentication on and give `root` a password ([15.6](#156-turning-authentication-on)).
+1. Turn authentication on and give `kiva` a password ([15.6](#156-turning-authentication-on)).
 2. `config set bind 0.0.0.0` (all network interfaces) or the address of one interface.
 3. Restart KivaDB (`kivadb stop`, `kivadb start`).
 
-KivaDB **refuses to start** on a non-local address while authentication is off or `root` has no password:
+KivaDB **refuses to start** on a non-local address while authentication is off or `kiva` has no password:
 
 ```text
 Error: refusing to listen on 0.0.0.0 without authentication.
@@ -1555,9 +1555,9 @@ Sensitive actions are recorded in `audit.log` in the home directory: account and
 
 ```text
 kiva> audit last 3
-[2026-10-12 09:44:55] user=root action="create user 'fordi' identified by '***'" status=SUCCESS
-[2026-10-12 09:44:55] user=root action="create user 'guest' identified by '***' role viewer" status=SUCCESS
-[2026-10-12 09:44:55] user=root action="grant read on workspace 'shop' to 'guest'" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="create user 'fordi' identified by '***'" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="create user 'guest' identified by '***' role viewer" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="grant read on workspace 'shop' to 'guest'" status=SUCCESS
 ```
 
 | Command | Shows |
@@ -1568,7 +1568,7 @@ kiva> audit last 3
 
 ### 15.10 Emergency access
 
-If you lose the root password, someone with access to the machine can start KivaDB without authentication, fix the account, and restart normally:
+If you lose the kiva password, someone with access to the machine can start KivaDB without authentication, fix the account, and restart normally:
 
 ```bash
 kivadb stop
@@ -1577,7 +1577,7 @@ kivadb --skip-auth
 
 ```text
 [WARN] Authentication disabled - unsafe for production
-kiva> modify user "root" password "new-password"
+kiva> modify user "kiva" password "new-password"
 ```
 
 ---
@@ -1942,6 +1942,7 @@ KivaDB decides which language a connection speaks from its very first byte: `0x0
 | GET | 5 | The key | One type byte, then the value bytes (see [17.4](#174-the-data-file-byte-by-byte); documents are JSON text) |
 | SET | 6 | type `u8`, ttl `u32`, key length `u16`, key, value bytes | `OK` |
 | DEL | 7 | The key | `1` |
+| API | 8 | A JSON object with an `op` field | A JSON object (see [18.4](#184-structured-requests-for-tools)) |
 
 SET creates the key or replaces it, whatever its previous type. A ttl of 0 means no expiry.
 
@@ -1977,6 +1978,41 @@ A connection stays open for as many requests as you like. Replies come back in t
 ### 18.3 Capacity
 
 Each connection is served by its own thread. `server.max_clients` (1000) caps the number of connections; `server.threads` (8) caps how many commands execute at the same instant.
+
+### 18.4 Structured requests for tools
+
+The command language answers with text written for people. A program that needs data it can rely on - a graphical client, a dashboard - uses the API request (code 8): a JSON object goes in, a JSON object comes back. The same session, permissions and transaction apply as for commands.
+
+| `op` | Other fields | Answer |
+| :--- | :--- | :--- |
+| `whoami` | - | `user`, `role`, `workspace`, `access`, `can_write`, `auth_required`, `replica`, `version` |
+| `workspaces` | - | `workspaces`: name, path, access and whether it is the current one |
+| `scan` | `pattern` (default `*`), `limit` (default 500) | `keys`: key, type, size, modified, ttl, compression, msgpack; `truncated`; `total` |
+| `get` | `key` | `found`, `type`, `value`, `ttl`, `modified`, `msgpack` |
+| `put` | `key`, `type`, `value`, optional `ttl`, optional `mode` | `key`, `type` |
+| `del` | `key` | `deleted` |
+| `stats` | - | The figures of the `stats` command, as fields |
+| `users` | - | `users`: name, role, grants, created, home workspace, whether the password is empty (admin only) |
+
+Notes on `put`:
+
+* `value` is plain JSON matching `type`. A number may be given as a JSON number or as text (`"3.14"`), bytes are base64 text.
+* `mode` is `create` (fail if the key exists), `update` (fail if it does not) or `upsert` (default).
+* `ttl` absent keeps the current expiry of the key, `0` removes it, a positive number sets it in seconds.
+
+Because values travel as JSON, they are free of the shell's quoting rules: a text may contain both kinds of quotes.
+
+Request and answer for reading a key:
+
+```json
+{"op": "get", "key": "user:1"}
+```
+
+```json
+{"found": true, "key": "user:1", "type": "object", "value": {"name": "Alice"}, "ttl": null, "modified": 1791791094, "msgpack": false}
+```
+
+An error comes back with status 1 and the message as payload, as for every request. The Rust client exposes this as `Client::api`.
 
 ---
 
@@ -2308,9 +2344,13 @@ fn main() -> Result<(), kivadb::KivaError> {
 | `ping()` | Checks the connection |
 | `events` | Notifications received so far, after a `subscribe` |
 
-### 21.6 Any other language
+### 21.6 Kiva Studio, the graphical client
 
-Two options: use the REST API with your language's HTTP library, or implement the binary protocol of [section 18.2](#182-the-binary-protocol). The protocol is small; the Node.js client is about fifty lines and is a good model: build a frame, send it, read frames until one is not a notification.
+Kiva Studio is the desktop application for KivaDB (Windows, Linux, macOS). It lives next to the database in the repository, in the `kiva-studio` folder, and connects to port 2911 like any other client: enter the host, the port, a user name and a password. It offers a data browser and editor, a command console, user management for administrators and a health dashboard, and it refreshes by itself when someone else changes the data. See its own README for how to build and run it.
+
+### 21.7 Any other language
+
+Two options: use the REST API with your language's HTTP library, or implement the binary protocol of [section 18.2](#182-the-binary-protocol) (with the structured requests of [section 18.4](#184-structured-requests-for-tools) if you want JSON instead of text). The protocol is small; the Node.js client is about fifty lines and is a good model: build a frame, send it, read frames until one is not a notification.
 
 ---
 
@@ -2348,7 +2388,7 @@ The choice is remembered in the configuration: after a restart, the replica resu
 If the master requires authentication, give the replica an admin account to log in with:
 
 ```text
-kiva> config set master_user "root"
+kiva> config set master_user "kiva"
 kiva> config set master_password "the-master-password"
 ```
 
@@ -2670,7 +2710,7 @@ scrape_configs:
       - targets: ['localhost:8080']
 ```
 
-Storage metrics describe the workspace of the user making the request (the `default` one for root). With authentication on, give Prometheus an account (`basic_auth`).
+Storage metrics describe the workspace of the user making the request (the `default` one for kiva). With authentication on, give Prometheus an account (`basic_auth`).
 
 ### 24.3 What to watch
 
@@ -2811,7 +2851,7 @@ Only one process can open a given data file or home directory at a time. If Kiva
 
 **"A key disappeared."** It may have had a TTL. `scan` shows remaining times for keys that expire.
 
-**"I forgot the root password."** See [15.10](#1510-emergency-access).
+**"I forgot the kiva password."** See [15.10](#1510-emergency-access).
 
 ---
 

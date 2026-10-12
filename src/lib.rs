@@ -8,6 +8,7 @@
 //! (storage only) or [`instance::Instance`] + [`session::Session`] (the full
 //! command language, users, workspaces and scripting).
 
+pub mod api;
 pub mod auth;
 pub mod client;
 pub mod compress;

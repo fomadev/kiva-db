@@ -100,7 +100,7 @@ impl Session {
     }
 
     fn become_root(&mut self) {
-        self.user = Some(UserCtx { name: "root".into(), role: Role::Admin });
+        self.user = Some(UserCtx { name: auth::DEFAULT_ADMIN.into(), role: Role::Admin });
         self.ws_priv = Priv::Write;
     }
 
