@@ -121,15 +121,47 @@ fn on_ctrl_c(inst: &Arc<Instance>, stop: Option<Arc<AtomicBool>>) {
 }
 
 fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
+    // Settings may also come from the environment, which is how containers
+    // and service managers configure a program. Command-line flags win.
+    let env = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    let env_port = |name: &str| env(name).and_then(|v| v.trim().parse::<u16>().ok()).filter(|p| *p != 0);
     let (bind, port, http_on, http_port) = {
         let c = inst.cfg();
         (
-            args.bind.clone().unwrap_or_else(|| c.get("network", "bind")),
-            args.port.unwrap_or(c.get_u64("network", "port") as u16),
+            args.bind.clone().or_else(|| env("KIVADB_BIND")).unwrap_or_else(|| c.get("network", "bind")),
+            args.port.or_else(|| env_port("KIVADB_PORT")).unwrap_or(c.get_u64("network", "port") as u16),
             c.get_bool("http", "enabled") && !args.no_http,
-            args.http_port.unwrap_or(c.get_u64("http", "port") as u16),
+            args.http_port.or_else(|| env_port("KIVADB_HTTP_PORT")).unwrap_or(c.get_u64("http", "port") as u16),
         )
     };
+    // First start of a hosted instance: KIVADB_ADMIN_PASSWORD secures it in
+    // one step. A password that was already set is never overwritten.
+    if let Some(password) = env("KIVADB_ADMIN_PASSWORD") {
+        let secured = (|| -> kivadb::Result<bool> {
+            let mut changed = false;
+            if let Some(mut admin) = auth::get_user(&inst.system, auth::DEFAULT_ADMIN)? {
+                if admin.has_empty_password() {
+                    admin.set_password(&password);
+                    auth::save_user(&inst.system, &admin)?;
+                    inst.audit.log("system", "password of kiva set from KIVADB_ADMIN_PASSWORD", true);
+                    changed = true;
+                }
+            }
+            if !inst.cfg().get_bool("security", "auth_required") {
+                inst.cfg_mut().set("security", "auth_required", "true")?;
+                changed = true;
+            }
+            Ok(changed)
+        })();
+        match secured {
+            Ok(true) => println!("  Security     : administrator password set, authentication turned on"),
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("Error: cannot apply KIVADB_ADMIN_PASSWORD: {e}");
+                return 1;
+            }
+        }
+    }
     // Never expose an unauthenticated database to the network.
     if !is_loopback(&bind) {
         let root_open =
@@ -182,7 +214,12 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     while !stop.load(Ordering::SeqCst) && !inst.stop_requested.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
     }
-    println!("Shutting down...");
+    // Whoever was reading our output may be gone: never fail on this line.
+    let _ = std::io::Write::write_all(
+        &mut std::io::stdout(),
+        b"Shutting down...
+",
+    );
     inst.shutdown();
     0
 }

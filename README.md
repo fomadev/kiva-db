@@ -76,6 +76,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | Learn the commands | [Chapters 4 to 12](DOCUMENTATION.md#chapter-4--syntax-rules) |
 | Connect an application | [Chapters 18 to 21](DOCUMENTATION.md#chapter-18--the-tcp-server) |
 | Run it in production | [Chapters 14 to 17, 22 and 24](DOCUMENTATION.md#chapter-14--configuration) |
+| Host it: Linux, Windows, macOS, Docker | [Chapter 29](DOCUMENTATION.md#chapter-29--deploying-kivadb-on-a-server) |
 | Look a command up quickly | [Chapter 27, the cheat sheet](DOCUMENTATION.md#chapter-27--command-cheat-sheet) |
 
 ## Project layout

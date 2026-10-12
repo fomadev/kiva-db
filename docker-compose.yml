@@ -1,0 +1,20 @@
+# Start with:   KIVADB_ADMIN_PASSWORD=change-me docker compose up -d
+# Then connect: host = this machine, port 2911, user kiva, that password.
+services:
+  kivadb:
+    build: .
+    image: kivadb:1.0.0
+    container_name: kivadb
+    restart: unless-stopped
+    environment:
+      # Password of the built-in "kiva" administrator. Read on the first
+      # start only; change it afterwards with: modify user "kiva" password "..."
+      KIVADB_ADMIN_PASSWORD: ${KIVADB_ADMIN_PASSWORD:?set KIVADB_ADMIN_PASSWORD}
+    ports:
+      - "2911:2911"   # KivaDB protocol
+      - "8080:8080"   # REST API
+    volumes:
+      - kivadb-data:/data
+
+volumes:
+  kivadb-data:

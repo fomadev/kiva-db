@@ -35,6 +35,7 @@ Every example in this manual shows what you type after the `kiva>` prompt and, b
 * [Chapter 26 — Troubleshooting](#chapter-26--troubleshooting)
 * [Chapter 27 — Command cheat sheet](#chapter-27--command-cheat-sheet)
 * [Chapter 28 — Limits and scope](#chapter-28--limits-and-scope)
+* [Chapter 29 — Deploying KivaDB on a server](#chapter-29--deploying-kivadb-on-a-server)
 * [Glossary](#glossary)
 
 ---
@@ -80,6 +81,7 @@ You talk to KivaDB with short commands: `set` to store, `get` to read, `del` to 
 | 18 – 22 | Networking: protocols, REST, client programs, replication |
 | 23 – 25 | Extending: Lua scripts, monitoring, embedding |
 | 26 – 28 | Troubleshooting, cheat sheet, limits |
+| 29 | Deploying on Linux, Windows, macOS and Docker |
 
 ---
 
@@ -238,7 +240,7 @@ Press Ctrl+C to stop.
 
 ### 2.6 Starting KivaDB with the computer
 
-KivaDB does not install itself as a system service; use what your system provides.
+KivaDB does not install itself as a system service; use what your system provides. The short versions are below; [Chapter 29](#chapter-29--deploying-kivadb-on-a-server) gives complete, step-by-step instructions for Linux, Windows, macOS and Docker.
 
 **Windows** - a scheduled task that runs at logon:
 
@@ -3013,6 +3015,278 @@ KivaDB 1.0.0 is a single-node database with replicas. Knowing what it does not d
 * Listing and query commands do not show the uncommitted writes of your own transaction.
 * Strings have no escape sequences: a text cannot contain both kinds of quotes at once from the shell (it can through the REST API or the binary protocol).
 * Changes to grants reach a connected user at their next login or workspace switch.
+
+---
+
+## Chapter 29 — Deploying KivaDB on a server
+
+This chapter is for the day KivaDB leaves your own computer: a Linux machine at a hosting provider, a Windows server, a Mac, or a Docker container. The database is the same everywhere; what changes is how the system starts it and keeps it running.
+
+### 29.1 What every deployment has in common
+
+Whatever the system, a hosted KivaDB needs five things:
+
+1. **The executable** `kivadb` (built for that system, see [Chapter 1](#chapter-1--installation)).
+2. **A home directory** that survives restarts: configuration, users and data live there.
+3. **A password** for the `kiva` administrator, and authentication turned on.
+4. **A listening address** other machines can reach (`0.0.0.0` = every network interface).
+5. **Open ports** in the firewall: 2911 for shells, Kiva Studio and client libraries; 8080 for the REST API if you use it.
+
+KivaDB refuses to listen on a non-local address until point 3 is done ([15.7](#157-opening-kivadb-to-the-network)), so an open, password-less database cannot be published by accident.
+
+### 29.2 Configuring with environment variables
+
+On a server, settings are usually given through the environment rather than typed in a shell. `kivadb serve` and `kivadb start` read these variables:
+
+| Variable | Effect | Same as |
+| :--- | :--- | :--- |
+| `KIVADB_HOME` | Home directory | `--home` |
+| `KIVADB_BIND` | Address to listen on | `--bind`, `network.bind` |
+| `KIVADB_PORT` | KivaDB protocol port | `--port`, `network.port` |
+| `KIVADB_HTTP_PORT` | REST API port | `--http-port`, `http.port` |
+| `KIVADB_ADMIN_PASSWORD` | Secures a new instance, see below | |
+
+A command-line option wins over a variable, and a variable wins over `kiva.conf`.
+
+**`KIVADB_ADMIN_PASSWORD`** does the two security steps for you when the server starts:
+
+* if the `kiva` account still has an empty password, it receives this one;
+* authentication is turned on.
+
+It never overwrites a password that already exists: once you have changed the password with `modify user "kiva" password "..."`, the variable is ignored for the account. You can leave it in place or remove it.
+
+```bash
+KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
+```
+
+```text
+  Security     : administrator password set, authentication turned on
+KivaDB 1.0.0 server
+  Home         : /var/lib/kivadb
+  TCP protocol : 0.0.0.0:2911 (binary and plain text)
+  REST API     : http://0.0.0.0:8080  (docs: /docs, metrics: /metrics, events: /ws)
+  Auth         : required
+  Replication  : master
+Press Ctrl+C to stop.
+```
+
+### 29.3 Linux (systemd)
+
+This is the usual case at a hosting provider. The steps below create a dedicated system user, install the executable and let systemd start KivaDB at boot and restart it if it stops.
+
+```bash
+sudo useradd --system --home-dir /var/lib/kivadb --create-home kivadb
+sudo install -m 755 target/release/kivadb /usr/local/bin/kivadb
+```
+
+Put the password in a file only root can read, `/etc/kivadb.env`:
+
+```ini
+KIVADB_HOME=/var/lib/kivadb
+KIVADB_BIND=0.0.0.0
+KIVADB_ADMIN_PASSWORD=a-long-secret
+```
+
+```bash
+sudo chmod 600 /etc/kivadb.env
+```
+
+Create `/etc/systemd/system/kivadb.service`:
+
+```ini
+[Unit]
+Description=KivaDB database
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kivadb
+Group=kivadb
+EnvironmentFile=/etc/kivadb.env
+ExecStart=/usr/local/bin/kivadb serve
+Restart=on-failure
+RestartSec=2
+# Give KivaDB time to flush and write its index snapshot.
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Start it and check:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now kivadb
+sudo systemctl status kivadb
+sudo journalctl -u kivadb -f
+```
+
+Open the ports (example with `ufw`; skip 8080 if you do not use the REST API):
+
+```bash
+sudo ufw allow 2911/tcp
+sudo ufw allow 8080/tcp
+```
+
+To run commands on the server itself, use the same home directory as the service:
+
+```bash
+sudo -u kivadb KIVADB_HOME=/var/lib/kivadb kivadb -u kiva
+```
+
+`systemctl stop kivadb` sends an interrupt; KivaDB shuts down cleanly. Use `serve` (not `start`) under systemd: the service manager wants the process to stay in the foreground.
+
+### 29.4 Windows
+
+Copy `kivadb.exe` to a fixed place, for example `C:\KivaDB\kivadb.exe`, and choose a data folder, for example `C:\KivaDB\data`.
+
+Set the variables for the whole machine (an administrator terminal), then open a new terminal:
+
+```bash
+setx /M KIVADB_HOME "C:\KivaDB\data"
+setx /M KIVADB_BIND "0.0.0.0"
+setx /M KIVADB_ADMIN_PASSWORD "a-long-secret"
+```
+
+Have Windows start KivaDB when the machine boots, before anyone logs in:
+
+```bash
+schtasks /Create /TN "KivaDB" /TR "\"C:\KivaDB\kivadb.exe\" serve" /SC ONSTART /RU SYSTEM /RL HIGHEST
+schtasks /Run /TN "KivaDB"
+```
+
+Allow the ports through the firewall:
+
+```bash
+netsh advfirewall firewall add rule name="KivaDB" dir=in action=allow protocol=TCP localport=2911
+netsh advfirewall firewall add rule name="KivaDB REST" dir=in action=allow protocol=TCP localport=8080
+```
+
+Check with `kivadb status`, stop with `kivadb stop -u kiva` (it asks for the password). Once the first start has set the password, you may delete the `KIVADB_ADMIN_PASSWORD` variable.
+
+On your own PC, for development, none of this is needed: `kivadb start` is enough.
+
+### 29.5 macOS
+
+For development, `kivadb start` is enough. To have KivaDB start with the Mac, describe it to `launchd` in `~/Library/LaunchAgents/dev.foma.kivadb.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.foma.kivadb</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/kivadb</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/kivadb.log</string>
+  <key>StandardErrorPath</key><string>/tmp/kivadb.log</string>
+</dict>
+</plist>
+```
+
+```bash
+launchctl load ~/Library/LaunchAgents/dev.foma.kivadb.plist
+```
+
+Data stays in `~/.kivadb`. To accept connections from other machines, add an `EnvironmentVariables` dictionary with `KIVADB_BIND` and `KIVADB_ADMIN_PASSWORD`, as on Linux.
+
+### 29.6 Docker
+
+The repository contains a `Dockerfile` and a `docker-compose.yml`. The image holds only the `kivadb` executable on a small Debian base; it runs as an unprivileged user and keeps everything in `/data`.
+
+**Build the image** (from the `kiva-db` folder):
+
+```bash
+docker build -t kivadb:1.0.0 .
+```
+
+**Run it:**
+
+```bash
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -v kivadb-data:/data kivadb:1.0.0
+```
+
+| Part | Meaning |
+| :--- | :--- |
+| `-d --name kivadb` | Run in the background, under the name `kivadb` |
+| `-e KIVADB_ADMIN_PASSWORD=...` | Password of the `kiva` administrator, installed at the first start. **Required**: inside a container KivaDB listens on every interface, so it insists on authentication |
+| `-p 2911:2911` | Publish the KivaDB protocol port |
+| `-p 8080:8080` | Publish the REST API (leave out if unused) |
+| `-v kivadb-data:/data` | Keep the data in a named volume, so it survives the container |
+
+Without the password the container stops at once and its log says why:
+
+```text
+Error: refusing to listen on 0.0.0.0 without authentication.
+```
+
+**Use it.** From Kiva Studio or any client: the address of the machine, port 2911, user `kiva`, your password. A shell inside the container:
+
+```bash
+docker exec -it kivadb kivadb -u kiva
+```
+
+Everyday commands:
+
+```bash
+docker logs -f kivadb
+docker stop kivadb
+docker start kivadb
+```
+
+`docker stop` lets KivaDB shut down cleanly. The image declares a health check (`kivadb status`), visible in `docker ps`.
+
+**With Compose.** The provided file does the same as the `docker run` line above:
+
+```bash
+KIVADB_ADMIN_PASSWORD=a-long-secret docker compose up -d
+```
+
+On Windows PowerShell, set the variable first: `$env:KIVADB_ADMIN_PASSWORD = "a-long-secret"`, then `docker compose up -d`.
+
+**Backup.** The volume holds everything. Stop the container, then archive the volume:
+
+```bash
+docker stop kivadb
+docker run --rm -v kivadb-data:/data -v "$PWD":/backup debian:bookworm-slim tar czf /backup/kivadb-backup.tar.gz -C /data .
+docker start kivadb
+```
+
+**Upgrade.** Build the new image, remove the container, run it again with the same volume. The data is untouched:
+
+```bash
+docker rm -f kivadb
+```
+
+then the `docker run` line again.
+
+### 29.7 Before exposing KivaDB to the Internet
+
+| Check | Why |
+| :--- | :--- |
+| `kiva` has a long, unique password | It is the administrator of everything |
+| One account per person or application, with the smallest role that works | A leaked `viewer` password cannot destroy data |
+| Only the needed ports are open, ideally only to known addresses | Fewer doors |
+| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.0.0 does not encrypt connections ([15.7](#157-opening-kivadb-to-the-network)) |
+| Backups exist and were restored once as a test | A backup that was never restored is a hope, not a backup |
+| `audit failed-logins` and the metrics are looked at | To notice password guessing early |
+
+An SSH tunnel is the simplest safe way to reach a remote KivaDB without opening its port at all. On your own computer:
+
+```bash
+ssh -L 2911:localhost:2911 you@your-server
+```
+
+While that command runs, connect Kiva Studio to `localhost`, port 2911: the traffic travels encrypted inside SSH, and the server can keep listening on `127.0.0.1` only.
 
 ---
 

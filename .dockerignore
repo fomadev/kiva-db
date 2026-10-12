@@ -1,0 +1,7 @@
+target
+data
+.git
+.github
+examples
+*.kiva
+*.kiva.*

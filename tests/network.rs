@@ -639,3 +639,52 @@ fn legacy_root_account_is_renamed() {
     let admin = kivadb::auth::get_user(&inst.system, "kiva").unwrap().unwrap();
     assert!(admin.verify("old-secret") && admin.role == kivadb::auth::Role::Admin);
 }
+
+#[test]
+fn environment_configures_a_hosted_server() {
+    use kivadb::client::Client;
+    let dir = TempDir::new("hosted");
+    let free_port = || std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let start = |password: &str, port: u16| {
+        let mut child = kivadb(dir.path())
+            .args(["serve", "--no-http"])
+            .env("KIVADB_ADMIN_PASSWORD", password)
+            .env("KIVADB_PORT", port.to_string())
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        // "Press Ctrl+C to stop." is the last line printed once it is ready.
+        let mut log = String::new();
+        while !log.contains("Press Ctrl+C") {
+            assert!(out.read_line(&mut log).unwrap() > 0, "server stopped early: {log}");
+        }
+        (child, log)
+    };
+
+    // First start: the password is installed and authentication turned on.
+    let port = free_port();
+    let (mut server, log) = start("s3cret-one", port);
+    assert!(log.contains("administrator password set") && log.contains("Auth         : required"), "{log}");
+    assert!(log.contains(&format!("127.0.0.1:{port}")));
+    let mut db = Client::connect(("127.0.0.1", port)).unwrap();
+    assert!(db.hello().unwrap().contains("auth=required"));
+    assert!(db.exec("keys").is_err());
+    assert!(db.auth("kiva", "").is_err());
+    assert!(db.auth("kiva", "s3cret-one").unwrap().contains("Welcome kiva (admin)"));
+    db.exec(r#"modify user "kiva" password "changed-by-hand""#).unwrap();
+    db.exec("set hosted true").unwrap();
+    db.exec("shutdown").unwrap();
+    assert!(server.wait().unwrap().success());
+
+    // Later starts never overwrite a password that is already set.
+    let port = free_port();
+    let (mut server, log) = start("s3cret-two", port);
+    assert!(!log.contains("administrator password set"), "{log}");
+    let mut db = Client::connect(("127.0.0.1", port)).unwrap();
+    assert!(db.auth("kiva", "s3cret-two").is_err());
+    db.auth("kiva", "changed-by-hand").unwrap();
+    assert_eq!(db.exec("get hosted").unwrap(), "hosted: true [boolean]");
+    db.exec("shutdown").unwrap();
+    assert!(server.wait().unwrap().success());
+}
