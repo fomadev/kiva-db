@@ -349,11 +349,12 @@ fn auto_compaction_runs_in_the_background() {
         e.put("hot", &s(&format!("version {i} {}", "pad".repeat(20))), 0, false).unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(15);
-    // A compaction may have run while the loop was still writing: wait until
-    // the engine has caught up with the final state.
+    // A compaction may run while the loop is still writing. Its leftover can be
+    // a small file that is mostly dead weight but below the 4096-byte minimum,
+    // which auto-compaction deliberately leaves alone: that is settled too.
     let settled = |e: &Engine| {
         let st = e.stats();
-        st.compactions >= 1 && st.fragmentation < 0.3
+        st.compactions >= 1 && (st.fragmentation < 0.3 || st.file_bytes < 4096)
     };
     while !settled(&e) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -361,12 +362,15 @@ fn auto_compaction_runs_in_the_background() {
     let st = e.stats();
     assert!(st.compactions >= 1, "auto-compaction never ran");
     assert!(
-        st.fragmentation < 0.3,
-        "fragmentation {:.2}, compactions {}, last error {:?}",
+        st.fragmentation < 0.3 || st.file_bytes < 4096,
+        "fragmentation {:.2} on {} bytes, compactions {}, last error {:?}",
         st.fragmentation,
+        st.file_bytes,
         st.compactions,
         st.compact_error
     );
+    // 2000 versions of about 90 bytes were written: almost all of it is gone.
+    assert!(st.file_bytes < 20_000, "the file still holds {} bytes", st.file_bytes);
     assert!(get_str(&e, "hot").unwrap().starts_with("version 1999"));
 }
 
