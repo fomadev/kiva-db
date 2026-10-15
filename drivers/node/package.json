@@ -1,0 +1,21 @@
+{
+  "name": "kivadb",
+  "version": "1.0.0",
+  "description": "Official Node.js driver for KivaDB (binary protocol, no dependencies)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["kivadb", "database", "key-value", "document", "vector", "driver"],
+  "author": "Fordi / FomaDev",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fomadev/kiva-db"
+  }
+}

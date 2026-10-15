@@ -160,6 +160,43 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             }
             Ok(json!({ "deleted": deleted }))
         }
+        "query" | "explain" => {
+            sess.check(Need::Read)?;
+            let target = str_field(req, "target")?;
+            let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
+            let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
+                .ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
+            let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };
+            let plan_json = |p: &crate::engine::Plan| json!({ "strategy": p.strategy, "index": p.index, "candidates": p.candidates, "total_keys": p.total_keys });
+            if op == "explain" {
+                let plan = sess.engine.explain(&cond);
+                let suggestion =
+                    plan.index.is_none().then(|| format!("create index on {} ({})", cond.pattern, cond.field));
+                return Ok(json!({ "plan": plan_json(&plan), "suggestion": suggestion }));
+            }
+            let limit = req["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
+            let (rows, plan) = sess.engine.query(&cond, limit)?;
+            let rows: Vec<Json> = rows.into_iter().map(|(k, doc)| json!({ "key": k, "value": doc })).collect();
+            Ok(json!({ "rows": rows, "plan": plan_json(&plan) }))
+        }
+        "similar" => {
+            sess.check(Need::Read)?;
+            let target = str_field(req, "target")?;
+            let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
+            let vector = crate::vector::from_json(&req["vector"])
+                .ok_or_else(|| invalid("\"vector\" must be a non-empty array of numbers"))?;
+            let metric = match req["metric"].as_str() {
+                Some(m) => {
+                    crate::vector::Metric::parse(m).ok_or_else(|| invalid("metric must be cosine, dot or l2"))?
+                }
+                None => crate::vector::Metric::Cosine,
+            };
+            let limit = req["limit"].as_u64().unwrap_or(10).clamp(1, 1000) as usize;
+            let r = sess.engine.similar(&crate::engine::VectorQuery { pattern, field, vector, metric, limit })?;
+            let rows: Vec<Json> =
+                r.rows.iter().map(|(k, score, doc)| json!({ "key": k, "score": score, "value": doc })).collect();
+            Ok(json!({ "results": rows, "metric": metric.name(), "compared": r.compared, "indexed": r.indexed }))
+        }
         "stats" => {
             sess.check(Need::Read)?;
             let s = sess.engine.stats();
@@ -187,10 +224,17 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "checksum_errors": s.corrupted_detected,
                 "last_check": s.last_check.map(|(ts, ok, bad)| json!({ "at": ts, "ok": ok, "corrupted": bad })),
                 "compactions": s.compactions,
+                "compact_error": s.compact_error,
                 "last_compact": s.last_compact,
                 "auto_compact": s.auto_compact,
                 "compact_threshold": s.compact_threshold,
                 "indexes": s.indexes,
+                "vector_indexes": s.vector_indexes,
+                "cache_limit_bytes": s.cache_limit,
+                "cache_bytes": s.cache_bytes,
+                "cache_entries": s.cache_entries,
+                "cache_hits": s.cache_hits,
+                "cache_misses": s.cache_misses,
                 "clients": inst.clients.load(Ordering::SeqCst),
                 "uptime_seconds": inst.started.elapsed().as_secs(),
                 "role": if repl.is_replica() { "replica" } else { "master" },

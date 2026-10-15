@@ -28,8 +28,8 @@ VOLUME /data
 USER kivadb
 WORKDIR /data
 
-# 2911: KivaDB protocol (shells, Kiva Studio, client libraries). 8080: REST API.
-EXPOSE 2911 8080
+# 2911: KivaDB protocol (shells, Kiva Studio, drivers). 8080: REST API. 6379: Redis protocol.
+EXPOSE 2911 8080 6379
 
 # The image listens on every interface, so KivaDB insists on authentication:
 # KIVADB_ADMIN_PASSWORD must be given the first time the container starts.

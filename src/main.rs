@@ -36,6 +36,8 @@ SERVER OPTIONS (start, serve):
       --bind <address>        Listen address (default: [network] bind, 127.0.0.1)
       --http-port <n>         REST API port (default: [http] port, 8080)
       --no-http               Do not start the REST API
+      --resp-port <n>         Redis-compatible port (default: [resp] port, 6379)
+      --no-resp               Do not start the Redis-compatible listener
 
 COMMON OPTIONS:
       --home <dir>            KivaDB home directory (config, users, data)
@@ -56,6 +58,8 @@ struct Args {
     bind: Option<String>,
     http_port: Option<u16>,
     no_http: bool,
+    no_resp: bool,
+    resp_port: Option<u16>,
     opts: Options,
     shell: ShellOpts,
 }
@@ -102,6 +106,8 @@ fn parse_args() -> Args {
             "--http-port" => args.http_port = Some(port(value(&mut it, "--http-port"), "--http-port")),
             "--bind" => args.bind = Some(value(&mut it, "--bind")),
             "--no-http" => args.no_http = true,
+            "--no-resp" => args.no_resp = true,
+            "--resp-port" => args.resp_port = Some(port(value(&mut it, "--resp-port"), "--resp-port")),
             other => fail(&format!("unknown argument '{other}'. Try --help.")),
         }
     }
@@ -185,8 +191,23 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     println!("  TCP protocol : {bind}:{tcp_port} (binary and plain text)");
     if http_on {
         match http::start_http(&inst, &bind, http_port) {
-            Ok(p) => println!("  REST API     : http://{bind}:{p}  (docs: /docs, metrics: /metrics, events: /ws)"),
+            Ok(p) => println!(
+                "  REST API     : http://{bind}:{p}  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)"
+            ),
             Err(e) => eprintln!("[WARN] REST API not started: {e}"),
+        }
+    }
+    let (resp_on, resp_port) = {
+        let c = inst.cfg();
+        (
+            c.get_bool("resp", "enabled") && !args.no_resp,
+            args.resp_port.or_else(|| env_port("KIVADB_RESP_PORT")).unwrap_or(c.get_u64("resp", "port") as u16),
+        )
+    };
+    if resp_on {
+        match kivadb::resp::start_resp(&inst, &bind, resp_port) {
+            Ok(p) => println!("  Redis (RESP) : {bind}:{p}  (redis-cli and Redis client libraries)"),
+            Err(e) => eprintln!("[WARN] Redis-compatible listener not started: {e}"),
         }
     }
     println!("  Auth         : {}", if inst.auth_required() { "required" } else { "disabled (local use)" });
@@ -268,6 +289,12 @@ fn start(home: &Path, args: &Args) -> i32 {
     }
     if args.no_http {
         cmd.arg("--no-http");
+    }
+    if args.no_resp {
+        cmd.arg("--no-resp");
+    }
+    if let Some(p) = args.resp_port {
+        cmd.arg("--resp-port").arg(p.to_string());
     }
     if args.opts.skip_auth {
         cmd.arg("--skip-auth");
@@ -362,7 +389,9 @@ fn status(home: &Path) -> i32 {
 }
 
 fn main() {
-    let args = parse_args();
+    let mut args = parse_args();
+    // The interactive history lives next to the data (or in the default home for --connect).
+    args.shell.history = Some(args.home.clone().unwrap_or_else(default_home).join("history.txt"));
     if let Some(addr) = &args.connect {
         exit(shell::run_client(addr, args.shell.clone()));
     }

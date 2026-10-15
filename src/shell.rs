@@ -7,6 +7,7 @@
 
 use crate::exec::Action;
 use crate::instance::{Instance, VERSION};
+use crate::lineedit::{Prompt, Sink};
 use crate::proto::*;
 use crate::session::Session;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -17,14 +18,14 @@ use std::time::Instant;
 
 #[derive(Default, Clone)]
 pub struct ShellOpts {
+    /// File where the interactive history is kept.
+    pub history: Option<std::path::PathBuf>,
     pub user: Option<String>,
     pub password: Option<String>,
     pub workspace: Option<String>,
     /// Commands given with `-e`: run them and exit.
     pub commands: Vec<String>,
 }
-
-const PROMPT: &str = "kiva> ";
 
 trait Backend {
     fn exec(&mut self, line: &str) -> (Vec<(bool, String)>, Action);
@@ -97,21 +98,15 @@ fn show(lines: &[(bool, String)]) {
     }
 }
 
-fn announce(rx: Receiver<String>) {
-    let interactive = io::stdin().is_terminal();
+fn announce(rx: Receiver<String>, sink: Sink) {
     let _ = std::thread::Builder::new().name("kiva-shell-events".into()).spawn(move || {
         for ev in rx {
-            if interactive {
-                print!("\n[event] {ev}\n{PROMPT}");
-            } else {
-                println!("[event] {ev}");
-            }
-            let _ = io::stdout().flush();
+            (sink.lock().unwrap_or_else(|e| e.into_inner()))(&format!("[event] {ev}"));
         }
     });
 }
 
-fn repl(backend: &mut dyn Backend, opts: &ShellOpts) -> i32 {
+fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32 {
     if !opts.commands.is_empty() {
         let mut code = 0;
         for cmd in &opts.commands {
@@ -130,7 +125,7 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts) -> i32 {
     if interactive {
         println!("KivaDB Shell v{VERSION}\nType 'help' or 'h' for command list");
     }
-    while let Some(line) = read_line(PROMPT) {
+    while let Some(line) = prompt.read() {
         if line.trim().is_empty() {
             continue;
         }
@@ -152,6 +147,7 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts) -> i32 {
             }
         }
     }
+    prompt.save();
     if interactive {
         println!("Goodbye.");
     }
@@ -187,7 +183,8 @@ fn login(opts: &ShellOpts, mut try_login: impl FnMut(&str, &str) -> (Vec<(bool, 
 pub fn run_embedded(inst: Arc<Instance>, opts: ShellOpts) -> i32 {
     let (tx, rx) = mpsc::channel();
     let mut sess = Session::new(inst.clone(), true, Some(tx));
-    announce(rx);
+    let (mut prompt, sink) = Prompt::new(opts.history.clone());
+    announce(rx, sink);
     if inst.opts.skip_auth {
         eprintln!("[WARN] Authentication disabled - unsafe for production");
     }
@@ -227,7 +224,7 @@ pub fn run_embedded(inst: Arc<Instance>, opts: ShellOpts) -> i32 {
         );
     }
     let mut backend = Local { sess };
-    repl(&mut backend, &opts)
+    repl(&mut backend, &opts, &mut prompt)
 }
 
 /// Shell connected to a running instance.
@@ -282,17 +279,12 @@ pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
         eprintln!("Error: cannot set up the connection.");
         return 1;
     };
-    let interactive = io::stdin().is_terminal();
+    let (mut prompt, sink) = Prompt::new(opts.history.clone());
     let _ = std::thread::Builder::new().name("kiva-client-read".into()).spawn(move || {
         while let Ok((code, payload)) = read_frame(&mut reader) {
             if code == ST_EVENT {
                 let ev = String::from_utf8_lossy(&payload);
-                if interactive {
-                    print!("\n[event] {ev}\n{PROMPT}");
-                } else {
-                    println!("[event] {ev}");
-                }
-                let _ = io::stdout().flush();
+                (sink.lock().unwrap_or_else(|e| e.into_inner()))(&format!("[event] {ev}"));
             } else if tx.send((code, payload)).is_err() {
                 break;
             }
@@ -306,5 +298,5 @@ pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
             return 1;
         }
     }
-    repl(&mut backend, &opts)
+    repl(&mut backend, &opts, &mut prompt)
 }

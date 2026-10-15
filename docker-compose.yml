@@ -13,6 +13,7 @@ services:
     ports:
       - "2911:2911"   # KivaDB protocol
       - "8080:8080"   # REST API
+      - "6379:6379"   # Redis protocol (remove if you do not use it)
     volumes:
       - kivadb-data:/data
 

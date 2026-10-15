@@ -10,6 +10,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod cache;
 pub mod client;
 pub mod compress;
 pub mod config;
@@ -24,14 +25,17 @@ pub mod http;
 pub mod instance;
 pub mod jsonpath;
 pub mod lexer;
+pub mod lineedit;
 pub mod proto;
 pub mod repl;
+pub mod resp;
 pub mod script;
 pub mod server;
 pub mod session;
 pub mod shell;
 pub mod util;
 pub mod value;
+pub mod vector;
 
 pub use engine::{Engine, EngineOptions};
 pub use error::{KivaError, Result};

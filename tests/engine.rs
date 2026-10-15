@@ -360,7 +360,13 @@ fn auto_compaction_runs_in_the_background() {
     }
     let st = e.stats();
     assert!(st.compactions >= 1, "auto-compaction never ran");
-    assert!(st.fragmentation < 0.3);
+    assert!(
+        st.fragmentation < 0.3,
+        "fragmentation {:.2}, compactions {}, last error {:?}",
+        st.fragmentation,
+        st.compactions,
+        st.compact_error
+    );
     assert!(get_str(&e, "hot").unwrap().starts_with("version 1999"));
 }
 

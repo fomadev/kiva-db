@@ -434,7 +434,7 @@ fn workspaces_and_configuration() {
     assert!(fails(&mut s, "autocompact threshold 150").contains("between 1 and 99"));
     assert!(fails(&mut s, "config set compact_threshold abc").contains("invalid value"));
     assert!(fails(&mut s, "config get nonsense").contains("unknown configuration key"));
-    assert!(fails(&mut s, "config get port").contains("several sections"));
+    assert!(fails(&mut s, "config get port").contains("network.port, http.port, resp.port"));
     assert_eq!(ok(&mut s, "config get network.port"), "network.port = 2911");
     ok(&mut s, "config set master_password hunter2");
     let list = ok(&mut s, "config list");

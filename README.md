@@ -4,7 +4,7 @@
 
 # KivaDB
 
-KivaDB is a database you can start in one command and talk to from a shell, from any programming language, or over HTTP. It stores typed values and JSON documents under keys, keeps them safe on disk, and fits in a single executable written in Rust.
+KivaDB is a multi-model database you can start in one command: typed key-value data, JSON documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
 
 **Current release: 1.0.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
 
@@ -13,8 +13,10 @@ KivaDB is a database you can start in one command and talk to from a shell, from
 * **Stores typed data**: strings, numbers, booleans, null, arrays, objects (JSON documents) and raw bytes.
 * **Keeps it safe**: every record is checksummed, a crash or a killed process loses nothing, and transactions are atomic.
 * **Finds it fast**: keys are kept sorted (range queries, pagination), documents can be filtered, counted, summed and indexed.
-* **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs and the REST API (port 8080) all work on the same live data.
-* **Grows with you**: users and roles, isolated workspaces, compression, replication to other machines, Lua scripts and triggers, change notifications, Prometheus metrics.
+* **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes.
+* **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged, for strings, counters, expiry, hashes, lists and transactions.
+* **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
+* **Grows with you**: users and roles, isolated workspaces, an optional in-memory value cache, compression, replication to other machines, Lua scripts and triggers, change notifications, Prometheus metrics, Docker image, official Node.js driver.
 
 ## Install
 
@@ -77,6 +79,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | Connect an application | [Chapters 18 to 21](DOCUMENTATION.md#chapter-18--the-tcp-server) |
 | Run it in production | [Chapters 14 to 17, 22 and 24](DOCUMENTATION.md#chapter-14--configuration) |
 | Host it: Linux, Windows, macOS, Docker | [Chapter 29](DOCUMENTATION.md#chapter-29--deploying-kivadb-on-a-server) |
+| Use vectors, Redis clients, the value cache | [Chapters 30 to 32](DOCUMENTATION.md#chapter-30--vector-search-for-ai) |
 | Look a command up quickly | [Chapter 27, the cheat sheet](DOCUMENTATION.md#chapter-27--command-cheat-sheet) |
 
 ## Project layout
@@ -85,13 +88,14 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | :--- | :--- |
 | `src/` | The database: storage engine, command language, server, replication, scripting |
 | `tests/` | Automated tests (storage, commands, network) - run them with `cargo test` |
+| `drivers/node/` | The official Node.js driver (npm package `kivadb`) |
 | `examples/nodejs/` | A dependency-free Node.js client |
 | `DOCUMENTATION.md` | The complete manual |
 | `CONTRIBUTING.md` | How to contribute |
 
 ## Scope of this release
 
-KivaDB 1.0.0 is a single-node database with replicas. Built-in TLS, automatic leader election and clustering (sharding, Raft, distributed queries) are not part of it.
+KivaDB 1.0.0 is a single-node database with replicas. Built-in TLS, automatic leader election, clustering, SQL / the PostgreSQL protocol and approximate vector indexes are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
 
 ## License
 

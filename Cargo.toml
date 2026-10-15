@@ -28,6 +28,7 @@ pbkdf2 = "0.12"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 rpassword = "7"
+rustyline = { version = "15", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 

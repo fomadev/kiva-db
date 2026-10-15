@@ -296,6 +296,11 @@ impl Instance {
             snapshot_interval_secs: c.get_u64("storage", "snapshot_interval").max(1),
             snapshot_every_ops: c.get_u64("storage", "snapshot_every").max(1),
             sync_writes: c.get_bool("storage", "sync_writes"),
+            cache_bytes: if c.get_bool("storage", "cache_values") {
+                (c.get_u64("storage", "cache_size_mb") as usize).saturating_mul(1024 * 1024)
+            } else {
+                0
+            },
             ..Default::default()
         }
     }
@@ -370,6 +375,7 @@ impl Instance {
         for (_, e) in self.open_engines() {
             e.set_auto_compact(o.auto_compact, o.compact_threshold);
             e.set_compression(o.compression);
+            e.set_cache_limit(o.cache_bytes);
         }
     }
 

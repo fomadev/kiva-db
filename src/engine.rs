@@ -5,6 +5,7 @@
 //! The storage engine: an append-only, checksummed log on disk and an ordered
 //! in-memory index (`BTreeMap`) mapping each key to its latest record.
 
+use crate::cache::ValueCache;
 use crate::compress::{self, Compression};
 use crate::error::{KivaError, Result};
 use crate::format::*;
@@ -12,6 +13,7 @@ use crate::hint;
 use crate::jsonpath;
 use crate::util::{glob_match, glob_prefix, now_secs, random_u64};
 use crate::value::{Type, Value};
+use crate::vector::{self, Metric, VecIndex};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -107,6 +109,8 @@ pub struct EngineOptions {
     pub sync_writes: bool,
     /// Run the maintenance thread (TTL sweep, auto-compaction, snapshots).
     pub background: bool,
+    /// Memory budget of the value cache in bytes; 0 = no cache.
+    pub cache_bytes: usize,
 }
 
 impl Default for EngineOptions {
@@ -120,12 +124,19 @@ impl Default for EngineOptions {
             snapshot_every_ops: 1000,
             sync_writes: false,
             background: true,
+            cache_bytes: 0,
         }
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct EngineStats {
+    pub cache_limit: u64,
+    pub cache_bytes: u64,
+    pub cache_entries: usize,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub vector_indexes: usize,
     pub path: String,
     pub keys: usize,
     pub ttl_keys: usize,
@@ -146,6 +157,8 @@ pub struct EngineStats {
     pub last_check: Option<(i64, usize, usize)>,
     pub compactions: u64,
     pub last_compact: Option<i64>,
+    /// Why the last automatic compaction failed, if it did.
+    pub compact_error: Option<String>,
     pub auto_compact: bool,
     pub compact_threshold: u8,
     pub indexes: usize,
@@ -379,6 +392,8 @@ struct Inner {
     auto_compact: bool,
     threshold: u8,
     sec: Vec<SecIndex>,
+    vecs: Vec<VecIndex>,
+    cache: ValueCache,
     active_txns: usize,
     /// Versions of keys deleted while a transaction was open.
     tomb_versions: HashMap<String, u64>,
@@ -392,6 +407,7 @@ struct Inner {
     last_check: Option<(i64, usize, usize)>,
     compactions: u64,
     last_compact: Option<i64>,
+    compact_error: Option<String>,
     closed: bool,
 }
 
@@ -570,6 +586,35 @@ impl Inner {
         Value::decode(e.ty, &raw, e.is_msgpack())
     }
 
+    /// Like `read_value`, served from the value cache when possible.
+    fn value_of(&mut self, key: &str, e: &Entry) -> Result<Value> {
+        if let Some(v) = self.cache.get(key, e.version) {
+            return Ok(v);
+        }
+        let v = self.read_value(key, e)?;
+        self.cache.put(key, e.version, &v, e.raw_size as usize);
+        Ok(v)
+    }
+
+    fn rebuild_vec(&mut self, i: usize) {
+        self.vecs[i].clear();
+        let pattern = self.vecs[i].pattern.clone();
+        let prefix = glob_prefix(&pattern).to_string();
+        let now = now_secs();
+        let keys: Vec<(String, Entry)> = self
+            .index
+            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .take_while(|(k, _)| k.starts_with(&prefix))
+            .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(&pattern, k))
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
+        for (k, e) in keys {
+            if let Ok(Value::Doc(doc)) = self.read_value(&k, &e) {
+                self.vecs[i].update(&k, Some(&doc));
+            }
+        }
+    }
+
     fn append(&mut self, buf: &[u8], sync: bool) -> Result<u64> {
         if self.closed {
             return Err(KivaError::Other("database is closed".into()));
@@ -606,6 +651,10 @@ impl Inner {
         for s in &mut self.sec {
             s.update(key, doc);
         }
+        for v in &mut self.vecs {
+            v.update(key, doc);
+        }
+        self.cache.remove(key);
     }
 
     fn idx_remove(&mut self, key: &str) -> Option<Entry> {
@@ -617,6 +666,10 @@ impl Inner {
         for s in &mut self.sec {
             s.remove(key);
         }
+        for v in &mut self.vecs {
+            v.remove(key);
+        }
+        self.cache.remove(key);
         Some(old)
     }
 
@@ -807,6 +860,8 @@ impl Engine {
             auto_compact: opts.auto_compact,
             threshold: opts.compact_threshold,
             sec: Vec::new(),
+            vecs: Vec::new(),
+            cache: ValueCache::new(opts.cache_bytes),
             active_txns: 0,
             tomb_versions: HashMap::new(),
             reset_seq: 0,
@@ -819,6 +874,7 @@ impl Engine {
             last_check: None,
             compactions: 0,
             last_compact: None,
+            compact_error: None,
             closed: false,
         };
         inner.recount();
@@ -826,6 +882,15 @@ impl Engine {
         // Secondary index definitions live in a small sidecar file.
         if let Ok(text) = fs::read_to_string(sidecar(&path, "meta")) {
             if let Ok(meta) = serde_json::from_str::<Json>(&text) {
+                for def in meta["vector_indexes"].as_array().cloned().unwrap_or_default() {
+                    if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
+                        if let Ok(segs) = jsonpath::parse_path(f) {
+                            inner.vecs.push(VecIndex::new(p, f, segs));
+                            let i = inner.vecs.len() - 1;
+                            inner.rebuild_vec(i);
+                        }
+                    }
+                }
                 for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
                         if let Ok(segs) = jsonpath::parse_path(f) {
@@ -905,7 +970,7 @@ impl Engine {
         let Some(e) = inner.live(key, now_secs()) else {
             return Ok(None);
         };
-        let v = inner.read_value(key, &e)?;
+        let v = inner.value_of(key, &e)?;
         Ok(Some((v, e)))
     }
 
@@ -1170,6 +1235,10 @@ impl Engine {
             s.map.clear();
             s.rev.clear();
         }
+        for v in &mut inner.vecs {
+            v.clear();
+        }
+        inner.cache.clear();
         inner.recount();
         inner.seq += 1;
         inner.reset_seq = inner.seq;
@@ -1483,9 +1552,16 @@ impl Engine {
             last_check: inner.last_check,
             compactions: inner.compactions,
             last_compact: inner.last_compact,
+            compact_error: inner.compact_error.clone(),
             auto_compact: inner.auto_compact,
             compact_threshold: inner.threshold,
             indexes: inner.sec.len(),
+            vector_indexes: inner.vecs.len(),
+            cache_limit: inner.cache.limit() as u64,
+            cache_bytes: inner.cache.bytes() as u64,
+            cache_entries: inner.cache.len(),
+            cache_hits: inner.cache.hits,
+            cache_misses: inner.cache.misses,
             seq: inner.seq,
             ..Default::default()
         };
@@ -1499,6 +1575,7 @@ impl Engine {
                 s.compressed_records += 1;
             }
         }
+        mem += inner.vecs.iter().map(|v| v.memory_bytes()).sum::<usize>();
         s.memory_bytes = mem as u64;
         s
     }
@@ -1549,7 +1626,11 @@ impl Engine {
                 && inner.fragmentation() * 100.0 >= inner.threshold as f64
         };
         if compact_due {
-            let _ = self.compact();
+            let result = self.compact();
+            self.lock().compact_error = match result {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            };
         }
     }
 
@@ -1558,7 +1639,9 @@ impl Engine {
     fn save_meta(&self, inner: &Inner) -> Result<()> {
         let defs: Vec<Json> =
             inner.sec.iter().map(|s| serde_json::json!({ "pattern": s.pattern, "field": s.field })).collect();
-        let text = serde_json::to_string_pretty(&serde_json::json!({ "indexes": defs }))?;
+        let vecs: Vec<Json> =
+            inner.vecs.iter().map(|v| serde_json::json!({ "pattern": v.pattern, "field": v.field })).collect();
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "indexes": defs, "vector_indexes": vecs }))?;
         fs::write(sidecar(&self.path, "meta"), text)?;
         Ok(())
     }
@@ -1602,6 +1685,113 @@ impl Engine {
     /// `(pattern, field, indexed documents)` for every index.
     pub fn list_indexes(&self) -> Vec<(String, String, usize)> {
         self.lock().sec.iter().map(|s| (s.pattern.clone(), s.field.clone(), s.rev.len())).collect()
+    }
+
+    // -- value cache --------------------------------------------------------
+
+    /// Sets the memory budget of the value cache; 0 turns it off.
+    pub fn set_cache_limit(&self, bytes: usize) {
+        self.lock().cache.set_limit(bytes);
+    }
+
+    // -- vector search ------------------------------------------------------
+
+    /// Keeps in memory the vectors stored in `field` of the documents whose
+    /// key matches `pattern`. Returns the number of vectors indexed.
+    pub fn create_vector_index(&self, pattern: &str, field: &str) -> Result<usize> {
+        let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
+        if path.is_empty() {
+            return Err(KivaError::Invalid("a vector index needs a field name".into()));
+        }
+        let mut inner = self.lock();
+        if inner.vecs.iter().any(|v| v.pattern == pattern && v.field == field) {
+            return Err(KivaError::Exists(format!("vector index on {pattern} ({field}) already exists")));
+        }
+        inner.vecs.push(VecIndex::new(pattern, field, path));
+        let i = inner.vecs.len() - 1;
+        inner.rebuild_vec(i);
+        let n = inner.vecs[i].len();
+        self.save_meta(&inner)?;
+        Ok(n)
+    }
+
+    pub fn drop_vector_index(&self, pattern: &str, field: &str) -> Result<bool> {
+        let mut inner = self.lock();
+        let before = inner.vecs.len();
+        inner.vecs.retain(|v| !(v.pattern == pattern && v.field == field));
+        let removed = inner.vecs.len() != before;
+        if removed {
+            self.save_meta(&inner)?;
+        }
+        Ok(removed)
+    }
+
+    /// `(pattern, field, vectors, dimensions, rejected)` for every vector index.
+    pub fn list_vector_indexes(&self) -> Vec<(String, String, usize, Option<usize>, usize)> {
+        self.lock().vecs.iter().map(|v| (v.pattern.clone(), v.field.clone(), v.len(), v.dims, v.rejected)).collect()
+    }
+
+    /// The `limit` documents whose vector in `field` is closest to `vector`.
+    pub fn similar(&self, q: &VectorQuery) -> Result<VectorResult> {
+        if q.vector.is_empty() || q.vector.len() > vector::MAX_DIMS {
+            return Err(KivaError::Invalid(format!("a query vector has 1 to {} numbers", vector::MAX_DIMS)));
+        }
+        if q.vector.iter().any(|x| !x.is_finite()) {
+            return Err(KivaError::Invalid("a query vector contains only finite numbers".into()));
+        }
+        let path = jsonpath::parse_path(&q.field).map_err(KivaError::Invalid)?;
+        let query = vector::Query::new(q.vector.clone(), q.metric);
+        let mut inner = self.lock();
+        let now = now_secs();
+        let limit = if q.limit == 0 { 10 } else { q.limit };
+
+        let index = inner.vecs.iter().position(|v| v.field == q.field && pattern_covers(&v.pattern, &q.pattern));
+        let (scored, examined, indexed) = match index {
+            Some(i) => {
+                if let Some(d) = inner.vecs[i].dims {
+                    if d != query.dims() {
+                        return Err(KivaError::Invalid(format!(
+                            "the query vector has {} dimensions, the indexed vectors have {d} dimensions",
+                            query.dims()
+                        )));
+                    }
+                }
+                let index_ref = &inner.vecs[i];
+                let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
+                let scored = index_ref.scores(&q.pattern, &query, live);
+                let n = scored.len();
+                (scored, n, true)
+            }
+            None => {
+                let prefix = glob_prefix(&q.pattern).to_string();
+                let candidates: Vec<(String, Entry)> = inner
+                    .index
+                    .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                    .take_while(|(k, _)| k.starts_with(&prefix))
+                    .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(&q.pattern, k))
+                    .map(|(k, e)| (k.clone(), e.clone()))
+                    .collect();
+                let examined = candidates.len();
+                let mut scored = Vec::new();
+                for (k, e) in candidates {
+                    if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                        if let Some(v) = vector::extract(&doc, &path).filter(|v| v.len() == query.dims()) {
+                            scored.push((k, query.score_vec(&v)));
+                        }
+                    }
+                }
+                (scored, examined, false)
+            }
+        };
+        let compared = scored.len();
+        let mut rows = Vec::new();
+        for (key, score) in vector::top_k(scored, limit, &query) {
+            let Some(e) = inner.live(&key, now) else { continue };
+            if let Value::Doc(doc) = inner.value_of(&key, &e)? {
+                rows.push((key, score, doc));
+            }
+        }
+        Ok(VectorResult { rows, indexed, examined, compared })
     }
 
     fn find_index(inner: &Inner, cond: &Cond) -> Option<usize> {
@@ -1709,7 +1899,7 @@ impl Engine {
             if !e.ty.is_doc() {
                 continue;
             }
-            let Value::Doc(doc) = inner.read_value(&key, &e)? else {
+            let Value::Doc(doc) = inner.value_of(&key, &e)? else {
                 continue;
             };
             let hit = jsonpath::get(&doc, &path).is_some_and(|v| compare_json(v, cond.op, &cond.value));
@@ -1747,4 +1937,27 @@ fn maintenance(weak: Weak<Engine>, signal: Arc<Signal>) {
             None => break,
         }
     }
+}
+
+/// A similarity search: `<pattern>.<field>` closest to `vector`.
+#[derive(Clone, Debug)]
+pub struct VectorQuery {
+    pub pattern: String,
+    pub field: String,
+    pub vector: Vec<f32>,
+    pub metric: Metric,
+    /// Number of results wanted; 0 means 10.
+    pub limit: usize,
+}
+
+#[derive(Debug)]
+pub struct VectorResult {
+    /// `(key, score, document)`, best match first.
+    pub rows: Vec<(String, f32, Json)>,
+    /// Whether an in-memory vector index was used.
+    pub indexed: bool,
+    /// Keys matching the pattern that were looked at.
+    pub examined: usize,
+    /// Vectors actually compared (right field, right number of dimensions).
+    pub compared: usize,
 }

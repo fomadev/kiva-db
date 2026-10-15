@@ -1,0 +1,220 @@
+"use strict";
+// Official Node.js driver for KivaDB (binary protocol, port 2911).
+// No dependencies: only Node's own `net` and `events` modules.
+
+const net = require("net");
+const { EventEmitter } = require("events");
+
+const CMD = { HELLO: 1, AUTH: 2, EXEC: 3, PING: 4, API: 8 };
+const ST = { OK: 0, ERROR: 1, NOT_FOUND: 2, BYE: 3, EVENT: 9 };
+
+class KivaError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "KivaError";
+  }
+}
+
+function isLocalHost(host) {
+  const h = String(host).trim().toLowerCase();
+  return h === "localhost" || h === "::1" || h === "[::1]" || h.startsWith("127.");
+}
+
+/**
+ * A connection to a KivaDB server.
+ *
+ * Events: "change" (event object), "close", "error".
+ */
+class KivaClient extends EventEmitter {
+  constructor(socket) {
+    super();
+    this._socket = socket;
+    this._buffer = Buffer.alloc(0);
+    this._waiting = [];
+    this._closed = false;
+    socket.on("data", (chunk) => this._onData(chunk));
+    socket.on("error", (err) => this._fail(err));
+    socket.on("close", () => this._fail(new KivaError("The connection to KivaDB was closed.")));
+  }
+
+  /**
+   * Opens a connection and logs in.
+   * @param {object} [options] host (localhost), port (2911), user ("kiva"), password (""), timeout (8000 ms)
+   */
+  static connect(options = {}) {
+    const host = options.host || "127.0.0.1";
+    const port = options.port || 2911;
+    const user = options.user || "kiva";
+    const password = options.password || "";
+    const timeout = options.timeout || 8000;
+    if (!isLocalHost(host) && !password) {
+      return Promise.reject(new KivaError("A password is required to connect to a remote server."));
+    }
+    return new Promise((resolve, reject) => {
+      const socket = net.connect({ host, port });
+      socket.setNoDelay(true);
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new KivaError(`No answer from ${host}:${port}.`));
+      }, timeout);
+      socket.once("error", (err) => {
+        clearTimeout(timer);
+        reject(new KivaError(`Cannot reach ${host}:${port} (${err.message}). Is KivaDB started?`));
+      });
+      socket.once("connect", async () => {
+        clearTimeout(timer);
+        const client = new KivaClient(socket);
+        try {
+          const hello = (await client._call(CMD.HELLO)).payload.toString();
+          if (!hello.startsWith("KivaDB")) throw new KivaError(`${host}:${port} is not a KivaDB server.`);
+          client.server = hello.split("\n")[0];
+          if (hello.includes("auth=required") || password || user !== "kiva") {
+            const r = await client._call(CMD.AUTH, Buffer.concat([Buffer.from(user), Buffer.from([0]), Buffer.from(password)]));
+            if (r.status !== ST.OK) throw new KivaError(r.payload.toString().replace(/^permission denied: /, ""));
+          }
+          resolve(client);
+        } catch (err) {
+          client.close();
+          reject(err);
+        }
+      });
+    });
+  }
+
+  // A frame is [length u32][code u16][payload], big-endian; length covers code + payload.
+  _call(code, payload = Buffer.alloc(0)) {
+    if (this._closed) return Promise.reject(new KivaError("Not connected."));
+    const head = Buffer.alloc(6);
+    head.writeUInt32BE(payload.length + 2, 0);
+    head.writeUInt16BE(code, 4);
+    this._socket.write(Buffer.concat([head, payload]));
+    return new Promise((resolve, reject) => this._waiting.push({ resolve, reject }));
+  }
+
+  _onData(chunk) {
+    this._buffer = this._buffer.length ? Buffer.concat([this._buffer, chunk]) : chunk;
+    while (this._buffer.length >= 6) {
+      const length = this._buffer.readUInt32BE(0);
+      if (this._buffer.length < 4 + length) return;
+      const status = this._buffer.readUInt16BE(4);
+      const payload = this._buffer.subarray(6, 4 + length);
+      this._buffer = this._buffer.subarray(4 + length);
+      if (status === ST.EVENT) {
+        this.emit("change", parseEvent(payload.toString()));
+      } else {
+        const waiter = this._waiting.shift();
+        if (waiter) waiter.resolve({ status, payload });
+      }
+    }
+  }
+
+  _fail(err) {
+    if (this._closed) return;
+    this._closed = true;
+    for (const w of this._waiting.splice(0)) w.reject(err instanceof KivaError ? err : new KivaError(err.message));
+    this.emit("close");
+  }
+
+  /** Runs any command of the KivaDB shell language and returns its output lines. */
+  async exec(command) {
+    const r = await this._call(CMD.EXEC, Buffer.from(command));
+    const lines = r.payload.toString().split("\n").filter(Boolean);
+    const output = lines.map((l) => l.slice(1));
+    if (r.status === ST.ERROR) {
+      throw new KivaError(lines.filter((l) => l.startsWith("-")).map((l) => l.slice(1)).join("\n"));
+    }
+    return output;
+  }
+
+  /** Sends a structured request ({op: ...}) and returns the JSON answer. */
+  async api(request) {
+    const r = await this._call(CMD.API, Buffer.from(JSON.stringify(request)));
+    const text = r.payload.toString();
+    if (r.status !== ST.OK) throw new KivaError(text.replace(/^permission denied: /, ""));
+    return JSON.parse(text);
+  }
+
+  async ping() {
+    await this._call(CMD.PING);
+  }
+
+  /** The value of a key, or undefined. Bytes come back as a Buffer. */
+  async get(key) {
+    const r = await this.api({ op: "get", key });
+    if (!r.found) return undefined;
+    return r.type === "bytes" ? Buffer.from(r.value, "base64") : r.value;
+  }
+
+  /**
+   * Creates or replaces a key. The type follows the JavaScript value.
+   * @param {object} [options] ttl (seconds), mode ("upsert" | "create" | "update"), type (to force one)
+   */
+  async set(key, value, options = {}) {
+    const type = options.type || typeOf(value);
+    const req = { op: "put", key, type, value: type === "bytes" ? Buffer.from(value).toString("base64") : value };
+    if (options.mode) req.mode = options.mode;
+    if (options.ttl !== undefined) req.ttl = options.ttl;
+    await this.api(req);
+  }
+
+  /** Deletes a key; resolves to whether it existed. */
+  async del(key) {
+    return (await this.api({ op: "del", key })).deleted;
+  }
+
+  /** Keys with their metadata. */
+  async scan(pattern = "*", limit = 500) {
+    return (await this.api({ op: "scan", pattern, limit })).keys;
+  }
+
+  /**
+   * Vector similarity search.
+   * @param {string} target "<pattern>.<field>", e.g. "doc:*.embedding"
+   * @param {number[]} vector the query vector
+   * @param {object} [options] limit (10), metric ("cosine" | "dot" | "l2")
+   */
+  async similar(target, vector, options = {}) {
+    const r = await this.api({ op: "similar", target, vector, limit: options.limit || 10, metric: options.metric || "cosine" });
+    return r.results;
+  }
+
+  async stats() {
+    return this.api({ op: "stats" });
+  }
+
+  /** Receives "change" events for keys matching the pattern. */
+  async subscribe(pattern = "*") {
+    await this.exec(`subscribe "${String(pattern).replace(/"/g, "")}"`);
+  }
+
+  close() {
+    this._closed = true;
+    this._socket.end();
+    this._socket.destroy();
+  }
+}
+
+function typeOf(value) {
+  if (value === null || value === undefined) return "null";
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return "bytes";
+  if (Array.isArray(value)) return "array";
+  switch (typeof value) {
+    case "string":
+      return "string";
+    case "number":
+    case "bigint":
+      return "number";
+    case "boolean":
+      return "boolean";
+    default:
+      return "object";
+  }
+}
+
+function parseEvent(text) {
+  // "set user:1 (object)" / "del user:1" / "reset (all keys deleted)"
+  const [event, key, type] = text.split(" ");
+  return { event, key: event === "reset" ? null : key, type: type ? type.replace(/[()]/g, "") : null, raw: text };
+}
+
+module.exports = { KivaClient, KivaError, connect: KivaClient.connect };

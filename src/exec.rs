@@ -66,7 +66,7 @@ pub(crate) type R = Result<(), String>;
 const RESERVED: &[&str] = &[
     "set", "get", "update", "change", "del", "typeof", "scan", "stats", "compact", "exit", "quit", "clear", "help",
     "has", "print", "bump", "keys", "range", "string", "number", "boolean", "null", "array", "object", "bytes", "and",
-    "ttl", "to", "all", "limit", "reverse", "where", "return", "from", "true", "false",
+    "ttl", "to", "all", "limit", "reverse", "where", "return", "from", "true", "false", "similar",
 ];
 
 pub fn is_reserved(s: &str) -> bool {
@@ -399,17 +399,20 @@ fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
         }
     };
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
-    // The field starts at the first '.' after the last wildcard.
+    let (pattern, field) = split_target(&target)?;
+    Ok(Cond { pattern, field, op, value })
+}
+
+/// Splits `<pattern>.<field>`: the field starts at the first '.' after the last wildcard.
+pub(crate) fn split_target(target: &str) -> Result<(String, String), String> {
+    const NEED: &str = "expected both a key pattern and a field: <pattern>.<field>, e.g. doc:*.embedding";
     let from = target.rfind('*').map(|i| i + 1).unwrap_or(0);
-    let dot = target[from..]
-        .find('.')
-        .map(|i| i + from)
-        .ok_or("a condition needs both a key pattern and a field: <pattern>.<field>")?;
+    let dot = target[from..].find('.').map(|i| i + from).ok_or(NEED)?;
     let (pattern, field) = (target[..dot].to_string(), target[dot + 1..].to_string());
     if pattern.is_empty() || field.is_empty() {
-        return Err("a condition needs both a key pattern and a field: <pattern>.<field>".into());
+        return Err(NEED.into());
     }
-    Ok(Cond { pattern, field, op, value })
+    Ok((pattern, field))
 }
 
 const HELP: &str = r#"
@@ -442,6 +445,9 @@ const HELP: &str = r#"
   get where <pat>.<field> <op> <v> [limit N] [return f1, f2]
   count where ... | sum where ...   : Aggregates (op: = != > >= < <=).
   create index on <pat> (<field>)   : Secondary index. Also: drop index, indexes.
+  get similar <pat>.<field> to [..] [limit N] [metric cosine|dot|l2] [return f1, f2]
+                                    : Vector similarity search (AI embeddings).
+  create vector index on <pat> (<field>) : Keep vectors in memory. Also: drop vector index.
   explain <query>                   : Show how a query would be executed.
   convert <key> to msgpack|json     : Change a document's storage encoding.
 
@@ -566,6 +572,8 @@ impl Session {
                     self.cmd_range(&a[1..], out)
                 } else if a.first().is_some_and(|x| x.is_kw("where")) {
                     self.cmd_where("get", &a[1..], out)
+                } else if a.first().is_some_and(|x| x.is_kw("similar")) {
+                    self.cmd_similar(&a[1..], out)
                 } else {
                     self.chain(t, out, Session::get_one)
                 }
@@ -1097,6 +1105,66 @@ impl Session {
         Ok(())
     }
 
+    fn cmd_similar(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str =
+            "get similar <pattern>.<field> to [n1, n2, ...] | <key>.<field> [limit N] [metric cosine|dot|l2] [return f1, f2]";
+        let mut c = Cur::new(a);
+        let target = word(c.next(), "<pattern>.<field>").map_err(|e| format!("{e}\nUsage: {USAGE}"))?;
+        let (pattern, field) = split_target(&target)?;
+        if !c.eat("to") {
+            return Err(format!("Missing 'to' keyword.\nUsage: {USAGE}"));
+        }
+        let vt = c.next().ok_or_else(|| format!("Missing the query vector.\nUsage: {USAGE}"))?;
+        let json = match vt.kind {
+            Kind::Json => serde_json::from_str::<Json>(&vt.text).map_err(|e| format!("Invalid JSON literal: {e}"))?,
+            // "similar to this document": the vector stored in another key.
+            Kind::Bare | Kind::Backtick => match self.lookup(&vt.text)? {
+                Some((v, _)) => v.to_json(),
+                None => return Err(format!("'{}' does not exist.", vt.text)),
+            },
+            _ => return Err(format!("The query vector must be a JSON array of numbers.\nUsage: {USAGE}")),
+        };
+        let vector = crate::vector::from_json(&json).ok_or("The query vector must be a non-empty array of numbers.")?;
+        let mut metric = crate::vector::Metric::Cosine;
+        let mut tail = Tail::default();
+        loop {
+            if c.eat("metric") {
+                let m = word(c.next(), "a metric")?;
+                metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
+                continue;
+            }
+            let before = c.i;
+            let t = parse_tail(&mut c)?;
+            if t.limit > 0 {
+                tail.limit = t.limit;
+            }
+            if t.fields.is_some() {
+                tail.fields = t.fields;
+            }
+            if c.i == before {
+                break;
+            }
+        }
+        c.finish(USAGE)?;
+        let q = crate::engine::VectorQuery { pattern, field, vector, metric, limit: tail.limit };
+        let r = self.engine.similar(&q)?;
+        for (key, score, doc) in &r.rows {
+            let shown = match &tail.fields {
+                Some(f) => project(doc, f),
+                None => doc.clone(),
+            };
+            out.say(format!("{key}: {score:.4} {shown}"));
+        }
+        out.say(format!(
+            "({} results, {} metric, {} vectors compared, {})",
+            r.rows.len(),
+            metric.name(),
+            r.compared,
+            if r.indexed { "vector index" } else { "documents read from disk" }
+        ));
+        Ok(())
+    }
+
     fn cmd_explain(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
             "Usage: explain get where ... | explain count where ... | explain range <A> to <B> | explain get <key>";
@@ -1335,7 +1403,22 @@ impl Session {
             s.compactions,
             s.last_compact.map(|t| format!(", last {}", fmt_time(t))).unwrap_or_default()
         ));
-        out.say(format!(" > Secondary Indexes    : {}", s.indexes));
+        if let Some(err) = &s.compact_error {
+            out.err(format!(" > Auto-Compaction Error: {err}"));
+        }
+        out.say(format!(" > Secondary Indexes    : {} (+ {} vector)", s.indexes, s.vector_indexes));
+        if s.cache_limit > 0 {
+            let total = s.cache_hits + s.cache_misses;
+            let rate = if total > 0 { s.cache_hits as f64 * 100.0 / total as f64 } else { 0.0 };
+            out.say(format!(
+                " > Value Cache          : {} of {} used, {} values, {rate:.1}% hits",
+                human_size(s.cache_bytes),
+                human_size(s.cache_limit),
+                s.cache_entries
+            ));
+        } else {
+            out.say(" > Value Cache          : off (values are read from disk)");
+        }
         let repl = &self.inst.repl;
         if repl.is_replica() {
             let l = repl.link();

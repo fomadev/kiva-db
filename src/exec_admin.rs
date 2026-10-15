@@ -77,11 +77,18 @@ impl Session {
             }
             "indexes" => {
                 let list = self.engine.list_indexes();
-                if list.is_empty() {
+                let vectors = self.engine.list_vector_indexes();
+                if list.is_empty() && vectors.is_empty() {
                     out.say("No secondary indexes in this workspace.");
                 }
                 for (p, f, n) in list {
                     out.say(format!("{p} ({f}) - {n} documents indexed"));
+                }
+                for (p, f, n, dims, rejected) in vectors {
+                    let dims = dims.map(|d| format!("{d} dimensions")).unwrap_or_else(|| "empty".into());
+                    let extra =
+                        if rejected > 0 { format!(", {rejected} skipped (other length)") } else { String::new() };
+                    out.say(format!("{p} ({f}) - vector index, {n} vectors, {dims}{extra}"));
                 }
                 Ok(())
             }
@@ -153,6 +160,14 @@ impl Session {
             self.inst.ensure_workspace(&user.home_workspace())?;
             out.say(format!("User '{name}' created with role [{}].", role.name()));
             Ok(())
+        } else if c.eat("vector") {
+            if !c.eat("index") {
+                return Err("Usage: create vector index on <pattern> (<field>)".into());
+            }
+            let (pattern, field) = parse_index_spec(&mut c, "create vector index on <pattern> (<field>)")?;
+            let n = self.engine.create_vector_index(&pattern, &field)?;
+            out.say(format!("Vector index created on {pattern} ({field}): {n} vectors in memory."));
+            Ok(())
         } else if c.eat("index") {
             let (pattern, field) = parse_index_spec(&mut c, "create index on <pattern> (<field>)")?;
             let n = self.engine.create_index(&pattern, &field)?;
@@ -210,6 +225,16 @@ impl Session {
                 return Err(format!("user '{name}' does not exist."));
             }
             out.say(format!("User '{name}' dropped."));
+            Ok(())
+        } else if c.eat("vector") {
+            if !c.eat("index") {
+                return Err("Usage: drop vector index on <pattern> (<field>)".into());
+            }
+            let (pattern, field) = parse_index_spec(&mut c, "drop vector index on <pattern> (<field>)")?;
+            if !self.engine.drop_vector_index(&pattern, &field)? {
+                return Err(format!("no vector index on {pattern} ({field})."));
+            }
+            out.say(format!("Vector index on {pattern} ({field}) dropped."));
             Ok(())
         } else if c.eat("index") {
             let (pattern, field) = parse_index_spec(&mut c, "drop index on <pattern> (<field>)")?;
@@ -424,7 +449,10 @@ impl Session {
             self.inst.cfg_mut().set(&s, &k, &value)?;
             out.say(format!("OK: {s}.{k} = {}", mask(&k, value)));
             match (s.as_str(), k.as_str()) {
-                ("storage", "auto_compact" | "compact_threshold" | "compression") => self.inst.apply_storage_config(),
+                (
+                    "storage",
+                    "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb",
+                ) => self.inst.apply_storage_config(),
                 ("security", _) | ("http", "rate_limit" | "cors") | ("scripting", _) => {}
                 ("replication", "sync_mode" | "min_slaves_ack" | "master_user" | "master_password") => {}
                 ("replication", _) => {

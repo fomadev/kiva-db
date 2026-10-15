@@ -19,15 +19,20 @@ pub const KNOWN: &[(&str, &str, &str, &str)] = &[
     ("storage", "sync_writes", "false", "fsync after every write (safer, slower)"),
     ("storage", "snapshot_interval", "300", "Seconds between index snapshots"),
     ("storage", "snapshot_every", "1000", "Modifications between index snapshots"),
+    ("storage", "cache_values", "false", "Also keep recently read values in memory"),
+    ("storage", "cache_size_mb", "256", "Memory budget of the value cache, per workspace"),
     ("network", "port", "2911", "TCP port of the server"),
     ("network", "bind", "127.0.0.1", "Address the server listens on"),
     ("security", "auth_required", "false", "Require a username and password"),
     ("server", "threads", "8", "Commands executed in parallel"),
     ("server", "max_clients", "1000", "Maximum simultaneous connections"),
     ("http", "enabled", "true", "Expose the REST API when serving"),
+    ("http", "stream", "true", "Offer key changes as Server-Sent Events on /v1/stream"),
     ("http", "port", "8080", "HTTP port of the REST API"),
     ("http", "rate_limit", "600", "Requests per minute per IP (0 = unlimited)"),
     ("http", "cors", "true", "Send CORS headers"),
+    ("resp", "enabled", "true", "Speak the Redis protocol (RESP) when serving"),
+    ("resp", "port", "6379", "Port of the Redis-compatible listener"),
     ("replication", "role", "master", "master or replica"),
     ("replication", "master_host", "", "Host of the master (replica only)"),
     ("replication", "master_port", "2911", "Port of the master (replica only)"),
@@ -68,7 +73,8 @@ fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
     let is_bool = || matches!(value, "true" | "false");
     let int_in = |lo: u64, hi: u64| value.parse::<u64>().map(|n| n >= lo && n <= hi).unwrap_or(false);
     let ok = match key {
-        "auto_compact" | "sync_writes" | "auth_required" | "enabled" | "cors" => is_bool(),
+        "auto_compact" | "sync_writes" | "auth_required" | "enabled" | "cors" | "cache_values" | "stream" => is_bool(),
+        "cache_size_mb" => int_in(1, 1_048_576),
         "compact_threshold" => int_in(1, 99),
         "compression" => matches!(value, "none" | "lz4" | "zlib"),
         "port" | "master_port" => int_in(1, 65535),
@@ -141,7 +147,8 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let mut out = String::from("# KivaDB configuration\n");
-        let order = ["storage", "workspaces", "network", "security", "server", "http", "replication", "scripting"];
+        let order =
+            ["storage", "workspaces", "network", "security", "server", "http", "resp", "replication", "scripting"];
         let mut names: Vec<&String> = self.sections.keys().collect();
         names.sort_by_key(|n| order.iter().position(|o| o == n).unwrap_or(order.len()));
         for name in names {

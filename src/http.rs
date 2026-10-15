@@ -249,6 +249,10 @@ fn handle(inst: &Arc<Instance>, mut stream: TcpStream, rates: &RateTable) {
         websocket(sess, rx, stream, &req);
         return;
     }
+    if req.path == "/v1/stream" && req.method == "GET" {
+        server_sent_events(sess, rx, stream, &req, cors);
+        return;
+    }
     let resp = route(&mut sess, &req).unwrap_or_else(Response::from);
     write_response(&mut stream, &resp, cors);
 }
@@ -387,6 +391,12 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
                 "clients": sess.inst.clients.load(Ordering::SeqCst),
                 "uptime_seconds": sess.inst.started.elapsed().as_secs(),
             }})))
+        }
+        ("POST", "/v1/api") => {
+            let body: Json = serde_json::from_slice(&req.body)?;
+            let mut answer = crate::api::handle(sess, &body)?;
+            answer["status"] = json!("ok");
+            Ok(Response::json(200, answer))
         }
         ("POST", "/v1/exec") => {
             let body: Json = serde_json::from_slice(&req.body)?;
@@ -576,6 +586,59 @@ fn ws_read(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
 }
 
 /// Upgrades the connection and streams key-change notifications as JSON.
+/// Turns a notification (`set user:1 (object)`) into its JSON form.
+fn event_json(msg: &str) -> Json {
+    let mut parts = msg.splitn(3, ' ');
+    let event = parts.next().unwrap_or("");
+    let key = parts.next().unwrap_or("");
+    let ty = parts.next().map(|t| t.trim_matches(|c| c == '(' || c == ')'));
+    json!({ "event": event, "key": key, "type": ty, "timestamp": now_secs() })
+}
+
+/// `GET /v1/stream?pattern=user:*`: key changes as Server-Sent Events.
+/// One-way and plain HTTP, so a browser's `EventSource` or `curl -N` is enough.
+fn server_sent_events(mut sess: Session, rx: mpsc::Receiver<String>, mut stream: TcpStream, req: &Request, cors: bool) {
+    if !sess.inst.cfg().get_bool("http", "stream") {
+        write_response(&mut stream, &Response::error(404, "the event stream is turned off (http.stream)"), cors);
+        return;
+    }
+    let pattern = req.query.get("pattern").cloned().unwrap_or_else(|| "*".into());
+    let out = sess.execute(&format!("subscribe \"{}\"", pattern.replace('"', "")));
+    if out.has_err() {
+        write_response(&mut stream, &Response::error(400, out.text()), cors);
+        return;
+    }
+    let mut head = String::from(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nX-Accel-Buffering: no\r\n",
+    );
+    if cors {
+        head.push_str("Access-Control-Allow-Origin: *\r\n");
+    }
+    head.push_str("\r\n");
+    let hello = json!({ "event": "subscribed", "pattern": pattern, "workspace": sess.ws });
+    let first = format!("{head}retry: 2000\n\nevent: subscribed\ndata: {hello}\n\n");
+    if stream.write_all(first.as_bytes()).and_then(|_| stream.flush()).is_err() {
+        return;
+    }
+    let mut id = 0u64;
+    while !sess.inst.shutting_down.load(Ordering::SeqCst) {
+        let chunk = match rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(msg) => {
+                id += 1;
+                let j = event_json(&msg);
+                format!("id: {id}\nevent: {}\ndata: {j}\n\n", j["event"].as_str().unwrap_or("change"))
+            }
+            // A comment line keeps proxies from closing an idle stream and
+            // tells us when the client has gone.
+            Err(mpsc::RecvTimeoutError::Timeout) => ": keep-alive\n\n".to_string(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if stream.write_all(chunk.as_bytes()).and_then(|_| stream.flush()).is_err() {
+            break;
+        }
+    }
+}
+
 fn websocket(mut sess: Session, rx: mpsc::Receiver<String>, mut stream: TcpStream, req: &Request) {
     let Some(key) = req.headers.get("sec-websocket-key") else {
         write_response(&mut stream, &Response::error(400, "this endpoint expects a WebSocket upgrade"), false);
@@ -677,6 +740,13 @@ fn openapi() -> Json {
             },
             "/metrics": { "get": { "summary": "Prometheus metrics (text format)." } },
             "/health": { "get": { "summary": "Liveness probe. No authentication." } },
+            "/v1/api": {
+                "post": {
+                    "summary": "Structured request: whoami, scan, get, put, del, similar, stats, users, workspaces.",
+                    "requestBody": { "content": { "application/json": { "example": { "op": "similar", "target": "doc:*.embedding", "vector": [0.1, 0.2, 0.3], "limit": 5 } } } }
+                }
+            },
+            "/v1/stream": { "get": { "summary": "Server-Sent Events stream of key changes. Query: pattern (default *)." } },
             "/ws": { "get": { "summary": "WebSocket stream of key changes. Query: pattern (default *)." } }
         }
     })
