@@ -20,13 +20,13 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 
 ## Install
 
-You need [Rust](https://rustup.rs) and a C compiler (used once, for the embedded Lua).
+| Way | How |
+| :--- | :--- |
+| **Download** | Get the archive for Windows, Linux or macOS from the [releases page](https://github.com/fomadev/kiva-db/releases), unpack it, put `kivadb` in your `PATH` |
+| **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.0.0` |
+| **From source** | Install [Rust](https://rustup.rs) and a C compiler (used once, for the embedded Lua), then `cargo build --release`; the executable is `target/release/kivadb` |
 
-```bash
-cargo build --release
-```
-
-The executable is `target/release/kivadb` (`kivadb.exe` on Windows). Put it somewhere in your `PATH`.
+Step-by-step instructions for each system are in [Chapter 1](DOCUMENTATION.md#chapter-1--installation) of the documentation.
 
 ## Five-minute tour
 
@@ -68,29 +68,34 @@ kivadb --help     every option
 
 Type `help` inside the shell for the list of commands.
 
+Prefer a window? **[Kiva Studio](https://github.com/fomadev/kiva-studio)** is the desktop client for Windows, Linux and macOS: data browser, query builder, similarity search, users and server health.
+
 ## Documentation
 
-Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOCUMENTATION.md)**: installation, starting and stopping, every command, data types, queries and indexes, transactions, users and security, the server protocols, connecting from Rust / Node.js / Python / curl, replication, Lua scripting, the file format, and troubleshooting.
+Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOCUMENTATION.md)**, written so that someone who has never used a database can start at Chapter 0.
 
 | If you want to... | Read |
 | :--- | :--- |
-| Get going from zero | [Chapters 0 to 3](DOCUMENTATION.md#chapter-0--introduction) |
-| Learn the commands | [Chapters 4 to 12](DOCUMENTATION.md#chapter-4--syntax-rules) |
-| Connect an application | [Chapters 18 to 21](DOCUMENTATION.md#chapter-18--the-tcp-server) |
-| Run it in production | [Chapters 14 to 17, 22 and 24](DOCUMENTATION.md#chapter-14--configuration) |
-| Host it: Linux, Windows, macOS, Docker | [Chapter 29](DOCUMENTATION.md#chapter-29--deploying-kivadb-on-a-server) |
-| Use vectors, Redis clients, the value cache | [Chapters 30 to 32](DOCUMENTATION.md#chapter-30--vector-search-for-ai) |
-| Look a command up quickly | [Chapter 27, the cheat sheet](DOCUMENTATION.md#chapter-27--command-cheat-sheet) |
+| Install KivaDB and get going from zero | [Part I, Chapters 0 to 3](DOCUMENTATION.md#chapter-0--introduction) |
+| Learn the commands: data, documents, queries, vectors, transactions | [Part II, Chapters 4 to 13](DOCUMENTATION.md#chapter-4--syntax-rules) |
+| Administer it: workspaces, configuration, users, maintenance | [Part III, Chapters 14 to 19](DOCUMENTATION.md#chapter-14--workspaces) |
+| Connect an application: protocol, REST, notifications, Redis, drivers | [Part IV, Chapters 20 to 24](DOCUMENTATION.md#chapter-20--the-tcp-server) |
+| Replication, Lua scripts, monitoring, embedding in Rust | [Part V, Chapters 25 to 28](DOCUMENTATION.md#chapter-25--replication) |
+| Host it: Linux, Windows, macOS, Docker | [Part VI, Chapter 29](DOCUMENTATION.md#chapter-29--deploying-kivadb-on-a-server) |
+| Fix a problem, look a command up | [Troubleshooting](DOCUMENTATION.md#chapter-30--troubleshooting), [cheat sheet](DOCUMENTATION.md#chapter-31--command-cheat-sheet) |
 
 ## Project layout
 
 | Path | Contents |
 | :--- | :--- |
-| `src/` | The database: storage engine, command language, server, replication, scripting |
-| `tests/` | Automated tests (storage, commands, network) - run them with `cargo test` |
+| `src/` | The database: storage engine, command language, servers (KivaDB protocol, REST, Redis), replication, scripting |
+| `tests/` | Automated tests (storage, commands, network, Redis, vectors) - run them with `cargo test` |
 | `drivers/node/` | The official Node.js driver (npm package `kivadb`) |
-| `examples/nodejs/` | A dependency-free Node.js client |
+| `examples/nodejs/` | A dependency-free Node.js client, to read the protocol |
+| `Dockerfile`, `docker-compose.yml` | The Docker image and a ready-to-use Compose file |
+| `.github/workflows/` | Tests on Windows, Linux and macOS; releases and the Docker image on every version tag |
 | `DOCUMENTATION.md` | The complete manual |
+| `ROADMAP.md` | What comes next, and what was set aside and why |
 | `CONTRIBUTING.md` | How to contribute |
 
 ## Scope of this release
@@ -99,7 +104,7 @@ KivaDB 1.0.0 is a single-node database with replicas. Built-in TLS, automatic le
 
 ## License
 
-This repository is published under and protected by the **[FomaDev Public License (FPL)](LICENSE)**.
+This repository is published under and protected by the **[Fordima Public License (FPL)](LICENSE)**.
 
 * **Binary Utilization**: Permissions are granted to execute compiled KivaDB CLI binaries within personal, academic, and industrial production environments free of charge.
 * **Source Modification**: Redistribution, compilation, or integration of source fragments into third-party commercial applications or competitive data frameworks requires an official paid licensing agreement.

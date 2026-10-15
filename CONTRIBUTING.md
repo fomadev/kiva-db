@@ -4,9 +4,9 @@ KivaDB is a high-performance database engine developed and maintained by FomaDev
 
 This document clarifies the contribution process and answers common questions about how to get involved.
 
-## FomaDev Public License (FPL)
+## Fordima Public License (FPL)
 
-By contributing to KivaDB, you agree that your contributions will be licensed under the **[FomaDev Public License (FPL)](LICENSE)**. 
+By contributing to KivaDB, you agree that your contributions will be licensed under the **[Fordima Public License (FPL)](LICENSE)**. 
 
 Forks are authorized only for the purpose of contributing back to the official FomaDev repository via Pull Requests. Maintaining a permanent independent fork to bypass FomaDev's authority is strictly prohibited. For commercial use of the source code or integration into third-party products, please contact the lead maintainer for a commercial license.
 
@@ -54,17 +54,30 @@ KivaDB is built with Cargo.
 - To run the test suites: `cargo test`
 - To try the shell on a throwaway database: `cargo run -- --home ./scratch-home`
 
+### Continuous integration
+Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Node.js driver tests (`cd drivers/node && npm test`, on Linux). A pull request is merged only when all three systems are green.
+
+### Releasing (maintainers)
+1. Update the version in `Cargo.toml`, `drivers/node/package.json`, the Docker tag in `docker-compose.yml` and the documentation.
+2. Commit, push, and wait for the three systems to be green.
+3. Tag the version and push the tag:
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+The workflow then publishes a GitHub release with the Windows, Linux and macOS executables and their SHA-256 checksums, and pushes the Docker image `fomadev0/kiva-db:<version>` and `:latest`. Docker Hub access comes from the repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token, never a password).
+
 ## Style Guide
 
 Consistency is key to a maintainable database engine.
 - **Storage engine** (`src/engine.rs`, `format.rs`, `hint.rs`): any change to the on-disk format must stay readable by existing files, or bump the format number and say so in the pull request.
-- **Command language** (`src/exec.rs`, `exec_admin.rs`): every new command needs an entry in `help`, in the README and in the privilege table (`required`).
+- **Command language** (`src/exec.rs`, `exec_admin.rs`): every new command needs an entry in `help`, in DOCUMENTATION.md (its chapter and the cheat sheet) and in the privilege table (`required`).
 - **Errors**: return `KivaError` values; never panic on user input or on corrupted data.
 - **Formatting**: `cargo fmt`. Use descriptive names and comment the reasoning, not the mechanics.
 
 ## Contributor License Agreement (CLA)
 
-For us to accept your Pull Request, you must acknowledge that you have read and accepted the **[FPL](LICENSE)**. By submitting a Pull Request, you certify that you are the author of the code or have the right to contribute it under the [FomaDev Public License](LICENSE).
+For us to accept your Pull Request, you must acknowledge that you have read and accepted the **[FPL](LICENSE)**. By submitting a Pull Request, you certify that you are the author of the code or have the right to contribute it under the [Fordima Public License](LICENSE).
 
 ## Contact
 
@@ -72,4 +85,4 @@ For technical discussions, feature requests, or commercial licensing inquiries, 
 - **Lead Maintainer**: [github.com/fordimalanda](https://github.com/fordimalanda)
 - **GitHub**: [github.com/fomadev](https://github.com/fomadev)
 
-Thank you for helping us make KivaDB the highest-performing storage engine for the technology ecosystem.
+Thank you for helping us improve KivaDB.
