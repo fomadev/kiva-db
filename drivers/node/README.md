@@ -1,9 +1,17 @@
 # kivadb — Node.js driver
 
-The official Node.js driver for [KivaDB](../../README.md). It speaks KivaDB's binary protocol on port 2911, has no dependencies, and ships TypeScript types.
+The official Node.js driver for [KivaDB](../../README.md). It speaks KivaDB's binary protocol on port 2911, has no dependencies, and ships TypeScript types. It needs Node.js 18 or later and a running KivaDB (`kivadb start`).
+
+## Install
 
 ```bash
 npm install kivadb
+```
+
+Until the package is published on npm, install it from a copy of the repository:
+
+```bash
+npm install path/to/kiva-db/drivers/node
 ```
 
 ## Quick start
@@ -39,6 +47,30 @@ A remote host always needs a password: the driver refuses to connect without one
 | `stats()`, `ping()`, `close()` | |
 
 Requests can be sent concurrently on one connection; answers come back in order.
+
+## Errors
+
+Every method returns a promise. A command that KivaDB refuses (wrong type, missing permission, transaction conflict...) rejects with a `KivaError` whose `message` is KivaDB's own message:
+
+```js
+try {
+  await db.set("user:1", 42, { mode: "create" });
+} catch (err) {
+  console.log(err.message);   // Key 'user:1' already exists...
+}
+```
+
+## TypeScript
+
+```ts
+import { connect } from "kivadb";
+
+const db = await connect({ host: "localhost", port: 2911, user: "kiva", password: "" });
+```
+
+## More
+
+The protocol, the structured requests and every command are described in the [KivaDB documentation](../../DOCUMENTATION.md), in particular [Chapter 20](../../DOCUMENTATION.md#chapter-20--the-tcp-server) and [Chapter 24](../../DOCUMENTATION.md#chapter-24--connecting-from-your-programs).
 
 ## Tests
 

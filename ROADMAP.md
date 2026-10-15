@@ -12,6 +12,7 @@ What KivaDB 1.0.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md).
 * **Official Node.js driver** (`drivers/node`), Rust client in the crate
 * Shell with persistent history and Tab completion
 * Kiva Studio: data browser, query builder with execution plans, similarity search, activity feed with alerts, users, server health
+* Ready-made executables for Windows x64, Linux x64 and macOS Apple Silicon, and the Docker image `fomadev0/kiva-db`, published automatically for every version
 
 ## Next, in order of value
 
@@ -25,6 +26,8 @@ What KivaDB 1.0.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md).
 | **Kiva Studio on mobile** | Check alerts and act from a phone | Flutter already targets Android and iOS; the work is a phone-sized layout and store publishing. Push notifications when the app is closed need a server and Apple/Google accounts |
 | **Kiva Studio on the web** | Use Studio from a browser, without installing anything | Browsers cannot open raw TCP sockets: the web version must go through the REST API, which then needs a session endpoint for transactions and subscriptions. Flutter's web target or a separate web app are both possible |
 | **Saved passwords in Kiva Studio** | One-click connection to remote servers | Storing them in the operating system's keychain (Windows Credential Manager, macOS Keychain, Secret Service on Linux), never in a file |
+| **More ready-made builds** | Executables for Linux on ARM (Raspberry Pi, ARM servers) and Intel Macs, and a Docker image for ARM | More entries in the release workflow (cross-compilation or ARM runners) and a multi-architecture Docker build (`docker buildx`) |
+| **Kiva Studio installers** | Install Studio without Flutter: a Windows installer, a macOS app, a Linux package, with its own icon | A release workflow for the `kiva-studio` repository; signing the macOS and Windows builds needs Apple and Microsoft certificates |
 
 ## Considered and not planned, with reasons
 
