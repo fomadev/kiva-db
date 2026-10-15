@@ -303,6 +303,13 @@ fn start(home: &Path, args: &Args) -> i32 {
         cmd.arg("--lua-debug");
     }
     cmd.stdin(Stdio::null()).stdout(log).stderr(log_err);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own process group: closing the terminal (or the SSH session)
+        // that ran `kivadb start` must not stop the server with it.
+        cmd.process_group(0);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawHandle;
