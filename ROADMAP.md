@@ -1,6 +1,6 @@
 # KivaDB roadmap
 
-What KivaDB 1.0.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md). This page lists what was considered for 1.0.0 and left for later, and why. Each item says what it would really take, so that decisions are made on facts.
+What KivaDB 1.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md). This page lists what was considered for 1.0.0 and left for later, and why. Each item says what it would really take, so that decisions are made on facts.
 
 ## Delivered in 1.0.0 (for reference)
 

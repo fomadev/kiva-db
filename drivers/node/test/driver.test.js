@@ -53,7 +53,7 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
   });
 
   const db = await connect({ port });
-  assert.equal(db.server, "KivaDB 1.0.0");
+  assert.equal(db.server, `KivaDB ${require("../package.json").version}`);
 
   await t.test("typed values round-trip", async () => {
     await db.set("s", "both \" and ' quotes");
