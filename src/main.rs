@@ -259,6 +259,35 @@ fn running_pid(home: &Path) -> String {
     std::fs::read_to_string(home.join("instance.pid")).map(|p| p.trim().to_string()).unwrap_or_else(|_| "?".into())
 }
 
+/// The other listeners the server announced in its log (REST API, Redis
+/// protocol), or why they did not start. The TCP port is known first: the
+/// rest of the banner follows within moments.
+fn listeners(log_path: &Path, from: u64) -> Vec<String> {
+    let mut text = String::new();
+    for _ in 0..30 {
+        text = std::fs::read(log_path)
+            .ok()
+            .and_then(|b| b.get(from as usize..).map(|b| String::from_utf8_lossy(b).into_owned()))
+            .unwrap_or_default();
+        if text.contains("Press Ctrl+C to stop.") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("  REST API     : ") {
+            out.push(format!("  REST API : {}", rest.split_whitespace().next().unwrap_or(rest)));
+        } else if let Some(rest) = line.strip_prefix("  Redis (RESP) : ") {
+            let address = rest.split_whitespace().next().unwrap_or(rest);
+            out.push(format!("  Redis    : port {}", address.rsplit(':').next().unwrap_or(address)));
+        } else if line.starts_with("[WARN] REST API") || line.starts_with("[WARN] Redis") {
+            out.push(format!("  {line}"));
+        }
+    }
+    out
+}
+
 /// `kivadb start`: launches `kivadb serve` detached from this terminal.
 fn start(home: &Path, args: &Args) -> i32 {
     if let Some(port) = running_port(home) {
@@ -270,6 +299,8 @@ fn start(home: &Path, args: &Args) -> i32 {
         return 1;
     }
     let log_path = home.join("server.log");
+    // The server appends to this log; what it writes from here on is ours.
+    let log_start = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&log_path);
     let (Ok(exe), Ok(log)) = (std::env::current_exe(), log) else {
         eprintln!("Error: cannot prepare the server process.");
@@ -340,6 +371,9 @@ fn start(home: &Path, args: &Args) -> i32 {
         if let Some(port) = running_port(home) {
             println!("KivaDB started (pid {}).", child.id());
             println!("  TCP port : {port}");
+            for line in listeners(&log_path, log_start) {
+                println!("{line}");
+            }
             println!("  Home     : {}", home.display());
             println!("  Log      : {}", log_path.display());
             println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");

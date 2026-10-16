@@ -399,7 +399,7 @@ fn redis_clients_can_use_kivadb() {
     r.stream.write_all(b"PING\r\n").unwrap();
     assert_eq!(read_reply(&mut r.reader), R::S("PONG".into()));
     assert!(
-        matches!(r.cmd(&["INFO"]), R::B(Some(t)) if t.contains("redis_version:") && t.contains("kivadb_version:1.0.0"))
+        matches!(r.cmd(&["INFO"]), R::B(Some(t)) if t.contains("redis_version:") && t.contains(concat!("kivadb_version:", env!("CARGO_PKG_VERSION"))))
     );
     assert!(matches!(r.cmd(&["NOPE"]), R::E(e) if e.contains("unknown command")));
     assert_eq!(r.cmd(&["DBSIZE"]), R::I(8));

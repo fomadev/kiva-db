@@ -54,7 +54,7 @@ fn text_and_binary_protocols() {
     let mut bin = connect(port);
     let (code, hello) = call(&mut bin, CMD_HELLO, &[]);
     assert_eq!(code, ST_OK);
-    assert!(hello.starts_with("KivaDB 1.0.0") && hello.contains("auth=none"));
+    assert!(hello.starts_with(concat!("KivaDB ", env!("CARGO_PKG_VERSION"))) && hello.contains("auth=none"));
     assert_eq!(call(&mut bin, CMD_PING, &[]), (ST_OK, "PONG".into()));
     assert_eq!(call(&mut bin, CMD_EXEC, b"get user:1"), (ST_OK, "+user:1: Alice [string]".into()));
     let (code, body) = call(&mut bin, CMD_EXEC, b"update user:1 5");
@@ -214,7 +214,7 @@ fn rest_api() {
     assert_eq!(http_req(port, "DELETE", "/v1/key/user:2", None, None).status, 404);
     assert_eq!(http_req(port, "OPTIONS", "/v1/key/x", None, None).status, 204);
     assert_eq!(get("/nowhere").status, 404);
-    assert_eq!(get("/health").json()["version"], "1.0.0");
+    assert_eq!(get("/health").json()["version"], env!("CARGO_PKG_VERSION"));
     assert!(get("/docs").body.contains("KivaDB REST API"));
     assert!(get("/openapi.json").json()["paths"]["/v1/key/{key}"].is_object());
     let m = get("/metrics").body;
@@ -391,7 +391,7 @@ fn command_line_and_shared_terminals() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("Cannot update [number]"));
     let out = Command::new(env!("CARGO_BIN_EXE_kivadb")).arg("--version").output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "KivaDB 1.0.0");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), concat!("KivaDB ", env!("CARGO_PKG_VERSION")));
 
     // Terminal 1 keeps a shell open...
     let mut first = kivadb(dir.path()).spawn().unwrap();
@@ -600,7 +600,7 @@ fn structured_api() {
     );
 
     let stats = db.api(&json!({"op": "stats"})).unwrap();
-    assert_eq!((&stats["keys"], &stats["role"], &stats["version"]), (&json!(4), &json!("master"), &json!("1.0.0")));
+    assert_eq!((&stats["keys"], &stats["role"], &stats["version"]), (&json!(4), &json!("master"), &json!(env!("CARGO_PKG_VERSION"))));
     let users = db.api(&json!({"op": "users"})).unwrap();
     let names: Vec<&str> = users["users"].as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["eve", "kiva"]);

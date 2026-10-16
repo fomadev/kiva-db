@@ -488,7 +488,7 @@ fn maintenance_commands() {
     assert_eq!(ok(&mut s, "bogus command"), "Unknown command: 'bogus'. Try 'help'.");
     assert!(ok(&mut s, "help").contains("TRANSACTIONS"));
     assert_eq!(ok(&mut s, "ping"), "PONG");
-    assert_eq!(ok(&mut s, "version"), "KivaDB 1.0.0");
+    assert_eq!(ok(&mut s, "version"), concat!("KivaDB ", env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
