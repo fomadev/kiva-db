@@ -299,6 +299,8 @@ kivadb start
 ```text
 KivaDB started (pid 21040).
   TCP port : 2911
+  REST API : http://127.0.0.1:8080
+  Redis    : port 6379
   Home     : C:\Users\you\AppData\Roaming\KivaDB
   Log      : C:\Users\you\AppData\Roaming\KivaDB\server.log
 Open a shell with 'kivadb', stop the database with 'kivadb stop'.
@@ -314,7 +316,7 @@ KivaDB now runs in the background. You can close the terminal; the database keep
 
 By default these ports only accept connections from the same computer (`127.0.0.1`). Opening KivaDB to other machines is explained in [section 16.7](#167-opening-kivadb-to-the-network).
 
-What the server prints goes to `server.log` in the home directory.
+If the REST API or the Redis port cannot start (another program already uses the port), `start` says so on those lines and KivaDB runs without it. Everything the server prints goes to `server.log` in the home directory.
 
 ### 2.2 Status
 
