@@ -1449,8 +1449,10 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "json" if !sub("get") => Need::Write,
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,
-        "compact" | "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica"
-        | "failover" | "bench" | "shutdown" => Need::Admin,
+        // Compacting only rewrites one's own file: allowed at home.
+        "compact" => Need::Owner,
+        "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
+        | "bench" | "shutdown" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         "workspace" if sub("create") || sub("remove") => Need::Admin,

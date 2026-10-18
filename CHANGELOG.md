@@ -2,6 +2,12 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## 1.2.0 - 2026-10-18
+
+### Changed
+
+* `compact` is no longer reserved to administrators in every case: an `editor` may now compact their own personal workspace (`u_<name>`). Everywhere else, including workspaces a user can write to through a grant, it still needs the admin role, because it rewrites a whole shared file. Viewers still cannot run it. The refusal message says where it is allowed.
+
 ## 1.1.0 - 2026-10-18
 
 ### Added
