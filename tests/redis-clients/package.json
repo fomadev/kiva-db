@@ -1,0 +1,16 @@
+{
+  "name": "kivadb-redis-client-checks",
+  "private": true,
+  "type": "module",
+  "description": "Checks KivaDB against real Redis client libraries",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "express-rate-limit": "^8.7.1",
+    "ioredis": "^6.0.0",
+    "rate-limit-redis": "^6.0.1",
+    "rate-limiter-flexible": "^11.2.3",
+    "redis": "^6.3.0"
+  }
+}

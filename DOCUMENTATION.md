@@ -1,6 +1,6 @@
 # KivaDB Documentation
 
-The complete manual for KivaDB 1.2.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
+The complete manual for KivaDB 1.3.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
 
 ## Table of contents
 
@@ -215,7 +215,7 @@ Then go to [1.4](#14-make-it-available-everywhere).
 The image is published on Docker Hub as `fomadev0/kiva-db`:
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.2.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.3.0
 ```
 
 KivaDB is then running, reachable on the three ports, with `kiva` as administrator and the password you chose. Every part of that line, Compose, backups and upgrades are explained in [29.6](#296-docker). With Docker you can skip the rest of this chapter and [Chapter 2](#chapter-2--starting-and-stopping-kivadb): to open a shell, run `docker exec -it kivadb kivadb -u kiva`.
@@ -264,7 +264,7 @@ kivadb --version
 ```
 
 ```text
-KivaDB 1.2.0
+KivaDB 1.3.0
 ```
 
 `kivadb --help` lists every option.
@@ -296,10 +296,10 @@ kivadb update
 
 ```text
 Checking for a new version of KivaDB...
-New version available: 1.3.0 (current: 1.2.0).
+New version available: 1.4.0 (current: 1.3.0).
 Downloading kivadb_win_x64.zip...
 Checksum verified (SHA-256).
-KivaDB successfully updated to version 1.2.0!
+KivaDB successfully updated to version 1.4.0!
 ```
 
 What it does, in order:
@@ -315,13 +315,13 @@ What it does, in order:
 **Knowing when there is a new version.** When you use `kivadb` in a terminal, it checks GitHub at most once a day, in the background, and mentions a new release when the command ends:
 
 ```text
-A new version of KivaDB is available: 1.3.0 (current: 1.2.0)
+A new version of KivaDB is available: 1.4.0 (current: 1.3.0)
 Run 'kivadb update' to install the latest release.
 ```
 
 The check never slows a command down and never runs for scripts, services, `kivadb serve` or containers (only when a person is at the terminal). Its result is kept in `version_check.json` in the home directory. Set `KIVADB_NO_UPDATE_CHECK=1` to turn it off.
 
-**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.2.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
+**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.3.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
 
 ### 1.7 Uninstalling
 
@@ -417,7 +417,7 @@ kivadb serve
 ```
 
 ```text
-KivaDB 1.2.0 server
+KivaDB 1.3.0 server
   Home         : C:\Users\you\AppData\Roaming\KivaDB
   TCP protocol : 127.0.0.1:2911 (binary and plain text)
   REST API     : http://127.0.0.1:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
@@ -475,12 +475,12 @@ kivadb
 ```
 
 ```text
-KivaDB Shell v1.2.0
+KivaDB Shell v1.3.0
 Type 'help' or 'h' for command list
 kiva>
 ```
 
-`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.2.0 at 127.0.0.1:2911` is shown first.
+`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.3.0 at 127.0.0.1:2911` is shown first.
 
 ### 3.2 Store and read a value
 
@@ -1421,7 +1421,7 @@ doc:* (embedding) - vector index, 3 vectors, 3 dimensions
 
 The search is **exact**: every candidate vector is compared, so the results are always the true closest ones. On an ordinary computer, with an index, a search over 3 000 vectors of 384 dimensions takes a few milliseconds; over 100 000 vectors, expect tens of milliseconds. That covers the memory of an assistant, a documentation search or a product catalogue.
 
-For millions of vectors an **approximate** index (HNSW) is the usual answer: it gives up a little accuracy for much more speed. KivaDB 1.2.0 does not have one yet; see the [roadmap](ROADMAP.md).
+For millions of vectors an **approximate** index (HNSW) is the usual answer: it gives up a little accuracy for much more speed. KivaDB 1.3.0 does not have one yet; see the [roadmap](ROADMAP.md).
 
 ### 12.6 From programs
 
@@ -1839,7 +1839,7 @@ Error: refusing to listen on 0.0.0.0 without authentication.
 
 Two more protections are always active: an account with an empty password can only log in from the local machine, and the REST API limits the number of requests per client ([21.7](#217-cors-and-rate-limiting)).
 
-**Encryption.** KivaDB 1.2.0 does not encrypt its connections. On a network you do not fully control, put it behind something that does: a TLS-terminating reverse proxy (nginx, Caddy) for the REST API, a VPN or an SSH tunnel for port 2911.
+**Encryption.** KivaDB 1.3.0 does not encrypt its connections. On a network you do not fully control, put it behind something that does: a TLS-terminating reverse proxy (nginx, Caddy) for the REST API, a VPN or an SSH tunnel for port 2911.
 
 ### 16.8 How passwords are stored
 
@@ -2278,7 +2278,7 @@ KivaDB decides which language a connection speaks from its very first byte: `0x0
 
 | Command | Code | Payload | Reply payload |
 | :--- | :--- | :--- | :--- |
-| HELLO | 1 | empty | Three lines: `KivaDB 1.2.0`, `auth=required` or `auth=none`, `user=<name>` |
+| HELLO | 1 | empty | Three lines: `KivaDB 1.3.0`, `auth=required` or `auth=none`, `user=<name>` |
 | AUTH | 2 | user, a zero byte, password | A welcome text |
 | EXEC | 3 | A command line, as in the shell | Output lines separated by `\n`; each line starts with `+` (normal) or `-` (error) |
 | PING | 4 | empty | `PONG` |
@@ -2469,7 +2469,7 @@ curl -X POST http://localhost:8080/v1/exec -d '{"command": "count where user:*.a
 | `GET /ws` | WebSocket change notifications ([Chapter 22](#chapter-22--change-notifications)) |
 | `GET /v1/stream` | Server-Sent Events change notifications ([22.4](#224-over-server-sent-events)) |
 | `POST /v1/api` | Structured requests, including `query` and `similar` ([20.4](#204-structured-requests-for-tools)) |
-| `GET /health` | `{"version":"1.2.0","status":"ok","timestamp":...}` - no login needed |
+| `GET /health` | `{"version":"1.3.0","status":"ok","timestamp":...}` - no login needed |
 | `GET /docs` | An interactive page listing the routes, with a "Try it" button for each |
 | `GET /openapi.json` | The same description in OpenAPI format |
 
@@ -2582,7 +2582,7 @@ A comment line is sent every 15 seconds so that idle connections stay open. With
 
 ### 23.1 What it gives you
 
-Redis is the most used key-value server; thousands of applications and libraries speak its protocol (RESP). KivaDB speaks it too, on port **6379**, so an application written for Redis can use KivaDB **by changing only its connection address**. Two official Redis libraries, node-redis and ioredis, were run unchanged against KivaDB to check this.
+Redis is the most used key-value server; thousands of applications and libraries speak its protocol (RESP). KivaDB speaks it too, on port **6379**, so an application written for Redis can use KivaDB **by changing only its connection address**. Each version is checked against the current releases of four widely used Node.js libraries, run unchanged: **ioredis**, **node-redis** (which uses RESP3), **rate-limiter-flexible** and **rate-limit-redis** (the store of express-rate-limit). The checks are in `tests/redis-clients`.
 
 ```bash
 redis-cli -p 6379
@@ -2605,6 +2605,8 @@ user:1.name: Alice [string]
 visits: 1 [number]
 ```
 
+Unlike a default Redis, every write is on disk before the answer: keys, counters and their expiry times survive a restart of the server.
+
 ### 23.2 How types match
 
 | Redis | KivaDB |
@@ -2619,25 +2621,65 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 
 | Group | Commands |
 | :--- | :--- |
-| Connection | `PING`, `ECHO`, `AUTH`, `HELLO` (protocol 2), `SELECT 0`, `CLIENT`, `QUIT`, `COMMAND`, `INFO` |
-| Strings | `GET`, `SET` (with `EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `MGET`, `MSET`, `APPEND`, `STRLEN`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT` |
-| Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `KEYS`, `SCAN`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT`, `TTL`, `PTTL`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
+| Connection | `PING`, `ECHO`, `AUTH`, `HELLO` (protocol 2 or 3), `SELECT` (0 to 15, see [23.4](#234-logins-databases-roles)), `CLIENT`, `QUIT`, `COMMAND`, `INFO`, `TIME` |
+| Strings | `GET`, `SET` (with `EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `APPEND`, `STRLEN`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT` |
+| Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `KEYS`, `SCAN`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HDEL`, `HINCRBY` |
 | Lists | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX` |
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
+| Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 
-Pipelining works. Not supported: sets, sorted sets, streams, publish/subscribe, Lua `EVAL` through Redis, `WATCH`, RESP3, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
+Pipelining works, in RESP2 and RESP3. Not supported: sets, sorted sets, streams, publish/subscribe, `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
 
-### 23.4 Logins, workspaces, roles
+**One command at a time.** Like Redis, KivaDB runs the Redis commands of all connections one after the other. `INCR` from many clients at once never loses a step, and a `MULTI ... EXEC` block or a script is never interleaved with another client's commands.
+
+**Expiry precision.** KivaDB keeps expiry times to the second. A key set with `EX` expires on time; with `PX` (milliseconds), it may live up to one second longer than asked, never shorter. `PTTL` and `PEXPIRETIME` are derived from the second. For sessions, codes, locks and rate-limit windows counted in seconds or minutes, this makes no difference.
+
+### 23.4 Logins, databases, roles
 
 Everything KivaDB enforces applies here too:
 
 * With authentication on, the client must log in. `AUTH <password>` logs in as `kiva` (Redis's "default" user); `AUTH <user> <password>` as any account. In a URL: `redis://kiva:password@host:6379`.
-* A connection works in the user's workspace; `SELECT 0` is accepted, other numbers are refused (KivaDB workspaces have names).
-* A viewer cannot write (`NOPERM`), a replica refuses writes (`READONLY`), `FLUSHDB` needs the admin role.
-* `MULTI ... EXEC` runs as a KivaDB transaction: all or nothing, and `EXEC` answers nil if another session changed the same keys meanwhile.
+* **Numbered databases are workspaces.** Database 0 is the user's own workspace: `default` for an administrator, `u_<name>` for anyone else. `SELECT 2` (or `/2` at the end of a URL) uses the workspace `db2`, and so on up to 15. An administrator's first `SELECT n` creates `db<n>`; another user needs it to exist and to be granted access, and the error message says how:
 
-### 23.5 Configuration
+  ```text
+  workspace create db2
+  grant write on workspace "db2" to "pay"
+  ```
+
+  Two applications can therefore keep the separation they had in Redis (one on database 0, one on database 2). A cleaner alternative is one KivaDB account per application, each in its own workspace and unable to read the other's data.
+* A viewer cannot write (`NOPERM`), a replica refuses writes (`READONLY`), `FLUSHDB` needs the admin role. `FLUSHDB` and `FLUSHALL` empty the current workspace only.
+* `MULTI ... EXEC` runs as a KivaDB transaction: all or nothing, and `EXEC` answers nil if another session (through another protocol) changed the same keys meanwhile.
+
+### 23.5 Lua scripts (EVAL)
+
+Libraries such as rate limiters send small Lua scripts that read and write several keys in one step. KivaDB runs them with the same `redis` API as Redis:
+
+```text
+127.0.0.1:6379> EVAL "local n = redis.call('INCR', KEYS[1]) if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end return n" 1 rl:login:1.2.3.4 900
+(integer) 1
+```
+
+* `KEYS` and `ARGV` hold the keys and arguments; `redis.call` runs a command and raises its error, `redis.pcall` returns the error as a table; `redis.error_reply`, `redis.status_reply`, `redis.sha1hex` and `redis.log` exist.
+* Replies convert as in Redis: integers to numbers, strings to strings, a missing value to `false`, arrays to tables; in the other direction, numbers are truncated to integers and a table becomes an array.
+* `EVALSHA` runs a script by its SHA-1 after `SCRIPT LOAD` or a first `EVAL`; an unknown one answers `NOSCRIPT`, which clients handle by sending `EVAL`. The cache lives until KivaDB stops or `SCRIPT FLUSH`.
+* Scripts run in the sandbox of [26.5](#265-the-sandbox) (no files, no operating system, the same time and memory limits) and cannot run `MULTI`, `EVAL`, `SELECT` or `AUTH`.
+* **All or nothing.** A script's writes are applied together when it ends. If it fails, none of them is kept. Redis keeps the writes made before the error: KivaDB is stricter here, never looser.
+* Each command inside the script is checked against the user's role, as if sent directly.
+
+### 23.6 Replacing Redis in an application
+
+KivaDB fits the uses where Redis serves as short-lived memory: pending sign-ups with a code that expires, "resend" locks, login and 2FA attempt counters, sessions, caches. The steps on a server where Redis already runs:
+
+1. **Install KivaDB and make it a service** ([29.3](#293-linux-systemd)), so that it starts with the machine. An application that depends on it for sign-ups must never find it stopped.
+2. **Secure it**: a password for `kiva` and authentication on ([16.6](#166-turning-authentication-on)). Create one account per application; give each the database it used (`grant`), or let each use its own workspace as database 0.
+3. **Run it next to Redis first**: `kivadb -e "config set resp.port 6380"`, restart KivaDB, and point one application at `redis://<user>:<password>@127.0.0.1:6380` (add `/2` if it used database 2). Nothing else changes in its code.
+4. **Check** the application's flows: sign-up and code, resend, wrong passwords until the limit.
+5. **Switch the rest**, then stop Redis (`systemctl disable --now redis-server`) and, if you like, give port 6379 back to KivaDB.
+
+Data that lives a few minutes does not need to be copied: at worst, a sign-up in progress at the moment of the switch asks for a new code. Before switching, check with `MONITOR` on Redis, or by reading the code, that the application only uses commands of [23.3](#233-supported-commands).
+
+### 23.7 Configuration
 
 | Setting | Default | |
 | :--- | :--- | :--- |
@@ -2786,7 +2828,7 @@ Add KivaDB as a dependency of your project, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.2.0" }
+kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.3.0" }
 ```
 
 Then use its client:
@@ -2966,7 +3008,7 @@ kiva> replica promote
 This node is now a master.
 ```
 
-Then point your applications, and the other replicas, to it. This step is manual: KivaDB 1.2.0 does not elect a new master by itself.
+Then point your applications, and the other replicas, to it. This step is manual: KivaDB 1.3.0 does not elect a new master by itself.
 
 ---
 
@@ -3321,7 +3363,7 @@ KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
 
 ```text
   Security     : administrator password set, authentication turned on
-KivaDB 1.2.0 server
+KivaDB 1.3.0 server
   Home         : /var/lib/kivadb
   TCP protocol : 0.0.0.0:2911 (binary and plain text)
   REST API     : http://0.0.0.0:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
@@ -3336,7 +3378,7 @@ Press Ctrl+C to stop.
 This is the usual case at a hosting provider. The steps below download KivaDB, create a dedicated system user, install the executable and let systemd start KivaDB at boot and restart it if it stops.
 
 ```bash
-curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.2.0/kivadb_linux_x64.tar.gz
+curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.3.0/kivadb_linux_x64.tar.gz
 tar -xzf kivadb_linux_x64.tar.gz
 sudo useradd --system --home-dir /var/lib/kivadb --create-home kivadb
 sudo install -m 755 kivadb /usr/local/bin/kivadb
@@ -3470,13 +3512,13 @@ The official image is `fomadev0/kiva-db` on Docker Hub. It holds only the `kivad
 
 | Tag | Meaning |
 | :--- | :--- |
-| `fomadev0/kiva-db:1.2.0` | Exactly version 1.2.0. Use this on servers: it never changes under you |
+| `fomadev0/kiva-db:1.3.0` | Exactly version 1.3.0. Use this on servers: it never changes under you |
 | `fomadev0/kiva-db:latest` | The most recent version |
 
 **Run it:**
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.2.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.3.0
 ```
 
 | Part | Meaning |
@@ -3537,7 +3579,7 @@ docker rm -f kivadb
 
 then the `docker run` line again with the new tag. With Compose: change the tag in the file, then `docker compose up -d`.
 
-**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.2.0` in the commands above:
+**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.3.0` in the commands above:
 
 ```bash
 docker build -t kivadb:local .
@@ -3550,7 +3592,7 @@ docker build -t kivadb:local .
 | `kiva` has a long, unique password | It is the administrator of everything |
 | One account per person or application, with the smallest role that works | A leaked `viewer` password cannot destroy data |
 | Only the needed ports are open, ideally only to known addresses | Fewer doors |
-| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.2.0 does not encrypt connections ([16.7](#167-opening-kivadb-to-the-network)) |
+| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.3.0 does not encrypt connections ([16.7](#167-opening-kivadb-to-the-network)) |
 | Backups exist and were restored once as a test | A backup that was never restored is a hope, not a backup |
 | `audit failed-logins` and the metrics are looked at | To notice password guessing early |
 
@@ -3780,16 +3822,16 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 ## Chapter 32 — Limits and scope
 
-KivaDB 1.2.0 is a single-node database with replicas. Knowing what it does not do is as useful as knowing what it does.
+KivaDB 1.3.0 is a single-node database with replicas. Knowing what it does not do is as useful as knowing what it does.
 
-**Not included in 1.2.0**
+**Not included in 1.3.0**
 
 * **Encrypted connections.** No built-in TLS for port 2911 or for the REST API. Use a reverse proxy, a VPN or an SSH tunnel.
 * **Automatic failover.** When a master dies, a person (or your own tooling) promotes a replica.
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Approximate vector indexes (HNSW)** for many millions of vectors ([12.5](#125-how-fast-and-the-limits)).
-* **The full Redis command set**: sets, sorted sets, streams and publish/subscribe are missing ([23.3](#233-supported-commands)).
+* **The full Redis command set**: sets, sorted sets, streams, publish/subscribe and `WATCH` are missing, and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 
