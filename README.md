@@ -22,7 +22,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 
 | Way | How |
 | :--- | :--- |
-| **Linux, macOS (one command)** | `curl -sSL https://raw.githubusercontent.com/fomadev/kiva-db/main/install.sh | bash` |
+| **Linux, macOS** | `curl -sSL https://raw.githubusercontent.com/fomadev/kiva-db/main/install.sh` &#124; `bash` |
 | **Download** | Get the archive for Windows, Linux or macOS from the [releases page](https://github.com/fomadev/kiva-db/releases), unpack it, put `kivadb` in your `PATH` |
 | **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.1.0` |
 | **From source** | Install [Rust](https://rustup.rs) and a C compiler (used once, for the embedded Lua), then `cargo build --release`; the executable is `target/release/kivadb` |
