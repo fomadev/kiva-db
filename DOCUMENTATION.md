@@ -1,6 +1,6 @@
 # KivaDB Documentation
 
-The complete manual for KivaDB 1.1.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
+The complete manual for KivaDB 1.2.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
 
 ## Table of contents
 
@@ -215,7 +215,7 @@ Then go to [1.4](#14-make-it-available-everywhere).
 The image is published on Docker Hub as `fomadev0/kiva-db`:
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.1.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.2.0
 ```
 
 KivaDB is then running, reachable on the three ports, with `kiva` as administrator and the password you chose. Every part of that line, Compose, backups and upgrades are explained in [29.6](#296-docker). With Docker you can skip the rest of this chapter and [Chapter 2](#chapter-2--starting-and-stopping-kivadb): to open a shell, run `docker exec -it kivadb kivadb -u kiva`.
@@ -264,7 +264,7 @@ kivadb --version
 ```
 
 ```text
-KivaDB 1.1.0
+KivaDB 1.2.0
 ```
 
 `kivadb --help` lists every option.
@@ -296,7 +296,7 @@ kivadb update
 
 ```text
 Checking for a new version of KivaDB...
-New version available: 1.2.0 (current: 1.1.0).
+New version available: 1.3.0 (current: 1.2.0).
 Downloading kivadb_win_x64.zip...
 Checksum verified (SHA-256).
 KivaDB successfully updated to version 1.2.0!
@@ -315,13 +315,13 @@ What it does, in order:
 **Knowing when there is a new version.** When you use `kivadb` in a terminal, it checks GitHub at most once a day, in the background, and mentions a new release when the command ends:
 
 ```text
-A new version of KivaDB is available: 1.2.0 (current: 1.1.0)
+A new version of KivaDB is available: 1.3.0 (current: 1.2.0)
 Run 'kivadb update' to install the latest release.
 ```
 
 The check never slows a command down and never runs for scripts, services, `kivadb serve` or containers (only when a person is at the terminal). Its result is kept in `version_check.json` in the home directory. Set `KIVADB_NO_UPDATE_CHECK=1` to turn it off.
 
-**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.1.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
+**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.2.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
 
 ### 1.7 Uninstalling
 
@@ -417,7 +417,7 @@ kivadb serve
 ```
 
 ```text
-KivaDB 1.1.0 server
+KivaDB 1.2.0 server
   Home         : C:\Users\you\AppData\Roaming\KivaDB
   TCP protocol : 127.0.0.1:2911 (binary and plain text)
   REST API     : http://127.0.0.1:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
@@ -475,12 +475,12 @@ kivadb
 ```
 
 ```text
-KivaDB Shell v1.1.0
+KivaDB Shell v1.2.0
 Type 'help' or 'h' for command list
 kiva>
 ```
 
-`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.1.0 at 127.0.0.1:2911` is shown first.
+`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.2.0 at 127.0.0.1:2911` is shown first.
 
 ### 3.2 Store and read a value
 
@@ -1421,7 +1421,7 @@ doc:* (embedding) - vector index, 3 vectors, 3 dimensions
 
 The search is **exact**: every candidate vector is compared, so the results are always the true closest ones. On an ordinary computer, with an index, a search over 3 000 vectors of 384 dimensions takes a few milliseconds; over 100 000 vectors, expect tens of milliseconds. That covers the memory of an assistant, a documentation search or a product catalogue.
 
-For millions of vectors an **approximate** index (HNSW) is the usual answer: it gives up a little accuracy for much more speed. KivaDB 1.1.0 does not have one yet; see the [roadmap](ROADMAP.md).
+For millions of vectors an **approximate** index (HNSW) is the usual answer: it gives up a little accuracy for much more speed. KivaDB 1.2.0 does not have one yet; see the [roadmap](ROADMAP.md).
 
 ### 12.6 From programs
 
@@ -1728,7 +1728,7 @@ Every user has one role:
 | `editor` | Read and write data, transactions, run scripts |
 | `viewer` | Read only: `get`, `has`, `typeof`, `print`, listings, queries |
 
-Administration commands (`compact`, `compress`, `config`, `create`, `drop`, `grant`, `revoke`, `users`, `audit`, `replica`, `del all keys`, `shutdown`, ...) need `admin`.
+Administration commands (`compress`, `config`, `create`, `drop`, `grant`, `revoke`, `users`, `audit`, `replica`, `del all keys`, `shutdown`, ...) need `admin`. One exception: an `editor` may run `compact` in their own personal workspace ([16.4](#164-workspaces-and-grants)).
 
 ### 16.3 Managing accounts
 
@@ -1763,7 +1763,7 @@ Anyone may change their own password; only an admin may change someone else's pa
 ### 16.4 Workspaces and grants
 
 * An **admin** can use every workspace.
-* Every other user has a **personal workspace**, named `u_<user name>`, created automatically. That is where they arrive after logging in, and nobody else (except admins) can enter it.
+* Every other user has a **personal workspace**, named `u_<user name>`, created automatically. That is where they arrive after logging in, and nobody else (except admins) can enter it. It exists so that a new user has somewhere to work before being granted anything, and so that each person's data stays apart from the others'. In it, an `editor` may also reclaim disk space with `compact`; elsewhere, even with *write* access, compacting stays an administrator's task, because it rewrites a whole shared file.
 * To let a user into another workspace, an admin **grants** access:
 
 ```text
@@ -1839,7 +1839,7 @@ Error: refusing to listen on 0.0.0.0 without authentication.
 
 Two more protections are always active: an account with an empty password can only log in from the local machine, and the REST API limits the number of requests per client ([21.7](#217-cors-and-rate-limiting)).
 
-**Encryption.** KivaDB 1.1.0 does not encrypt its connections. On a network you do not fully control, put it behind something that does: a TLS-terminating reverse proxy (nginx, Caddy) for the REST API, a VPN or an SSH tunnel for port 2911.
+**Encryption.** KivaDB 1.2.0 does not encrypt its connections. On a network you do not fully control, put it behind something that does: a TLS-terminating reverse proxy (nginx, Caddy) for the REST API, a VPN or an SSH tunnel for port 2911.
 
 ### 16.8 How passwords are stored
 
@@ -1945,7 +1945,7 @@ kiva> compact
 Database storage compacted successfully (1.12 KB -> 639 bytes, 11 records).
 ```
 
-Compaction does not stop the database: reads and writes continue while the bulk of the copy happens.
+Compaction does not stop the database: reads and writes continue while the bulk of the copy happens. `compact` needs the admin role, except in one's own personal workspace, where an `editor` may run it too.
 
 **Automatic compaction** does this for you in the background when fragmentation reaches a threshold (30 % by default) on a file of at least 64 KB:
 
@@ -2278,7 +2278,7 @@ KivaDB decides which language a connection speaks from its very first byte: `0x0
 
 | Command | Code | Payload | Reply payload |
 | :--- | :--- | :--- | :--- |
-| HELLO | 1 | empty | Three lines: `KivaDB 1.1.0`, `auth=required` or `auth=none`, `user=<name>` |
+| HELLO | 1 | empty | Three lines: `KivaDB 1.2.0`, `auth=required` or `auth=none`, `user=<name>` |
 | AUTH | 2 | user, a zero byte, password | A welcome text |
 | EXEC | 3 | A command line, as in the shell | Output lines separated by `\n`; each line starts with `+` (normal) or `-` (error) |
 | PING | 4 | empty | `PONG` |
@@ -2469,7 +2469,7 @@ curl -X POST http://localhost:8080/v1/exec -d '{"command": "count where user:*.a
 | `GET /ws` | WebSocket change notifications ([Chapter 22](#chapter-22--change-notifications)) |
 | `GET /v1/stream` | Server-Sent Events change notifications ([22.4](#224-over-server-sent-events)) |
 | `POST /v1/api` | Structured requests, including `query` and `similar` ([20.4](#204-structured-requests-for-tools)) |
-| `GET /health` | `{"version":"1.1.0","status":"ok","timestamp":...}` - no login needed |
+| `GET /health` | `{"version":"1.2.0","status":"ok","timestamp":...}` - no login needed |
 | `GET /docs` | An interactive page listing the routes, with a "Try it" button for each |
 | `GET /openapi.json` | The same description in OpenAPI format |
 
@@ -2786,7 +2786,7 @@ Add KivaDB as a dependency of your project, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.1.0" }
+kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.2.0" }
 ```
 
 Then use its client:
@@ -2966,7 +2966,7 @@ kiva> replica promote
 This node is now a master.
 ```
 
-Then point your applications, and the other replicas, to it. This step is manual: KivaDB 1.1.0 does not elect a new master by itself.
+Then point your applications, and the other replicas, to it. This step is manual: KivaDB 1.2.0 does not elect a new master by itself.
 
 ---
 
@@ -3321,7 +3321,7 @@ KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
 
 ```text
   Security     : administrator password set, authentication turned on
-KivaDB 1.1.0 server
+KivaDB 1.2.0 server
   Home         : /var/lib/kivadb
   TCP protocol : 0.0.0.0:2911 (binary and plain text)
   REST API     : http://0.0.0.0:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
@@ -3336,7 +3336,7 @@ Press Ctrl+C to stop.
 This is the usual case at a hosting provider. The steps below download KivaDB, create a dedicated system user, install the executable and let systemd start KivaDB at boot and restart it if it stops.
 
 ```bash
-curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.1.0/kivadb_linux_x64.tar.gz
+curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.2.0/kivadb_linux_x64.tar.gz
 tar -xzf kivadb_linux_x64.tar.gz
 sudo useradd --system --home-dir /var/lib/kivadb --create-home kivadb
 sudo install -m 755 kivadb /usr/local/bin/kivadb
@@ -3470,13 +3470,13 @@ The official image is `fomadev0/kiva-db` on Docker Hub. It holds only the `kivad
 
 | Tag | Meaning |
 | :--- | :--- |
-| `fomadev0/kiva-db:1.1.0` | Exactly version 1.1.0. Use this on servers: it never changes under you |
+| `fomadev0/kiva-db:1.2.0` | Exactly version 1.2.0. Use this on servers: it never changes under you |
 | `fomadev0/kiva-db:latest` | The most recent version |
 
 **Run it:**
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.1.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.2.0
 ```
 
 | Part | Meaning |
@@ -3537,7 +3537,7 @@ docker rm -f kivadb
 
 then the `docker run` line again with the new tag. With Compose: change the tag in the file, then `docker compose up -d`.
 
-**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.1.0` in the commands above:
+**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.2.0` in the commands above:
 
 ```bash
 docker build -t kivadb:local .
@@ -3550,7 +3550,7 @@ docker build -t kivadb:local .
 | `kiva` has a long, unique password | It is the administrator of everything |
 | One account per person or application, with the smallest role that works | A leaked `viewer` password cannot destroy data |
 | Only the needed ports are open, ideally only to known addresses | Fewer doors |
-| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.1.0 does not encrypt connections ([16.7](#167-opening-kivadb-to-the-network)) |
+| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.2.0 does not encrypt connections ([16.7](#167-opening-kivadb-to-the-network)) |
 | Backups exist and were restored once as a test | A backup that was never restored is a hope, not a backup |
 | `audit failed-logins` and the metrics are looked at | To notice password guessing early |
 
@@ -3611,6 +3611,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `permission denied: authentication required. Use: auth <user> <password>` | Log in first |
 | `permission denied: invalid username or password` | Wrong credentials |
 | `permission denied: this command requires the admin role` | Ask an administrator |
+| `permission denied: this command requires the admin role, except in your personal workspace 'u_x'` | `compact` works in your own workspace only: `workspace switch u_x` first, or ask an administrator |
 | `permission denied: the viewer role is read-only` | Your role cannot write |
 | `permission denied: you only have read access to workspace 'x'` | You were granted *read* only |
 | `permission denied: no access to workspace 'x'` | An admin must `grant` you access |
@@ -3708,7 +3709,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `stats` | Dashboard |
-| `compact` | Reclaim disk space (admin) |
+| `compact` | Reclaim disk space (admin, or an editor in their personal workspace) |
 | `autocompact on\|off\|status\|threshold <N>` | Automatic compaction |
 | `check` / `check repair` | Verify / repair |
 | `hint info` | State of the index snapshot |
@@ -3779,9 +3780,9 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 ## Chapter 32 — Limits and scope
 
-KivaDB 1.1.0 is a single-node database with replicas. Knowing what it does not do is as useful as knowing what it does.
+KivaDB 1.2.0 is a single-node database with replicas. Knowing what it does not do is as useful as knowing what it does.
 
-**Not included in 1.1.0**
+**Not included in 1.2.0**
 
 * **Encrypted connections.** No built-in TLS for port 2911 or for the REST API. Use a reverse proxy, a VPN or an SSH tunnel.
 * **Automatic failover.** When a master dies, a person (or your own tooling) promotes a replica.

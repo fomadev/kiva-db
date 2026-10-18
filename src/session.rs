@@ -42,6 +42,9 @@ pub enum Need {
     None,
     Read,
     Write,
+    /// An administrator anywhere, or a user who can write, in their own
+    /// personal workspace (maintenance of one's own data).
+    Owner,
     Admin,
 }
 
@@ -184,6 +187,18 @@ impl Session {
         match need {
             Need::Admin if u.role != Role::Admin => {
                 Err(KivaError::Denied("this command requires the admin role".into()))
+            }
+            Need::Owner if u.role != Role::Admin => {
+                let home = crate::auth::personal_workspace(&u.name);
+                if u.role == Role::Viewer {
+                    Err(KivaError::Denied("the viewer role is read-only".into()))
+                } else if self.ws != home {
+                    Err(KivaError::Denied(format!(
+                        "this command requires the admin role, except in your personal workspace '{home}'"
+                    )))
+                } else {
+                    Ok(())
+                }
             }
             Need::Write if u.role == Role::Viewer => Err(KivaError::Denied("the viewer role is read-only".into())),
             Need::Write if self.ws_priv < Priv::Write => {

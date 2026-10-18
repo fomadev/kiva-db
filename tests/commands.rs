@@ -327,7 +327,8 @@ fn users_roles_and_workspaces() {
     assert_eq!(ok(&mut s, "get shared"), "shared: (nil)");
     ok(&mut s, r#"set mine "private""#);
     assert!(fails(&mut s, "workspace switch default").contains("no access"));
-    assert!(fails(&mut s, "compact").contains("requires the admin role"));
+    // Maintenance of one's own workspace is allowed; of the server, not.
+    assert!(ok(&mut s, "compact").contains("compacted successfully"));
     assert!(fails(&mut s, "del all keys").contains("requires the admin role"));
     assert!(fails(&mut s, r#"create user "x" identified by "y""#).contains("requires the admin role"));
     assert!(fails(&mut s, "config list").contains("requires the admin role"));
@@ -343,6 +344,8 @@ fn users_roles_and_workspaces() {
     ok(&mut admin, r#"grant write on all to "fordi""#);
     ok(&mut s, "workspace switch default");
     ok(&mut s, "set yes 1");
+    // Writing somewhere does not make it one's own: compacting it stays an admin task.
+    assert!(fails(&mut s, "compact").contains("except in your personal workspace 'u_fordi'"));
     ok(&mut admin, r#"revoke write on all from "fordi""#);
     ok(&mut s, "workspace switch default");
     assert!(fails(&mut s, "set again 1").contains("only have read access"));
@@ -352,6 +355,7 @@ fn users_roles_and_workspaces() {
     ok(&mut g, "auth guest g");
     assert!(fails(&mut g, "set k 1").contains("viewer role is read-only"));
     assert!(fails(&mut g, "eval 'return 1'").contains("viewer role is read-only"));
+    assert!(fails(&mut g, "compact").contains("viewer role is read-only"));
     ok(&mut admin, r#"modify user "guest" role "editor""#);
     ok(&mut g, "auth guest g");
     ok(&mut g, "set k 1");
@@ -377,6 +381,7 @@ fn users_roles_and_workspaces() {
     let audit = ok(&mut admin, "audit last 100");
     assert!(audit.contains("create user 'fordi' identified by '***'"));
     assert!(!audit.contains("s3cret") && !audit.contains("n3w") && !audit.contains("rootpw"));
+    assert!(audit.contains("user=fordi action=\"compact\" status=SUCCESS"));
     assert!(audit.contains("user=fordi action=\"compact\" status=FAILURE"));
     assert!(ok(&mut admin, "audit failed-logins").contains("login (wrong password)"));
     assert!(ok(&mut admin, r#"audit since "2020-01-01""#).lines().count() > 5);

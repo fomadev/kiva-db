@@ -122,7 +122,7 @@ impl User {
         if self.role == Role::Admin {
             "default".to_string()
         } else {
-            format!("u_{}", self.name)
+            personal_workspace(&self.name)
         }
     }
 
@@ -231,4 +231,9 @@ pub fn ensure_admin(sys: &Engine) -> Result<()> {
         None => save_user(sys, &User::new(DEFAULT_ADMIN, "", Role::Admin))?,
     }
     Ok(())
+}
+
+/// Name of the personal workspace of a user who is not an administrator.
+pub fn personal_workspace(user: &str) -> String {
+    format!("u_{user}")
 }
