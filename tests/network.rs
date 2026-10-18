@@ -600,7 +600,10 @@ fn structured_api() {
     );
 
     let stats = db.api(&json!({"op": "stats"})).unwrap();
-    assert_eq!((&stats["keys"], &stats["role"], &stats["version"]), (&json!(4), &json!("master"), &json!(env!("CARGO_PKG_VERSION"))));
+    assert_eq!(
+        (&stats["keys"], &stats["role"], &stats["version"]),
+        (&json!(4), &json!("master"), &json!(env!("CARGO_PKG_VERSION")))
+    );
     let users = db.api(&json!({"op": "users"})).unwrap();
     let names: Vec<&str> = users["users"].as_array().unwrap().iter().map(|u| u["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["eve", "kiva"]);

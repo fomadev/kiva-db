@@ -6,7 +6,7 @@ use kivadb::config::default_home;
 use kivadb::instance::{Instance, Options, VERSION};
 use kivadb::shell::{self, ShellOpts};
 use kivadb::util::is_loopback;
-use kivadb::{auth, http, repl, server, KivaError};
+use kivadb::{auth, http, repl, server, update, KivaError};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +20,7 @@ USAGE:
   kivadb start [OPTIONS]      Start the database in the background
   kivadb stop                 Stop the running database
   kivadb status               Tell whether the database is running
+  kivadb update [--check]     Install the latest release (--check: only tell)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
@@ -54,6 +55,7 @@ struct Args {
     home: Option<PathBuf>,
     connect: Option<String>,
     no_listen: bool,
+    check_only: bool,
     port: Option<u16>,
     bind: Option<String>,
     http_port: Option<u16>,
@@ -84,6 +86,8 @@ fn parse_args() -> Args {
             "start" => args.action = Some("start"),
             "stop" => args.action = Some("stop"),
             "status" => args.action = Some("status"),
+            "update" => args.action = Some("update"),
+            "--check" => args.check_only = true,
             "shell" => {}
             "-h" | "--help" | "help" => {
                 print!("{USAGE}");
@@ -429,18 +433,32 @@ fn status(home: &Path) -> i32 {
     }
 }
 
-fn main() {
-    let mut args = parse_args();
-    // The interactive history lives next to the data (or in the default home for --connect).
-    args.shell.history = Some(args.home.clone().unwrap_or_else(default_home).join("history.txt"));
-    if let Some(addr) = &args.connect {
-        exit(shell::run_client(addr, args.shell.clone()));
+/// Ends the process, after telling a person at a terminal about a new release.
+fn finish(notice: &Option<update::Notice>, code: i32) -> ! {
+    if let Some(n) = notice {
+        n.finish();
     }
+    exit(code);
+}
+
+fn main() {
+    update::clean_previous();
+    let mut args = parse_args();
     let home = args.home.clone().unwrap_or_else(default_home);
+    // The interactive history lives next to the data (or in the default home for --connect).
+    args.shell.history = Some(home.join("history.txt"));
+    if args.action == Some("update") {
+        exit(update::run(args.check_only, &home));
+    }
+    // A server runs unattended: nobody would read the notice.
+    let notice = if args.serve { None } else { update::Notice::begin(&home) };
+    if let Some(addr) = &args.connect {
+        finish(&notice, shell::run_client(addr, args.shell.clone()));
+    }
     match args.action {
-        Some("start") => exit(start(&home, &args)),
-        Some("stop") => exit(stop(&home, &args)),
-        Some("status") => exit(status(&home)),
+        Some("start") => finish(&notice, start(&home, &args)),
+        Some("stop") => finish(&notice, stop(&home, &args)),
+        Some("status") => finish(&notice, status(&home)),
         _ => {}
     }
     let inst = match Instance::open(&home, args.opts.clone()) {
@@ -449,7 +467,7 @@ fn main() {
             // KivaDB is already running on this home: join it instead of
             // fighting over the files, so every terminal sees the same data.
             match running_port(&home) {
-                Some(p) => exit(shell::run_client(&format!("127.0.0.1:{p}"), args.shell.clone())),
+                Some(p) => finish(&notice, shell::run_client(&format!("127.0.0.1:{p}"), args.shell.clone())),
                 None => fail(&format!(
                     "{} is in use by another KivaDB process that does not accept connections.",
                     home.display()
@@ -489,5 +507,5 @@ fn main() {
     }
     let code = shell::run_embedded(inst.clone(), args.shell.clone());
     inst.shutdown();
-    exit(code);
+    finish(&notice, code);
 }

@@ -33,6 +33,7 @@ pub mod script;
 pub mod server;
 pub mod session;
 pub mod shell;
+pub mod update;
 pub mod util;
 pub mod value;
 pub mod vector;
