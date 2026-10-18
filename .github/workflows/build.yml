@@ -78,6 +78,14 @@ jobs:
           cd drivers/node
           KIVADB_BIN="$GITHUB_WORKSPACE/target/debug/kivadb" npm test
 
+      - name: Test the installation script
+        # Installs the latest published release, as users do with curl | bash.
+        if: matrix.os-name != 'windows'
+        shell: bash
+        run: |
+          KIVADB_INSTALL_DIR="$RUNNER_TEMP/kivadb-bin" bash install.sh
+          "$RUNNER_TEMP/kivadb-bin/kivadb" --version
+
       - name: Compile KivaDB
         run: cargo build --release
 
