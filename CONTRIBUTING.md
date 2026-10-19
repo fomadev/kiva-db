@@ -62,8 +62,8 @@ Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux
 2. Commit, push, and wait for the three systems to be green.
 3. Tag the version and push the tag:
    ```bash
-   git tag v1.2.0
-   git push origin v1.2.0
+   git tag v1.3.0
+   git push origin v1.3.0
    ```
 The workflow then publishes a GitHub release with the Windows, Linux and macOS executables and their SHA-256 checksums, and pushes the Docker image `fomadev0/kiva-db:<version>` and `:latest`. Docker Hub access comes from the repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token, never a password).
 

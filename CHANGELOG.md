@@ -2,6 +2,24 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## 1.3.0 - 2026-10-18
+
+Redis compatibility, made complete enough to replace Redis where it serves as short-lived memory (sign-up codes, locks, rate limits, sessions). Checked with the current ioredis, node-redis, rate-limiter-flexible and rate-limit-redis, now part of the CI (`tests/redis-clients`).
+
+### Added
+
+* Lua scripts through Redis: `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD | EXISTS | FLUSH`, with `redis.call`, `redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`. Scripts run in the Lua sandbox, all or nothing.
+* RESP3: `HELLO 3` is accepted (node-redis 5 and later use it), with maps and nulls.
+* Numbered databases: `SELECT 1` to `15` (or `/n` in a URL) use the workspaces `db1` to `db15`; database 0 is the user's own workspace.
+* `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` accept `NX`, `XX`, `GT` and `LT`.
+* `GETEX`, `EXPIRETIME`, `PEXPIRETIME`, `TIME`.
+* DOCUMENTATION 23.5 (Lua scripts) and 23.6 (replacing Redis in an application).
+
+### Fixed
+
+* Commands from several Redis connections could interleave: two clients running `INCR` on the same key at the same moment could lose a step, which weakens a rate limiter. Redis commands now run one at a time, as in Redis.
+* `EXPIRE ... NX` (and the other options) were ignored, so a rate-limit window restarted at every attempt.
+
 ## 1.2.0 - 2026-10-18
 
 ### Changed

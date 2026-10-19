@@ -44,3 +44,5 @@ data/
 
 # --- Tests ---
 tests/test_runner
+# --- Node.js ---
+node_modules/

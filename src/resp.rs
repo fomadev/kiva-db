@@ -2,7 +2,7 @@
 // Licensed under FomaDev Public License.
 // See the LICENSE file in the project root for full license information.
 
-//! Redis-compatible listener (RESP2 protocol, port 6379 by default).
+//! Redis-compatible listener (RESP2 and RESP3 protocols, port 6379 by default).
 //!
 //! Existing Redis clients and libraries can use KivaDB without code changes
 //! for the common commands: strings and counters, expiry, hashes (stored as
@@ -17,22 +17,83 @@
 //! | string | string (UTF-8) or bytes; INCR -> number  |
 //! | hash   | object, field values as strings          |
 //! | list   | array of strings                         |
+//!
+//! Like Redis, the connections of an instance execute one command at a time,
+//! so read-modify-write commands (INCR, HINCRBY, LPUSH...), MULTI/EXEC and
+//! Lua scripts (EVAL) are atomic with respect to each other. Numbered
+//! databases map to workspaces: 0 is the user's own, `SELECT n` (1 to 15)
+//! uses the workspace `db<n>`.
 
+use crate::auth::Role;
 use crate::engine::BatchOp;
 use crate::error::{KivaError, Result};
 use crate::instance::{Instance, VERSION};
 use crate::session::{Meta, Need, Session};
 use crate::util::{glob_match, now_secs};
 use crate::value::{fmt_f64, Type, Value};
+use mlua::{Lua, MultiValue, Table, Value as LVal};
 use serde_json::{Map, Value as Json};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ARGS: usize = 1024 * 1024;
 const MAX_BULK: usize = 512 * 1024 * 1024;
+
+/// Numbered databases accepted by SELECT, as in a default Redis.
+const DATABASES: i64 = 16;
+
+/// Commands a Lua script may not run through `redis.call`.
+const NOT_IN_SCRIPTS: &[&str] = &[
+    "AUTH",
+    "HELLO",
+    "QUIT",
+    "MULTI",
+    "EXEC",
+    "DISCARD",
+    "WATCH",
+    "UNWATCH",
+    "EVAL",
+    "EVALSHA",
+    "EVAL_RO",
+    "EVALSHA_RO",
+    "SCRIPT",
+    "SELECT",
+    "SUBSCRIBE",
+    "PSUBSCRIBE",
+    "PUBLISH",
+];
+
+/// State shared by the Redis connections of one instance.
+#[derive(Default)]
+pub struct Shared {
+    /// Held while a command runs: Redis executes one command at a time, and
+    /// clients count on it (INCR from two connections never loses a step).
+    turn: Mutex<()>,
+    /// Lua scripts by SHA-1, for EVALSHA.
+    scripts: Mutex<HashMap<String, String>>,
+}
+
+impl Shared {
+    fn script(&self, sha: &str) -> Option<String> {
+        self.scripts.lock().unwrap_or_else(|e| e.into_inner()).get(&sha.to_ascii_lowercase()).cloned()
+    }
+
+    fn remember(&self, source: &str) -> String {
+        let sha = sha1_hex(source.as_bytes());
+        self.scripts.lock().unwrap_or_else(|e| e.into_inner()).insert(sha.clone(), source.to_string());
+        sha
+    }
+}
+
+fn sha1_hex(bytes: &[u8]) -> String {
+    use sha1::{Digest, Sha1};
+    Sha1::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
@@ -41,6 +102,8 @@ pub enum Reply {
     Int(i64),
     Bulk(Option<Vec<u8>>),
     Array(Option<Vec<Reply>>),
+    /// Field-value pairs: a map in RESP3, a flat array in RESP2.
+    Map(Vec<(Reply, Reply)>),
 }
 
 impl Reply {
@@ -68,8 +131,24 @@ impl Reply {
         Reply::Array(Some(items))
     }
 
-    pub fn encode(&self, out: &mut Vec<u8>) {
+    /// Writes the reply in RESP2, or in RESP3 when `resp3` (after `HELLO 3`).
+    pub fn encode(&self, out: &mut Vec<u8>, resp3: bool) {
         match self {
+            Reply::Bulk(None) | Reply::Array(None) if resp3 => out.extend_from_slice(b"_\r\n"),
+            Reply::Map(pairs) if resp3 => {
+                out.extend_from_slice(format!("%{}\r\n", pairs.len()).as_bytes());
+                for (k, v) in pairs {
+                    k.encode(out, resp3);
+                    v.encode(out, resp3);
+                }
+            }
+            Reply::Map(pairs) => {
+                out.extend_from_slice(format!("*{}\r\n", pairs.len() * 2).as_bytes());
+                for (k, v) in pairs {
+                    k.encode(out, resp3);
+                    v.encode(out, resp3);
+                }
+            }
             Reply::Simple(s) => {
                 out.push(b'+');
                 out.extend_from_slice(s.replace(['\r', '\n'], " ").as_bytes());
@@ -91,7 +170,7 @@ impl Reply {
             Reply::Array(Some(items)) => {
                 out.extend_from_slice(format!("*{}\r\n", items.len()).as_bytes());
                 for i in items {
-                    i.encode(out);
+                    i.encode(out, resp3);
                 }
             }
         }
@@ -209,7 +288,7 @@ fn serve(inst: &Arc<Instance>, stream: TcpStream) {
     let Ok(write_half) = stream.try_clone() else { return };
     let mut writer = io::BufWriter::new(write_half);
     let mut reader = BufReader::new(stream);
-    let mut conn = Conn { sess: Session::new(inst.clone(), local, None), queued: None };
+    let mut conn = Conn::new(Session::new(inst.clone(), local, None));
     let mut out = Vec::new();
     loop {
         let args = match read_command(&mut reader) {
@@ -223,7 +302,7 @@ fn serve(inst: &Arc<Instance>, stream: TcpStream) {
         };
         let quit = args[0].eq_ignore_ascii_case(b"QUIT");
         out.clear();
-        conn.handle(&args).encode(&mut out);
+        conn.handle(&args).encode(&mut out, conn.resp3);
         if writer.write_all(&out).is_err() {
             break;
         }
@@ -242,6 +321,10 @@ pub struct Conn {
     pub sess: Session,
     /// Commands collected between MULTI and EXEC.
     queued: Option<Vec<Vec<Vec<u8>>>>,
+    /// The workspace of database 0: where the user arrived. Known once SELECT is used.
+    home: Option<String>,
+    /// Whether the client switched to RESP3 with `HELLO 3`.
+    pub resp3: bool,
 }
 
 fn text(arg: &[u8]) -> std::result::Result<String, Reply> {
@@ -311,7 +394,7 @@ fn arity(args: &[Vec<u8>], min: usize) -> std::result::Result<(), Reply> {
 
 impl Conn {
     pub fn new(sess: Session) -> Conn {
-        Conn { sess, queued: None }
+        Conn { sess, queued: None, home: None, resp3: false }
     }
 
     pub fn handle(&mut self, args: &[Vec<u8>]) -> Reply {
@@ -326,6 +409,8 @@ impl Conn {
         if self.sess.user.is_none() && !matches!(name.as_str(), "AUTH" | "HELLO" | "PING" | "QUIT" | "ECHO") {
             return Reply::Error("NOAUTH Authentication required.".into());
         }
+        let inst = self.sess.inst.clone();
+        let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
         self.run(&name, args).unwrap_or_else(|e| e)
     }
 
@@ -364,6 +449,8 @@ impl Conn {
                     (crate::auth::DEFAULT_ADMIN.to_string(), text(&args[1])?)
                 };
                 self.login(&user, &pass)?;
+                // The login lands in the user's own workspace: that is database 0 again.
+                self.home = None;
                 Ok(Reply::ok())
             }
             "HELLO" => self.hello(args),
@@ -377,12 +464,70 @@ impl Conn {
             }
             "SELECT" => {
                 arity(args, 2)?;
-                if int(&args[1])? == 0 {
-                    Ok(Reply::ok())
+                let n = int(&args[1])?;
+                if !(0..DATABASES).contains(&n) {
+                    return Err(Reply::err("DB index is out of range"));
+                }
+                self.select(n)?;
+                Ok(Reply::ok())
+            }
+            "TIME" => {
+                let us = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
+                Ok(Reply::array(vec![
+                    Reply::bulk((us / 1_000_000).to_string()),
+                    Reply::bulk((us % 1_000_000).to_string()),
+                ]))
+            }
+            "EVAL" | "EVAL_RO" | "EVALSHA" | "EVALSHA_RO" => {
+                arity(args, 3)?;
+                self.sess.check(Need::Read)?;
+                let source = if name.starts_with("EVALSHA") {
+                    let sha = text(&args[1])?;
+                    self.sess
+                        .inst
+                        .resp
+                        .script(&sha)
+                        .ok_or_else(|| Reply::Error("NOSCRIPT No matching script. Please use EVAL.".into()))?
                 } else {
-                    Err(Reply::err(
-                        "KivaDB uses named workspaces; only database 0 (your current workspace) exists here",
-                    ))
+                    let source = text(&args[1])?;
+                    self.sess.inst.resp.remember(&source);
+                    source
+                };
+                let numkeys = int(&args[2])?;
+                if numkeys < 0 {
+                    return Err(Reply::err("Number of keys can't be negative"));
+                }
+                if numkeys as usize > args.len() - 3 {
+                    return Err(Reply::err("Number of keys can't be greater than number of args"));
+                }
+                let split = 3 + numkeys as usize;
+                self.eval(&source, &args[3..split], &args[split..])
+            }
+            "SCRIPT" => {
+                arity(args, 2)?;
+                match String::from_utf8_lossy(&args[1]).to_ascii_uppercase().as_str() {
+                    "LOAD" => {
+                        arity(args, 3)?;
+                        let source = text(&args[2])?;
+                        Lua::new().load(&source).into_function().map_err(|e| {
+                            Reply::err(format!("Error compiling script: {}", first_line(&e.to_string())))
+                        })?;
+                        Ok(Reply::bulk(self.sess.inst.resp.remember(&source)))
+                    }
+                    "EXISTS" => {
+                        let mut found = Vec::new();
+                        for sha in &args[2..] {
+                            found.push(Reply::Int(self.sess.inst.resp.script(&text(sha)?).is_some() as i64));
+                        }
+                        Ok(Reply::array(found))
+                    }
+                    "FLUSH" => {
+                        self.sess.inst.resp.scripts.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                        Ok(Reply::ok())
+                    }
+                    other => {
+                        Err(Reply::err(format!("unknown subcommand '{}' for 'script'", other.to_ascii_lowercase())))
+                    }
                 }
             }
             "COMMAND" => Ok(match args.get(1).map(|a| String::from_utf8_lossy(a).to_ascii_uppercase()) {
@@ -610,6 +755,19 @@ impl Conn {
                 arity(args, 3)?;
                 let k = key(&args[1])?;
                 let n = int(&args[2])?;
+                let (mut nx, mut xx, mut gt, mut lt) = (false, false, false, false);
+                for opt in &args[3..] {
+                    match String::from_utf8_lossy(opt).to_ascii_uppercase().as_str() {
+                        "NX" => nx = true,
+                        "XX" => xx = true,
+                        "GT" => gt = true,
+                        "LT" => lt = true,
+                        other => return Err(Reply::err(format!("Unsupported option {other}"))),
+                    }
+                }
+                if (nx && (xx || gt || lt)) || (gt && lt) {
+                    return Err(Reply::err("NX and XX, GT or LT options at the same time are not compatible"));
+                }
                 let exp = match name {
                     "EXPIRE" => now_secs().saturating_add(n),
                     "PEXPIRE" => (now_ms().saturating_add(n) + 999) / 1000,
@@ -617,6 +775,16 @@ impl Conn {
                     _ => (n + 999) / 1000,
                 };
                 let Some((v, m)) = self.get(&k)? else { return Ok(Reply::Int(0)) };
+                // 0 means "no expiry", which counts as infinitely far for GT and LT.
+                let cur = m.expires_at;
+                let allowed = if nx {
+                    cur == 0
+                } else {
+                    (!xx || cur != 0) && (!gt || (cur != 0 && exp > cur)) && (!lt || cur == 0 || exp < cur)
+                };
+                if !allowed {
+                    return Ok(Reply::Int(0));
+                }
                 if exp <= now_secs() {
                     self.sess.kv_del(&k)?;
                 } else {
@@ -634,6 +802,44 @@ impl Conn {
                     }
                     _ => Ok(Reply::Int(0)),
                 }
+            }
+            "EXPIRETIME" | "PEXPIRETIME" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                Ok(Reply::Int(match self.get(&k)? {
+                    None => -2,
+                    Some((_, m)) if m.expires_at == 0 => -1,
+                    Some((_, m)) if name == "EXPIRETIME" => m.expires_at,
+                    Some((_, m)) => m.expires_at * 1000,
+                }))
+            }
+            "GETEX" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                let Some((v, m)) = self.get(&k)? else { return Ok(Reply::nil()) };
+                let bytes = bytes_of(&v).ok_or_else(Reply::wrong_type)?;
+                let exp = match args.get(2).map(|o| String::from_utf8_lossy(o).to_ascii_uppercase()) {
+                    None => None,
+                    Some(o) if o == "PERSIST" && args.len() == 3 => Some(0),
+                    Some(o) if args.len() == 4 => {
+                        let n = int(&args[3])?;
+                        if n <= 0 {
+                            return Err(Reply::err("invalid expire time in 'getex' command"));
+                        }
+                        Some(match o.as_str() {
+                            "EX" => now_secs() + n,
+                            "PX" => (now_ms() + n + 999) / 1000,
+                            "EXAT" => n,
+                            "PXAT" => (n + 999) / 1000,
+                            _ => return Err(Reply::err("syntax error")),
+                        })
+                    }
+                    _ => return Err(Reply::err("syntax error")),
+                };
+                if let Some(e) = exp.filter(|e| *e != m.expires_at) {
+                    self.sess.kv_put(&k, v, e, m.msgpack)?;
+                }
+                Ok(Reply::bulk(bytes))
             }
             "TTL" | "PTTL" => {
                 arity(args, 2)?;
@@ -720,8 +926,8 @@ impl Conn {
                     "HLEN" => Reply::Int(obj.len() as i64),
                     "HKEYS" => Reply::array(obj.keys().map(|f| Reply::bulk(f.clone())).collect()),
                     "HVALS" => Reply::array(obj.values().map(|v| Reply::bulk(json_text(v))).collect()),
-                    _ => Reply::array(
-                        obj.iter().flat_map(|(f, v)| [Reply::bulk(f.clone()), Reply::bulk(json_text(v))]).collect(),
+                    _ => Reply::Map(
+                        obj.iter().map(|(f, v)| (Reply::bulk(f.clone()), Reply::bulk(json_text(v)))).collect(),
                     ),
                 })
             }
@@ -878,9 +1084,11 @@ impl Conn {
 
     fn hello(&mut self, args: &[Vec<u8>]) -> Res {
         let mut i = 1;
+        let mut proto = if self.resp3 { 3 } else { 2 };
         if let Some(v) = args.get(1) {
-            if int(v)? != 2 {
-                return Err(Reply::Error("NOPROTO this server speaks RESP2 only".into()));
+            proto = int(v)?;
+            if proto != 2 && proto != 3 {
+                return Err(Reply::Error("NOPROTO unsupported protocol version".into()));
             }
             i = 2;
         }
@@ -889,6 +1097,7 @@ impl Conn {
                 "AUTH" if i + 2 < args.len() => {
                     let (u, p) = (text(&args[i + 1])?, text(&args[i + 2])?);
                     self.login(&u, &p)?;
+                    self.home = None;
                     i += 3;
                 }
                 "SETNAME" if i + 1 < args.len() => i += 2,
@@ -898,16 +1107,130 @@ impl Conn {
         if self.sess.user.is_none() {
             return Err(Reply::Error("NOAUTH HELLO must be called with the client already authenticated".into()));
         }
+        self.resp3 = proto == 3;
         let pairs: Vec<(&str, Reply)> = vec![
             ("server", Reply::bulk("kivadb")),
             ("version", Reply::bulk(VERSION)),
-            ("proto", Reply::Int(2)),
+            ("proto", Reply::Int(proto)),
             ("id", Reply::Int(self.sess.id as i64)),
             ("mode", Reply::bulk("standalone")),
             ("role", Reply::bulk(if self.sess.inst.repl.is_replica() { "replica" } else { "master" })),
             ("modules", Reply::array(Vec::new())),
         ];
-        Ok(Reply::array(pairs.into_iter().flat_map(|(k, v)| [Reply::bulk(k), v]).collect()))
+        Ok(Reply::Map(pairs.into_iter().map(|(k, v)| (Reply::bulk(k), v)).collect()))
+    }
+
+    /// `SELECT n`: database 0 is the workspace the user arrived in, database n
+    /// the workspace `db<n>`, created on first use when the user is an administrator.
+    fn select(&mut self, n: i64) -> std::result::Result<(), Reply> {
+        let arrived = self.sess.ws.clone();
+        let home = self.home.get_or_insert(arrived).clone();
+        let target = if n == 0 { home } else { format!("db{n}") };
+        if target == self.sess.ws {
+            return Ok(());
+        }
+        let (user, admin) = match &self.sess.user {
+            Some(u) => (u.name.clone(), u.role == Role::Admin),
+            None => return Err(Reply::Error("NOAUTH Authentication required.".into())),
+        };
+        if n > 0 && admin {
+            self.sess.inst.ensure_workspace(&target)?;
+        }
+        self.sess.switch_workspace(&target).map_err(|e| match e {
+            KivaError::Denied(_) | KivaError::NotFound(_) => Reply::Error(format!(
+                "NOPERM no access to database {n} (KivaDB workspace '{target}'). An administrator can create it and give access with: workspace create {target}, then grant write on workspace \"{target}\" to \"{user}\""
+            )),
+            other => other.into(),
+        })
+    }
+
+    /// Runs a Lua script, all or nothing: its writes are committed together
+    /// when it ends without error, and discarded otherwise.
+    fn eval(&mut self, source: &str, keys: &[Vec<u8>], argv: &[Vec<u8>]) -> Res {
+        let lua = crate::script::sandbox(&self.sess, None)?;
+        // A read-only user (or replica) runs without a transaction: any write it
+        // attempts is refused on its own.
+        let implicit = self.sess.txn.is_none() && self.sess.writable().is_ok();
+        if implicit {
+            self.sess.begin()?;
+        }
+        let result = self.run_script(&lua, source, keys, argv);
+        lua.remove_hook();
+        if implicit {
+            match &result {
+                Ok(_) => self.sess.commit().map(|_| ())?,
+                Err(_) => {
+                    self.sess.rollback();
+                }
+            }
+        }
+        result
+    }
+
+    fn run_script(&mut self, lua: &Lua, source: &str, keys: &[Vec<u8>], argv: &[Vec<u8>]) -> Res {
+        let cell = RefCell::new(&mut *self);
+        let out = lua.scope(|scope| {
+            let globals = lua.globals();
+            let sequence = |items: &[Vec<u8>]| -> mlua::Result<Table> {
+                let t = lua.create_table()?;
+                for (i, a) in items.iter().enumerate() {
+                    t.raw_set(i + 1, lua.create_string(a)?)?;
+                }
+                Ok(t)
+            };
+            globals.set("KEYS", sequence(keys)?)?;
+            globals.set("ARGV", sequence(argv)?)?;
+
+            let redis = lua.create_table()?;
+            for (fname, raise) in [("call", true), ("pcall", false)] {
+                let cell = &cell;
+                let f = scope.create_function(move |lua, values: MultiValue| {
+                    let args = values.iter().map(lua_arg).collect::<mlua::Result<Vec<_>>>()?;
+                    let Some(first) = args.first() else {
+                        return Err(mlua::Error::RuntimeError(
+                            "ERR Please specify at least one argument for this redis lib call".into(),
+                        ));
+                    };
+                    let name = String::from_utf8_lossy(first).to_ascii_uppercase();
+                    let reply = if NOT_IN_SCRIPTS.contains(&name.as_str()) {
+                        Reply::err("This Redis command is not allowed from script")
+                    } else {
+                        cell.borrow_mut().run(&name, &args).unwrap_or_else(|e| e)
+                    };
+                    match reply {
+                        Reply::Error(e) if raise => Err(mlua::Error::RuntimeError(e)),
+                        other => reply_to_lua(lua, &other),
+                    }
+                })?;
+                redis.set(fname, f)?;
+            }
+            redis.set(
+                "error_reply",
+                lua.create_function(|lua, msg: String| {
+                    let t = lua.create_table()?;
+                    t.set("err", msg)?;
+                    Ok(t)
+                })?,
+            )?;
+            redis.set(
+                "status_reply",
+                lua.create_function(|lua, msg: String| {
+                    let t = lua.create_table()?;
+                    t.set("ok", msg)?;
+                    Ok(t)
+                })?,
+            )?;
+            redis.set("sha1hex", lua.create_function(|_, s: mlua::String| Ok(sha1_hex(&s.as_bytes())))?)?;
+            redis.set("log", lua.create_function(|_, _: MultiValue| Ok(()))?)?;
+            for (i, level) in ["LOG_DEBUG", "LOG_VERBOSE", "LOG_NOTICE", "LOG_WARNING"].iter().enumerate() {
+                redis.set(*level, i as i64)?;
+            }
+            globals.set("redis", redis)?;
+
+            let value = lua.load(source).set_name("user_script").eval::<LVal>()?;
+            Ok(lua_to_reply(&value, 0))
+        });
+        out.map_err(script_error)
     }
 
     /// The integer held by `key` (0 when absent) and its expiry.
@@ -1057,5 +1380,102 @@ impl Conn {
         t.push_str(&format!("\r\n# Replication\r\nrole:{role}\r\nconnected_slaves:{}\r\n", inst.repl.replicas().len()));
         t.push_str(&format!("\r\n# Keyspace\r\ndb0:keys={},expires={},avg_ttl=0\r\n", s.keys, s.ttl_keys));
         t.into_bytes()
+    }
+}
+
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or(s)
+}
+
+/// A `redis.call` argument: Lua strings and numbers become Redis strings.
+fn lua_arg(v: &LVal) -> mlua::Result<Vec<u8>> {
+    match v {
+        LVal::String(s) => Ok(s.as_bytes().to_vec()),
+        LVal::Integer(i) => Ok(i.to_string().into_bytes()),
+        LVal::Number(f) => Ok(fmt_f64(*f).into_bytes()),
+        _ => Err(mlua::Error::RuntimeError("ERR Lua redis lib command arguments must be strings or integers".into())),
+    }
+}
+
+/// A command's reply as Redis gives it to Lua.
+fn reply_to_lua(lua: &Lua, r: &Reply) -> mlua::Result<LVal> {
+    Ok(match r {
+        Reply::Int(i) => LVal::Integer(*i),
+        Reply::Bulk(Some(b)) => LVal::String(lua.create_string(b)?),
+        Reply::Bulk(None) | Reply::Array(None) => LVal::Boolean(false),
+        Reply::Simple(s) => {
+            let t = lua.create_table()?;
+            t.set("ok", s.as_str())?;
+            LVal::Table(t)
+        }
+        Reply::Error(e) => {
+            let t = lua.create_table()?;
+            t.set("err", e.as_str())?;
+            LVal::Table(t)
+        }
+        Reply::Array(Some(items)) => {
+            let t = lua.create_table()?;
+            for (i, item) in items.iter().enumerate() {
+                t.raw_set(i + 1, reply_to_lua(lua, item)?)?;
+            }
+            LVal::Table(t)
+        }
+        Reply::Map(pairs) => {
+            let t = lua.create_table()?;
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                t.raw_set(2 * i + 1, reply_to_lua(lua, k)?)?;
+                t.raw_set(2 * i + 2, reply_to_lua(lua, v)?)?;
+            }
+            LVal::Table(t)
+        }
+    })
+}
+
+/// A script's return value as Redis sends it to the client.
+fn lua_to_reply(v: &LVal, depth: usize) -> Reply {
+    match v {
+        LVal::Boolean(true) => Reply::Int(1),
+        LVal::Integer(i) => Reply::Int(*i),
+        // Redis truncates numbers to integers.
+        LVal::Number(f) => Reply::Int(*f as i64),
+        LVal::String(s) => Reply::bulk(s.as_bytes().to_vec()),
+        LVal::Table(t) if depth < 64 => {
+            if let Ok(LVal::String(e)) = t.raw_get::<LVal>("err") {
+                return Reply::Error(e.to_string_lossy().to_string());
+            }
+            if let Ok(LVal::String(s)) = t.raw_get::<LVal>("ok") {
+                return Reply::Simple(s.to_string_lossy().to_string());
+            }
+            let mut items = Vec::new();
+            for i in 1.. {
+                match t.raw_get::<LVal>(i) {
+                    Ok(LVal::Nil) | Err(_) => break,
+                    Ok(item) => items.push(lua_to_reply(&item, depth + 1)),
+                }
+            }
+            Reply::array(items)
+        }
+        _ => Reply::nil(),
+    }
+}
+
+/// A script failure as a Redis error: the error of a failed `redis.call`
+/// is passed through, anything else is reported as a script error.
+fn script_error(e: mlua::Error) -> Reply {
+    let mut cause = &e;
+    while let mlua::Error::CallbackError { cause: inner, .. } = cause {
+        cause = inner;
+    }
+    let text = match cause {
+        mlua::Error::RuntimeError(m) => m.clone(),
+        other => other.to_string(),
+    };
+    let text = text.split("\nstack traceback").next().unwrap_or(&text).trim().to_string();
+    let coded =
+        text.split_whitespace().next().is_some_and(|w| w.len() > 1 && w.chars().all(|c| c.is_ascii_uppercase()));
+    if coded {
+        Reply::Error(text)
+    } else {
+        Reply::Error(format!("ERR Error running script: {text}"))
     }
 }

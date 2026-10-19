@@ -215,6 +215,8 @@ pub struct Instance {
     pub stop_requested: AtomicBool,
     /// Port of the TCP listener, once one is running.
     pub tcp_port: AtomicU64,
+    /// State shared by the Redis-compatible connections.
+    pub resp: crate::resp::Shared,
     weak: Weak<Instance>,
     _lock: File,
 }
@@ -257,6 +259,7 @@ impl Instance {
             shutting_down: AtomicBool::new(false),
             stop_requested: AtomicBool::new(false),
             tcp_port: AtomicU64::new(0),
+            resp: Default::default(),
             weak: weak.clone(),
             _lock: lock,
         });

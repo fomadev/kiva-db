@@ -142,10 +142,13 @@ fn render(v: &LVal) -> String {
     }
 }
 
-fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOutput> {
-    let (timeout_ms, mem_mb, debug) = {
+/// A Lua interpreter with no access to files, the operating system or code
+/// loading, under the configured memory and time limits. With `trace`, the
+/// lines executed are recorded there (`--lua-debug`).
+pub(crate) fn sandbox(sess: &Session, trace: Option<Rc<RefCell<Vec<String>>>>) -> Result<Lua> {
+    let (timeout_ms, mem_mb) = {
         let c = sess.inst.cfg();
-        (c.get_u64("scripting", "timeout_ms"), c.get_u64("scripting", "memory_limit_mb"), sess.inst.opts.lua_debug)
+        (c.get_u64("scripting", "timeout_ms"), c.get_u64("scripting", "memory_limit_mb"))
     };
     let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::UTF8, LuaOptions::default())?;
     lua.set_memory_limit((mem_mb as usize).saturating_mul(1024 * 1024))?;
@@ -155,23 +158,29 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
     for name in ["dofile", "loadfile", "load", "loadstring", "require", "collectgarbage"] {
         globals.set(name, LVal::Nil)?;
     }
-
-    let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-    let trace = printed.clone();
     let mut triggers = HookTriggers::new().every_nth_instruction(1000);
-    if debug {
+    if trace.is_some() {
         triggers = triggers.every_line();
     }
     lua.set_hook(triggers, move |_, dbg| {
-        if debug && dbg.event() == mlua::DebugEvent::Line {
-            trace.borrow_mut().push(format!("[lua-debug] line {}", dbg.curr_line()));
+        if let Some(t) = &trace {
+            if dbg.event() == mlua::DebugEvent::Line {
+                t.borrow_mut().push(format!("[lua-debug] line {}", dbg.curr_line()));
+            }
         }
         if Instant::now() > deadline {
             return Err(lerr(format!("script exceeded the time limit of {timeout_ms} ms")));
         }
         Ok(VmState::Continue)
     });
+    Ok(lua)
+}
+
+fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOutput> {
+    let printed: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let lua = sandbox(sess, sess.inst.opts.lua_debug.then(|| printed.clone()))?;
+    let globals = lua.globals();
 
     let cell = RefCell::new(sess);
     let out = printed.clone();

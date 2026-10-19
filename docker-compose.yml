@@ -2,7 +2,7 @@
 # Then connect: host = this machine, port 2911, user kiva, that password.
 services:
   kivadb:
-    image: fomadev0/kiva-db:1.2.0
+    image: fomadev0/kiva-db:1.3.0
     # To build the image from this folder instead (ARM servers, modified
     # sources), replace the line above with:  build: .
     container_name: kivadb

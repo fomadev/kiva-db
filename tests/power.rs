@@ -239,6 +239,8 @@ enum R {
     I(i64),
     B(Option<String>),
     A(Option<Vec<R>>),
+    /// A RESP3 map, as its flattened key-value list.
+    M(Vec<R>),
 }
 
 fn read_reply(r: &mut impl BufRead) -> R {
@@ -266,6 +268,12 @@ fn read_reply(r: &mut impl BufRead) -> R {
                 return R::A(None);
             }
             R::A(Some((0..n).map(|_| read_reply(r)).collect()))
+        }
+        // RESP3: null and maps.
+        "_" => R::B(None),
+        "%" => {
+            let n: usize = rest.parse().unwrap();
+            R::M((0..n * 2).map(|_| read_reply(r)).collect())
         }
         other => panic!("unexpected reply type {other:?} in {line:?}"),
     }
@@ -312,7 +320,7 @@ fn redis_clients_can_use_kivadb() {
     assert_eq!(r.cmd(&["PING"]), R::S("PONG".into()));
     assert_eq!(r.cmd(&["ECHO", "mbote"]), b("mbote"));
     assert_eq!(r.cmd(&["SELECT", "0"]), ok_reply());
-    assert!(matches!(r.cmd(&["SELECT", "3"]), R::E(_)));
+    assert!(matches!(r.cmd(&["SELECT", "16"]), R::E(e) if e.contains("out of range")));
 
     // Strings and counters.
     assert_eq!(r.cmd(&["SET", "greeting", "hello world"]), ok_reply());
@@ -426,11 +434,226 @@ fn redis_clients_must_log_in_when_kivadb_requires_it() {
     assert_eq!(r.cmd(&["GET", "shared"]), b("data"));
 
     let mut v = Redis::connect(port);
-    assert!(matches!(v.cmd(&["HELLO", "3"]), R::E(e) if e.starts_with("NOPROTO")));
+    assert!(matches!(v.cmd(&["HELLO", "4"]), R::E(e) if e.starts_with("NOPROTO")));
     assert!(matches!(v.cmd(&["HELLO", "2", "AUTH", "eve", "evepw"]), R::A(Some(_))));
     assert_eq!(v.cmd(&["SELECT", "0"]), ok_reply());
     assert!(matches!(v.cmd(&["SET", "x", "1"]), R::E(e) if e.starts_with("NOPERM")));
     assert!(matches!(v.cmd(&["FLUSHDB"]), R::E(e) if e.starts_with("NOPERM")));
+}
+
+#[test]
+fn redis_counters_are_atomic_across_connections() {
+    let dir = TempDir::new("resp_atomic");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    // Eight clients count login attempts at the same time: none may be lost.
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let mut r = Redis::connect(port);
+                for _ in 0..250 {
+                    assert!(matches!(r.cmd(&["INCR", "rl:login:1.2.3.4"]), R::I(_)));
+                    r.cmd(&["HINCRBY", "stats", "attempts", "1"]);
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    let mut r = Redis::connect(port);
+    assert_eq!(r.cmd(&["GET", "rl:login:1.2.3.4"]), b("2000"));
+    assert_eq!(r.cmd(&["HGET", "stats", "attempts"]), b("2000"));
+}
+
+#[test]
+fn redis_expiry_options_and_time() {
+    let dir = TempDir::new("resp_expire");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+
+    r.cmd(&["SET", "k", "v"]);
+    // NX: only when there is no expiry yet. The rate-limit window must not slide.
+    assert_eq!(r.cmd(&["EXPIRE", "k", "900", "NX"]), R::I(1));
+    assert_eq!(r.cmd(&["EXPIRE", "k", "5", "NX"]), R::I(0));
+    assert!(matches!(r.cmd(&["TTL", "k"]), R::I(t) if t > 890));
+    // XX: only when there is one. GT / LT: only when it moves that way.
+    assert_eq!(r.cmd(&["EXPIRE", "k", "100", "GT"]), R::I(0));
+    assert_eq!(r.cmd(&["EXPIRE", "k", "100", "LT"]), R::I(1));
+    assert!(matches!(r.cmd(&["TTL", "k"]), R::I(t) if (95..=100).contains(&t)));
+    assert_eq!(r.cmd(&["EXPIRE", "k", "2000", "XX", "GT"]), R::I(1));
+    r.cmd(&["SET", "p", "v"]);
+    assert_eq!(r.cmd(&["EXPIRE", "p", "10", "XX"]), R::I(0));
+    assert_eq!(r.cmd(&["EXPIRE", "p", "10", "GT"]), R::I(0), "no expiry counts as infinite");
+    assert_eq!(r.cmd(&["EXPIRE", "p", "10", "LT"]), R::I(1));
+    assert!(matches!(r.cmd(&["EXPIRE", "p", "10", "NX", "XX"]), R::E(e) if e.contains("not compatible")));
+    assert!(matches!(r.cmd(&["EXPIRE", "p", "10", "SOON"]), R::E(e) if e.contains("Unsupported option")));
+    assert_eq!(r.cmd(&["EXPIRE", "ghost", "10"]), R::I(0));
+
+    // INCR keeps the expiry of the counter, like Redis.
+    r.cmd(&["SET", "c", "1", "EX", "600"]);
+    r.cmd(&["INCR", "c"]);
+    assert!(matches!(r.cmd(&["TTL", "c"]), R::I(t) if t > 590));
+
+    // EXPIRETIME, GETEX.
+    let R::I(at) = r.cmd(&["EXPIRETIME", "c"]) else { panic!() };
+    assert!(at > 1_700_000_000);
+    assert_eq!(r.cmd(&["PEXPIRETIME", "c"]), R::I(at * 1000));
+    assert_eq!(r.cmd(&["EXPIRETIME", "greeting-ghost"]), R::I(-2));
+    r.cmd(&["SET", "s", "hello"]);
+    assert_eq!(r.cmd(&["EXPIRETIME", "s"]), R::I(-1));
+    assert_eq!(r.cmd(&["GETEX", "s", "EX", "60"]), b("hello"));
+    assert!(matches!(r.cmd(&["TTL", "s"]), R::I(t) if t > 55));
+    assert_eq!(r.cmd(&["GETEX", "s", "PERSIST"]), b("hello"));
+    assert_eq!(r.cmd(&["TTL", "s"]), R::I(-1));
+    assert_eq!(r.cmd(&["GETEX", "ghost"]), R::B(None));
+
+    // TIME: seconds and microseconds.
+    let R::A(Some(t)) = r.cmd(&["TIME"]) else { panic!() };
+    assert!(matches!(&t[0], R::B(Some(s)) if s.parse::<i64>().unwrap() > 1_700_000_000));
+}
+
+#[test]
+fn redis_numbered_databases_are_workspaces() {
+    let dir = TempDir::new("resp_select");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, r#"create user "pay" identified by "paypw""#);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+
+    // The administrator gets db2 on first use, isolated from database 0.
+    let mut r = Redis::connect(port);
+    r.cmd(&["SET", "where", "zero"]);
+    assert_eq!(r.cmd(&["SELECT", "2"]), ok_reply());
+    assert_eq!(r.cmd(&["GET", "where"]), R::B(None));
+    r.cmd(&["SET", "where", "two"]);
+    assert_eq!(r.cmd(&["SELECT", "0"]), ok_reply());
+    assert_eq!(r.cmd(&["GET", "where"]), b("zero"));
+    assert_eq!(r.cmd(&["SELECT", "2"]), ok_reply());
+    assert_eq!(r.cmd(&["GET", "where"]), b("two"));
+    assert!(ok(&mut admin, "workspace list").contains("db2"));
+
+    // A user needs to be given access, and the error says how.
+    let mut p = Redis::connect(port);
+    assert_eq!(p.cmd(&["AUTH", "pay", "paypw"]), ok_reply());
+    assert!(
+        matches!(p.cmd(&["SELECT", "3"]), R::E(e) if e.starts_with("NOPERM") && e.contains("workspace create db3"))
+    );
+    assert!(matches!(p.cmd(&["SELECT", "2"]), R::E(e) if e.contains(r#"grant write on workspace "db2" to "pay""#)));
+    ok(&mut admin, r#"grant write on workspace "db2" to "pay""#);
+    assert_eq!(p.cmd(&["SELECT", "2"]), ok_reply());
+    assert_eq!(p.cmd(&["GET", "where"]), b("two"));
+    // Database 0 is the user's own workspace.
+    assert_eq!(p.cmd(&["SELECT", "0"]), ok_reply());
+    assert_eq!(p.cmd(&["GET", "where"]), R::B(None));
+    p.cmd(&["SET", "mine", "1"]);
+    assert_eq!(ok(&mut admin, "workspace switch u_pay"), "Switched to workspace 'u_pay' (1 keys).");
+}
+
+#[test]
+fn redis_lua_scripts_run_atomically() {
+    let dir = TempDir::new("resp_eval");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+
+    // Return values convert as in Redis.
+    assert_eq!(r.cmd(&["EVAL", "return 42", "0"]), R::I(42));
+    assert_eq!(r.cmd(&["EVAL", "return 3.9", "0"]), R::I(3));
+    assert_eq!(r.cmd(&["EVAL", "return 'hi'", "0"]), b("hi"));
+    assert_eq!(r.cmd(&["EVAL", "return nil", "0"]), R::B(None));
+    assert_eq!(r.cmd(&["EVAL", "return true", "0"]), R::I(1));
+    assert_eq!(
+        r.cmd(&["EVAL", "return {1, 'two', {3}}", "0"]),
+        R::A(Some(vec![R::I(1), b("two"), R::A(Some(vec![R::I(3)]))]))
+    );
+    assert_eq!(r.cmd(&["EVAL", "return redis.status_reply('FINE')", "0"]), R::S("FINE".into()));
+    assert_eq!(r.cmd(&["EVAL", "return redis.error_reply('MYERR custom')", "0"]), R::E("MYERR custom".into()));
+    assert_eq!(
+        r.cmd(&["EVAL", "return {KEYS[1], ARGV[1], #KEYS, #ARGV}", "1", "k", "a", "b"]),
+        R::A(Some(vec![b("k"), b("a"), R::I(1), R::I(2)]))
+    );
+
+    // The usual fixed-window rate limiter: count, start the window once, report.
+    let limiter = "local n = redis.call('INCR', KEYS[1]) \
+                   if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end \
+                   return {n, redis.call('TTL', KEYS[1])}";
+    assert_eq!(r.cmd(&["EVAL", limiter, "1", "rl:2fa:42", "900"]), R::A(Some(vec![R::I(1), R::I(900)])));
+    let R::A(Some(second)) = r.cmd(&["EVAL", limiter, "1", "rl:2fa:42", "900"]) else { panic!() };
+    assert_eq!(second[0], R::I(2));
+
+    // EVALSHA: unknown until loaded, then served from the cache.
+    let sha = "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"; // sha1("return 1")
+    assert!(matches!(r.cmd(&["EVALSHA", sha, "0"]), R::E(e) if e.starts_with("NOSCRIPT")));
+    assert_eq!(r.cmd(&["SCRIPT", "LOAD", "return 1"]), b(sha));
+    assert_eq!(r.cmd(&["EVALSHA", sha, "0"]), R::I(1));
+    assert_eq!(r.cmd(&["EVALSHA", &sha.to_uppercase(), "0"]), R::I(1));
+    assert_eq!(
+        r.cmd(&["SCRIPT", "EXISTS", sha, "0000000000000000000000000000000000000000"]),
+        R::A(Some(vec![R::I(1), R::I(0)]))
+    );
+    assert!(matches!(r.cmd(&["SCRIPT", "LOAD", "return +"]), R::E(e) if e.contains("Error compiling script")));
+    assert_eq!(r.cmd(&["SCRIPT", "FLUSH"]), ok_reply());
+    assert!(matches!(r.cmd(&["EVALSHA", sha, "0"]), R::E(e) if e.starts_with("NOSCRIPT")));
+
+    // All or nothing: a failing script leaves no trace.
+    let failing = "redis.call('SET', 'half', '1') return redis.call('INCR', 'text')";
+    r.cmd(&["SET", "text", "abc"]);
+    assert!(matches!(r.cmd(&["EVAL", failing, "0"]), R::E(e) if e.contains("not an integer")));
+    assert_eq!(r.cmd(&["GET", "half"]), R::B(None));
+    // pcall catches the error instead.
+    assert_eq!(r.cmd(&["EVAL", "local e = redis.pcall('INCR', 'text') return e.err ~= nil", "0"]), R::I(1));
+    assert!(
+        matches!(r.cmd(&["EVAL", "error('boom')", "0"]), R::E(e) if e.starts_with("ERR Error running script") && e.contains("boom"))
+    );
+    assert!(
+        matches!(r.cmd(&["EVAL", "return redis.call('MULTI')", "0"]), R::E(e) if e.contains("not allowed from script"))
+    );
+    assert!(
+        matches!(r.cmd(&["EVAL", "return 1", "2", "only-one"]), R::E(e) if e.contains("greater than number of args"))
+    );
+    assert!(matches!(r.cmd(&["EVAL", "return os.time()", "0"]), R::E(_)), "the sandbox has no os library");
+
+    // Scripts and MULTI/EXEC together.
+    assert_eq!(r.cmd(&["MULTI"]), ok_reply());
+    assert_eq!(r.cmd(&["EVAL", "return redis.call('INCR', KEYS[1])", "1", "m"]), R::S("QUEUED".into()));
+    assert_eq!(r.cmd(&["INCR", "m"]), R::S("QUEUED".into()));
+    assert_eq!(r.cmd(&["EXEC"]), R::A(Some(vec![R::I(1), R::I(2)])));
+}
+
+#[test]
+fn redis_clients_can_speak_resp3() {
+    let dir = TempDir::new("resp3");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    // RESP2 until the client asks for more.
+    r.cmd(&["HSET", "user:1", "name", "Alice"]);
+    assert_eq!(r.cmd(&["HGETALL", "user:1"]), R::A(Some(vec![b("name"), b("Alice")])));
+    let R::M(hello) = r.cmd(&["HELLO", "3"]) else { panic!("HELLO 3 answers a map") };
+    let proto = hello.chunks(2).find(|p| p[0] == b("proto")).map(|p| &p[1]);
+    assert_eq!(proto, Some(&R::I(3)));
+    assert_eq!(r.cmd(&["HGETALL", "user:1"]), R::M(vec![b("name"), b("Alice")]));
+    assert_eq!(r.cmd(&["GET", "ghost"]), R::B(None));
+    assert_eq!(r.cmd(&["SET", "k", "v"]), ok_reply());
+    // Scripts keep seeing RESP2 shapes.
+    assert_eq!(r.cmd(&["EVAL", "return #redis.call('HGETALL', 'user:1')", "0"]), R::I(2));
+    assert!(matches!(r.cmd(&["HELLO", "2"]), R::A(Some(_))));
+    assert_eq!(r.cmd(&["HGETALL", "user:1"]), R::A(Some(vec![b("name"), b("Alice")])));
+}
+
+#[test]
+fn redis_scripts_obey_roles() {
+    let dir = TempDir::new("resp_eval_roles");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, r#"create user "eve" identified by "evepw" role viewer"#);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut v = Redis::connect(port);
+    assert_eq!(v.cmd(&["AUTH", "eve", "evepw"]), ok_reply());
+    assert_eq!(v.cmd(&["EVAL", "return redis.call('GET', 'nothing')", "0"]), R::B(None));
+    assert!(matches!(v.cmd(&["EVAL", "return redis.call('SET', 'x', '1')", "0"]), R::E(e) if e.starts_with("NOPERM")));
 }
 
 // ---------------------------------------------------------------------------

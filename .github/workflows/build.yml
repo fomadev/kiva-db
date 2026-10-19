@@ -78,6 +78,20 @@ jobs:
           cd drivers/node
           KIVADB_BIN="$GITHUB_WORKSPACE/target/debug/kivadb" npm test
 
+      - name: Test with real Redis client libraries
+        # ioredis, node-redis (RESP3), rate-limiter-flexible and rate-limit-redis.
+        if: matrix.os-name == 'linux'
+        shell: bash
+        run: |
+          BIN="$GITHUB_WORKSPACE/target/debug/kivadb"
+          DATA="$RUNNER_TEMP/kivadb-redis"
+          "$BIN" --home "$DATA" -e 'modify user "kiva" password "ci-pw"' -e 'config set auth_required true'
+          "$BIN" --home "$DATA" start --port 2990 --no-http --resp-port 6390
+          cd tests/redis-clients
+          npm install --no-audit --no-fund
+          node check.mjs 6390 ci-pw
+          "$BIN" --home "$DATA" stop -u kiva -p ci-pw
+
       - name: Test the installation script
         # Installs the latest published release, as users do with curl | bash.
         if: matrix.os-name != 'windows'
