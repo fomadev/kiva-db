@@ -2,6 +2,17 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased
+
+### Added
+
+* **Encrypted connections (TLS)** on every port, next to plain ones: 2911 (shells, Kiva Studio, drivers), 8080 (HTTPS) and 6379 (`rediss://`). KivaDB recognises a TLS connection by its first byte.
+* A certificate created on first start in `<home>/tls/`, or your own (`tls.cert`, `tls.key`). `kivadb tls` shows it and its SHA-256 fingerprint; `kivadb tls renew` creates a new one; `tls.hosts` adds names or addresses to it.
+* `tls.required`: refuse plain connections from other machines (the machine itself may still connect in clear). Refused clients get a message in their own protocol.
+* Shell: `kivadb --connect host:port --tls`. A new server's fingerprint is shown and, at a terminal, the user is asked to trust it; trusted servers are kept in `known_servers`. `--tls-fingerprint` for scripts. A remote connection without `--tls` prints a warning.
+* Rust client: `Client::connect_tls`. Node.js driver: the `tls` option, with `fingerprint`. Replicas: `replication.master_tls` and `replication.master_fingerprint`.
+* DOCUMENTATION 16.11.
+
 ## 1.3.0 - 2026-10-18
 
 Redis compatibility, made complete enough to replace Redis where it serves as short-lived memory (sign-up codes, locks, rate limits, sessions). Checked with the current ioredis, node-redis, rate-limiter-flexible and rate-limit-redis, now part of the CI (`tests/redis-clients`).

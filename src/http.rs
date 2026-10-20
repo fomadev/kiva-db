@@ -89,7 +89,17 @@ pub fn start_http(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
             let Ok(stream) = conn else { continue };
             let (inst, rates) = (inst.clone(), rates.clone());
             let _ = std::thread::Builder::new().name("kiva-http-conn".into()).spawn(move || {
-                handle(&inst, stream, &rates);
+                let refusal = |_: u8| {
+                    let body = "This server requires HTTPS from other machines.";
+                    format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                };
+                if let Some((stream, peer)) = crate::tls::accept(&inst, stream, &refusal) {
+                    handle(&inst, stream, peer, &rates);
+                }
             });
         }
     })?;
@@ -176,9 +186,8 @@ fn write_response(stream: &mut TcpStream, resp: &Response, cors: bool) {
     let _ = stream.flush();
 }
 
-fn handle(inst: &Arc<Instance>, mut stream: TcpStream, rates: &RateTable) {
+fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAddr, rates: &RateTable) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let Ok(peer) = stream.peer_addr() else { return };
     let Some(req) = read_request(&mut stream) else { return };
     inst.metrics.http_requests.fetch_add(1, Ordering::Relaxed);
     let (cors, limit) = {

@@ -24,13 +24,28 @@ pub struct Client {
     stream: TcpStream,
     /// Change notifications received so far (after a `subscribe`).
     pub events: Vec<String>,
+    /// SHA-256 fingerprint of the server's certificate, for TLS connections.
+    pub server_fingerprint: Option<String>,
 }
 
 impl Client {
     pub fn connect(addr: impl ToSocketAddrs) -> Result<Client> {
         let stream = TcpStream::connect(addr)?;
         let _ = stream.set_nodelay(true);
-        let mut c = Client { stream, events: Vec::new() };
+        Self::start(stream, None)
+    }
+
+    /// Connects with TLS. The server's certificate must have the given SHA-256
+    /// fingerprint (shown by `kivadb tls` on the server); with `None`, any
+    /// certificate is accepted and its fingerprint is in `server_fingerprint`,
+    /// for the caller to check before sending a password.
+    pub fn connect_tls(addr: &str, fingerprint: Option<&str>) -> Result<Client> {
+        let secure = crate::tls::connect(addr, fingerprint, std::time::Duration::from_secs(10))?;
+        Self::start(secure.stream, Some(secure.fingerprint))
+    }
+
+    fn start(stream: TcpStream, server_fingerprint: Option<String>) -> Result<Client> {
+        let mut c = Client { stream, events: Vec::new(), server_fingerprint };
         // The first frame also tells the server this is a binary connection.
         c.call(CMD_HELLO, &[])?;
         Ok(c)

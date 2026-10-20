@@ -1,8 +1,9 @@
 "use strict";
 // Official Node.js driver for KivaDB (binary protocol, port 2911).
-// No dependencies: only Node's own `net` and `events` modules.
+// No dependencies: only Node's own `net`, `tls` and `events` modules.
 
 const net = require("net");
+const tls = require("tls");
 const { EventEmitter } = require("events");
 
 const CMD = { HELLO: 1, AUTH: 2, EXEC: 3, PING: 4, API: 8 };
@@ -13,6 +14,12 @@ class KivaError extends Error {
     super(message);
     this.name = "KivaError";
   }
+}
+
+/** "AB:CD:..." or "abcd...": the same fingerprint, compared without case or colons. */
+function sameFingerprint(a, b) {
+  const norm = (s) => String(s || "").replace(/^(sha256\/|SHA256:)/, "").replace(/:/g, "").toLowerCase();
+  return norm(a).length === 64 && norm(a) === norm(b);
 }
 
 function isLocalHost(host) {
@@ -39,7 +46,8 @@ class KivaClient extends EventEmitter {
 
   /**
    * Opens a connection and logs in.
-   * @param {object} [options] host (localhost), port (2911), user ("kiva"), password (""), timeout (8000 ms)
+   * @param {object} [options] host (localhost), port (2911), user ("kiva"), password (""), timeout (8000 ms),
+   *   tls: true, or { fingerprint } (the server's certificate, from `kivadb tls`), or Node TLS options such as { ca }
    */
   static connect(options = {}) {
     const host = options.host || "127.0.0.1";
@@ -50,8 +58,24 @@ class KivaClient extends EventEmitter {
     if (!isLocalHost(host) && !password) {
       return Promise.reject(new KivaError("A password is required to connect to a remote server."));
     }
+    const secure = options.tls ? (options.tls === true ? {} : options.tls) : null;
+    const fingerprint = secure && secure.fingerprint;
     return new Promise((resolve, reject) => {
-      const socket = net.connect({ host, port });
+      let socket;
+      if (secure) {
+        const { fingerprint: _, ...nodeOptions } = secure;
+        socket = tls.connect({
+          host,
+          port,
+          servername: net.isIP(host) ? undefined : host,
+          // A pinned fingerprint replaces the usual authority check: KivaDB's
+          // own certificate is signed by nobody but itself.
+          ...(fingerprint ? { rejectUnauthorized: false } : {}),
+          ...nodeOptions,
+        });
+      } else {
+        socket = net.connect({ host, port });
+      }
       socket.setNoDelay(true);
       const timer = setTimeout(() => {
         socket.destroy();
@@ -61,8 +85,16 @@ class KivaClient extends EventEmitter {
         clearTimeout(timer);
         reject(new KivaError(`Cannot reach ${host}:${port} (${err.message}). Is KivaDB started?`));
       });
-      socket.once("connect", async () => {
+      socket.once(secure ? "secureConnect" : "connect", async () => {
         clearTimeout(timer);
+        if (fingerprint) {
+          const seen = socket.getPeerCertificate().fingerprint256;
+          if (!sameFingerprint(seen, fingerprint)) {
+            socket.destroy();
+            reject(new KivaError(`The certificate of ${host}:${port} (${seen}) is not the expected one: connection refused.`));
+            return;
+          }
+        }
         const client = new KivaClient(socket);
         try {
           const hello = (await client._call(CMD.HELLO)).payload.toString();

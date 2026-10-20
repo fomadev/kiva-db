@@ -21,6 +21,7 @@ USAGE:
   kivadb stop                 Stop the running database
   kivadb status               Tell whether the database is running
   kivadb update [--check]     Install the latest release (--check: only tell)
+  kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
@@ -30,6 +31,8 @@ SHELL OPTIONS:
   -p, --password <password>   Password (prompted when omitted)
   -e <command>                Run a command and exit (repeatable)
       --connect <host:port>   Connect to a running server instead of opening files
+      --tls                   Encrypt that connection (TLS); a new server is shown first
+      --tls-fingerprint <fp>  Accept only the server certificate with this SHA-256
       --no-listen             Do not accept other local shells on this instance
 
 SERVER OPTIONS (start, serve):
@@ -56,6 +59,7 @@ struct Args {
     connect: Option<String>,
     no_listen: bool,
     check_only: bool,
+    renew: bool,
     port: Option<u16>,
     bind: Option<String>,
     http_port: Option<u16>,
@@ -87,6 +91,10 @@ fn parse_args() -> Args {
             "stop" => args.action = Some("stop"),
             "status" => args.action = Some("status"),
             "update" => args.action = Some("update"),
+            "tls" => args.action = Some("tls"),
+            "renew" => args.renew = true,
+            "--tls" => args.shell.tls = true,
+            "--tls-fingerprint" => args.shell.tls_fingerprint = Some(value(&mut it, "--tls-fingerprint")),
             "--check" => args.check_only = true,
             "shell" => {}
             "-h" | "--help" | "help" => {
@@ -193,6 +201,20 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     println!("KivaDB {VERSION} server");
     println!("  Home         : {}", inst.home.display());
     println!("  TCP protocol : {bind}:{tcp_port} (binary and plain text)");
+    let tls_required = inst.cfg().get_bool("tls", "required");
+    match inst.tls() {
+        Some(t) => println!(
+            "  TLS          : on every port{}, certificate SHA-256 {}",
+            if tls_required { ", required from other machines" } else { "" },
+            t.fingerprint
+        ),
+        None => println!("  TLS          : off"),
+    }
+    if !is_loopback(&bind) && !tls_required {
+        eprintln!(
+            "[WARN] other machines may still connect without encryption. To refuse it: config set tls.required true"
+        );
+    }
     if http_on {
         match http::start_http(&inst, &bind, http_port) {
             Ok(p) => println!(
@@ -263,6 +285,51 @@ fn running_pid(home: &Path) -> String {
     std::fs::read_to_string(home.join("instance.pid")).map(|p| p.trim().to_string()).unwrap_or_else(|_| "?".into())
 }
 
+/// `kivadb tls`: the certificate clients should expect, created if needed.
+fn show_tls(home: &Path, renew: bool) -> i32 {
+    let cfg = match kivadb::config::Config::load(home) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    if !cfg.get_bool("tls", "enabled") {
+        println!("TLS is off (tls.enabled = false).");
+        return 0;
+    }
+    if renew {
+        if !cfg.get("tls", "cert").trim().is_empty() {
+            eprintln!("Error: the certificate is configured (tls.cert): replace its files instead.");
+            return 1;
+        }
+        for f in ["cert.pem", "key.pem"] {
+            let _ = std::fs::remove_file(home.join("tls").join(f));
+        }
+        println!("A new certificate was created. Restart KivaDB to use it; clients will see a new fingerprint.");
+    }
+    match kivadb::tls::load_server(home, &cfg) {
+        Ok(t) => {
+            println!("Certificate : {}", t.cert_path.display());
+            println!("SHA-256     : {}", t.fingerprint);
+            println!(
+                "Encryption  : {}",
+                if cfg.get_bool("tls", "required") {
+                    "required for connections from other machines"
+                } else {
+                    "accepted; plain connections are accepted too (config set tls.required true to refuse them)"
+                }
+            );
+            println!("Clients check this fingerprint the first time they connect.");
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
+}
+
 /// The other listeners the server announced in its log (REST API, Redis
 /// protocol), or why they did not start. The TCP port is known first: the
 /// rest of the banner follows within moments.
@@ -285,6 +352,8 @@ fn listeners(log_path: &Path, from: u64) -> Vec<String> {
         } else if let Some(rest) = line.strip_prefix("  Redis (RESP) : ") {
             let address = rest.split_whitespace().next().unwrap_or(rest);
             out.push(format!("  Redis    : port {}", address.rsplit(':').next().unwrap_or(address)));
+        } else if let Some(rest) = line.strip_prefix("  TLS          : ") {
+            out.push(format!("  TLS      : {rest}"));
         } else if line.starts_with("[WARN] REST API") || line.starts_with("[WARN] Redis") {
             out.push(format!("  {line}"));
         }
@@ -447,8 +516,12 @@ fn main() {
     let home = args.home.clone().unwrap_or_else(default_home);
     // The interactive history lives next to the data (or in the default home for --connect).
     args.shell.history = Some(home.join("history.txt"));
+    args.shell.home = Some(home.clone());
     if args.action == Some("update") {
         exit(update::run(args.check_only, &home));
+    }
+    if args.action == Some("tls") {
+        exit(show_tls(&home, args.renew));
     }
     // A server runs unattended: nobody would read the notice.
     let notice = if args.serve { None } else { update::Notice::begin(&home) };

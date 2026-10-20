@@ -112,3 +112,27 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
   db.close();
   await assert.rejects(db.ping(), /Not connected/);
 });
+
+test("the driver encrypts the connection with TLS", { skip: !binary && "KivaDB is not built (set KIVADB_BIN)" }, async (t) => {
+  const { execFileSync } = require("node:child_process");
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "kivadb-node-tls-"));
+  const port = await freePort();
+  const server = spawn(binary, ["serve", "--home", home, "--port", String(port), "--no-http", "--no-resp"], { stdio: "ignore" });
+  t.after(() => {
+    server.kill();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  await waitFor(port);
+  const shown = execFileSync(binary, ["--home", home, "tls"]).toString();
+  const fingerprint = /SHA-256\s*:\s*(\S+)/.exec(shown)[1];
+
+  const db = await connect({ port, tls: { fingerprint } });
+  await db.set("secret", "encrypted");
+  assert.strictEqual(await db.get("secret"), "encrypted");
+  db.close();
+
+  // Without the fingerprint, the self-signed certificate is not trusted.
+  await assert.rejects(connect({ port, tls: true }), KivaError);
+  const wrong = "AB:".repeat(31) + "AB";
+  await assert.rejects(connect({ port, tls: { fingerprint: wrong } }), /not the expected one/);
+});

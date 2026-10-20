@@ -342,6 +342,7 @@ kivadb start
 ```text
 KivaDB started (pid 21040).
   TCP port : 2911
+  TLS      : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
   REST API : http://127.0.0.1:8080
   Redis    : port 6379
   Home     : C:\Users\you\AppData\Roaming\KivaDB
@@ -420,6 +421,7 @@ kivadb serve
 KivaDB 1.3.0 server
   Home         : C:\Users\you\AppData\Roaming\KivaDB
   TCP protocol : 127.0.0.1:2911 (binary and plain text)
+  TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
   REST API     : http://127.0.0.1:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
   Redis (RESP) : 127.0.0.1:6379  (redis-cli and Redis client libraries)
   Auth         : disabled (local use)
@@ -1637,12 +1639,21 @@ stream = true
 enabled = true
 port = 6379
 
+[tls]
+enabled = true
+required = false
+cert =
+key =
+hosts =
+
 [replication]
 role = master
 master_host =
 master_port = 2911
 master_user = kiva
 master_password =
+master_tls = false
+master_fingerprint =
 sync_mode = async
 min_slaves_ack = 1
 
@@ -1701,6 +1712,10 @@ network.port = 2911
 | `http.stream` | `true` | Offer `/v1/stream` (Server-Sent Events) | immediately |
 | `resp.enabled` | `true` | Start the Redis-compatible listener ([Chapter 23](#chapter-23--redis-compatibility)) | next start |
 | `resp.port` | `6379` | Its port | next start |
+| `tls.enabled` | `true` | Accept encrypted connections ([16.11](#1611-encrypted-connections-tls)) | next start |
+| `tls.required` | `false` | Refuse plain connections from other machines | immediately |
+| `tls.cert`, `tls.key` | empty | Your own certificate and key; empty: KivaDB's own | next start |
+| `tls.hosts` | empty | Extra names for KivaDB's certificate | `kivadb tls renew` |
 | `replication.*` | | See [Chapter 25](#chapter-25--replication) | |
 | `scripting.timeout_ms` | `5000` | Longest a Lua script may run | immediately |
 | `scripting.memory_limit_mb` | `64` | Most memory a Lua script may use | immediately |
@@ -1839,7 +1854,7 @@ Error: refusing to listen on 0.0.0.0 without authentication.
 
 Two more protections are always active: an account with an empty password can only log in from the local machine, and the REST API limits the number of requests per client ([21.7](#217-cors-and-rate-limiting)).
 
-**Encryption.** KivaDB 1.3.0 does not encrypt its connections. On a network you do not fully control, put it behind something that does: a TLS-terminating reverse proxy (nginx, Caddy) for the REST API, a VPN or an SSH tunnel for port 2911.
+**Encryption.** On a network you do not fully control, encrypt the connections: KivaDB does it itself on every port, and `config set tls.required true` makes it mandatory for other machines ([16.11](#1611-encrypted-connections-tls)).
 
 ### 16.8 How passwords are stored
 
@@ -1875,6 +1890,76 @@ kivadb --skip-auth
 [WARN] Authentication disabled - unsafe for production
 kiva> modify user "kiva" password "new-password"
 ```
+
+### 16.11 Encrypted connections (TLS)
+
+Passwords are never stored in clear ([16.8](#168-how-passwords-are-stored)), but without encryption they, and the data, cross the network in clear. TLS, the encryption of HTTPS, protects them on the way.
+
+**Nothing to install, no new port.** Every KivaDB port accepts encrypted connections next to plain ones: 2911 (shells, Kiva Studio, drivers), 8080 (which then answers `https://` as well as `http://`) and 6379 (`rediss://` for Redis clients). KivaDB tells them apart by the first byte the client sends.
+
+**The certificate.** On its first start, KivaDB creates its own certificate in `<home>/tls/` (`cert.pem`, and the private key `key.pem`, readable by its owner only). `kivadb tls` shows it:
+
+```bash
+kivadb tls
+```
+
+```text
+Certificate : /root/.kivadb/tls/cert.pem
+SHA-256     : 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
+Encryption  : accepted; plain connections are accepted too (config set tls.required true to refuse them)
+Clients check this fingerprint the first time they connect.
+```
+
+No authority vouches for this certificate (a server known by its IP address cannot get one from Let's Encrypt), so clients check its **fingerprint** instead, as SSH does: the first time, they show it and ask whether to trust it; after that they remember it, and refuse to go on if it ever changes. Compare it once with what `kivadb tls` shows on the server.
+
+**Requiring encryption.** By default plain connections are still accepted, so that nothing breaks. Once your clients use TLS, refuse the others:
+
+```text
+kiva> config set tls.required true
+```
+
+Connections from other machines must then be encrypted; the machine itself (`127.0.0.1`, where `kivadb stop` and local applications connect) may still use plain connections. A refused client gets a clear message in its own protocol:
+
+```text
+Error: this server requires an encrypted connection (TLS) from other machines
+```
+
+**Connecting with encryption:**
+
+| Client | How |
+| :--- | :--- |
+| Shell | `kivadb --connect 31.25.236.110:2911 --tls -u kiva`. The first time, it shows the fingerprint and asks; trusted servers are kept in `<home>/known_servers`. In scripts: `--tls-fingerprint <fingerprint>` |
+| Kiva Studio | The switch *Encrypt the connection (TLS)*, on by itself for a remote address. A window shows the fingerprint the first time |
+| Node.js driver | `connect({ host, password, tls: { fingerprint: "77:45:..." } })` |
+| Rust client | `Client::connect_tls("host:2911", Some("77:45:..."))` |
+| Redis libraries | `rediss://user:password@host:6379` with the certificate as authority, e.g. ioredis `tls: { ca: fs.readFileSync("cert.pem") }`; copy `cert.pem` (never `key.pem`) to the application's machine |
+| curl, browsers | `curl --cacert cert.pem https://host:8080/health`; a browser warns about the certificate unless it is installed or you use your own (below) |
+| Replicas | `config set master_tls true` and `config set master_fingerprint "<the master's fingerprint>"` on the replica |
+
+For clients that check names (Redis libraries, curl, browsers), the certificate must contain the name or address they connect to. The one KivaDB creates covers `localhost`, `127.0.0.1` and the machine's name; add the server's public address, then create a new certificate and restart:
+
+```bash
+kivadb -u kiva -e "config set tls.hosts 31.25.236.110"
+kivadb tls renew
+kivadb stop
+kivadb start
+```
+
+After `renew`, clients see a new fingerprint: they must trust it again (in Kiva Studio, forget the server in the recent connections first).
+
+**Your own certificate.** With a domain name, a certificate from Let's Encrypt (or any authority) is checked by clients without any fingerprint. Point KivaDB to its files:
+
+```text
+kiva> config set tls.cert "/etc/letsencrypt/live/db.example.com/fullchain.pem"
+kiva> config set tls.key "/etc/letsencrypt/live/db.example.com/privkey.pem"
+```
+
+| Setting | Default | Meaning |
+| :--- | :--- | :--- |
+| `tls.enabled` | `true` | Accept encrypted connections |
+| `tls.required` | `false` | Refuse plain connections from other machines |
+| `tls.cert`, `tls.key` | empty | Your certificate and key (PEM); empty: the one KivaDB creates |
+| `tls.hosts` | empty | Extra names or addresses for the certificate KivaDB creates |
 
 ---
 
@@ -2685,6 +2770,7 @@ Data that lives a few minutes does not need to be copied: at worst, a sign-up in
 | :--- | :--- | :--- |
 | `resp.enabled` | `true` | Start the Redis listener with `kivadb start` / `serve` |
 | `resp.port` | `6379` | Its port; also `--resp-port`, `KIVADB_RESP_PORT` |
+| `tls.*` | | Encrypted connections, see [16.11](#1611-encrypted-connections-tls) |
 
 `--no-resp` turns it off for one start. If a real Redis already uses port 6379 on the machine, KivaDB says so in its log and carries on without the listener; choose another port.
 
@@ -2758,7 +2844,7 @@ db.on("change", (e) => console.log(e.event, e.key));
 await db.subscribe("user:*");
 ```
 
-Its README lists every method. **A minimal client to read**: [`examples/nodejs/kiva.js`](examples/nodejs/kiva.js) shows the protocol in about fifty lines:
+To encrypt the connection, add `tls: { fingerprint: "..." }` with the fingerprint shown by `kivadb tls` ([16.11](#1611-encrypted-connections-tls)). Its README lists every method. **A minimal client to read**: [`examples/nodejs/kiva.js`](examples/nodejs/kiva.js) shows the protocol in about fifty lines:
 
 ```javascript
 const { KivaClient } = require("./kiva");
@@ -3366,6 +3452,7 @@ KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
 KivaDB 1.3.0 server
   Home         : /var/lib/kivadb
   TCP protocol : 0.0.0.0:2911 (binary and plain text)
+  TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
   REST API     : http://0.0.0.0:8080  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)
   Redis (RESP) : 0.0.0.0:6379  (redis-cli and Redis client libraries)
   Auth         : required
@@ -3592,11 +3679,11 @@ docker build -t kivadb:local .
 | `kiva` has a long, unique password | It is the administrator of everything |
 | One account per person or application, with the smallest role that works | A leaked `viewer` password cannot destroy data |
 | Only the needed ports are open, ideally only to known addresses | Fewer doors |
-| Traffic goes through a VPN, an SSH tunnel or a TLS proxy | KivaDB 1.3.0 does not encrypt connections ([16.7](#167-opening-kivadb-to-the-network)) |
+| `tls.required` is `true` and clients connect with TLS | Otherwise the password and the data cross the Internet in clear ([16.11](#1611-encrypted-connections-tls)) |
 | Backups exist and were restored once as a test | A backup that was never restored is a hope, not a backup |
 | `audit failed-logins` and the metrics are looked at | To notice password guessing early |
 
-An SSH tunnel is the simplest safe way to reach a remote KivaDB without opening its port at all. On your own computer:
+Another safe way, which needs no open port at all, is an SSH tunnel. On your own computer:
 
 ```bash
 ssh -L 2911:localhost:2911 you@your-server
@@ -3658,6 +3745,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `permission denied: you only have read access to workspace 'x'` | You were granted *read* only |
 | `permission denied: no access to workspace 'x'` | An admin must `grant` you access |
 | `permission denied: accounts with an empty password can only log in from the local shell` | Give the account a password |
+| `this server requires an encrypted connection (TLS) from other machines` | Connect with TLS: `--tls`, the Kiva Studio switch, `tls` in the driver, `rediss://` ([16.11](#1611-encrypted-connections-tls)) |
+| `the server's certificate (...) is not the one expected` | The server's certificate changed. If it was renewed (`kivadb tls renew`), remove its line from `known_servers` and trust the new one; otherwise someone may be intercepting the connection |
 
 ### 30.4 Other situations
 
@@ -3689,7 +3778,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `kivadb -e "<command>"` | Run a command and exit (repeatable) |
 | `kivadb -w <workspace>` | Open a workspace |
 | `kivadb -u <user> [-p <password>]` | Log in |
-| `kivadb --connect <host:port>` | Shell on a remote KivaDB |
+| `kivadb --connect <host:port> [--tls]` | Shell on a remote KivaDB, encrypted with `--tls` (`--tls-fingerprint <fp>` in scripts) |
+| `kivadb tls` / `kivadb tls renew` | Show the TLS certificate and its fingerprint / create a new one |
 | `kivadb --no-listen` | Shell on local files that other shells cannot join |
 | `kivadb --home <folder>` | Use another home directory |
 | `kivadb --skip-auth` | Start without authentication (maintenance) |
@@ -3826,7 +3916,6 @@ KivaDB 1.3.0 is a single-node database with replicas. Knowing what it does not d
 
 **Not included in 1.3.0**
 
-* **Encrypted connections.** No built-in TLS for port 2911 or for the REST API. Use a reverse proxy, a VPN or an SSH tunnel.
 * **Automatic failover.** When a master dies, a person (or your own tooling) promotes a replica.
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
