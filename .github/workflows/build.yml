@@ -100,6 +100,17 @@ jobs:
           KIVADB_INSTALL_DIR="$RUNNER_TEMP/kivadb-bin" bash install.sh
           "$RUNNER_TEMP/kivadb-bin/kivadb" --version
 
+      - name: Test the Windows installation script
+        # Installs the latest published release, as users do with irm | iex.
+        if: matrix.os-name == 'windows'
+        shell: pwsh
+        run: |
+          $env:KIVADB_INSTALL_DIR = "$env:RUNNER_TEMP\kivadb-bin"
+          powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          & "$env:RUNNER_TEMP\kivadb-bin\kivadb.exe" --version
+          if (-not ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';' | Where-Object { $_ -ieq "$env:RUNNER_TEMP\kivadb-bin" })) { throw 'install.ps1 did not add its folder to the PATH' }
+
       - name: Compile KivaDB
         run: cargo build --release
 

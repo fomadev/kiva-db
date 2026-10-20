@@ -187,7 +187,15 @@ curl -sSL https://raw.githubusercontent.com/fomadev/kiva-db/main/install.sh | ba
 
 `KIVADB_INSTALL_DIR` chooses another folder and `KIVADB_VERSION` another version: `curl -sSL .../install.sh | KIVADB_INSTALL_DIR=$HOME/.local/bin bash`. Prefer to read a script before running it? Download it first, open it, then run `sh install.sh`. The manual steps below do the same by hand.
 
-**Windows.** Right-click the zip, *Extract All*, then move `kivadb.exe` to a folder such as `C:\Tools`. Windows SmartScreen may warn about an unknown publisher the first time: choose *More info*, then *Run anyway*.
+**Windows in one command.** In PowerShell (Start menu, type *PowerShell*), the installation script downloads the latest release, checks its SHA-256 fingerprint, puts `kivadb.exe` in `%LOCALAPPDATA%\Programs\KivaDB` (no administrator rights needed) and adds that folder to your `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/fomadev/kiva-db/main/install.ps1 | iex
+```
+
+`irm` downloads the script and `iex` runs it. Open a new terminal afterwards so that `kivadb` is found everywhere. `$env:KIVADB_INSTALL_DIR` chooses another folder, `$env:KIVADB_VERSION` another version, `$env:KIVADB_NO_MODIFY_PATH = "1"` leaves the `PATH` alone; set them before running the line. If KivaDB is running, the script stops and asks to run `kivadb stop` first (or to use `kivadb update`). It works with the PowerShell of Windows 10 and 11 and with PowerShell 7. Prefer to read a script before running it? Download `install.ps1`, open it, then run `powershell -ExecutionPolicy Bypass -File install.ps1`.
+
+**Windows by hand.** Right-click the zip, *Extract All*, then move `kivadb.exe` to a folder such as `C:\Tools`. Windows SmartScreen may warn about an unknown publisher the first time: choose *More info*, then *Run anyway*.
 
 **Linux:**
 
