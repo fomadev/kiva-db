@@ -212,7 +212,11 @@ pub fn start_resp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
                     let mut s = stream;
                     let _ = s.write_all(b"-ERR max number of clients reached\r\n");
                 } else {
-                    serve(&inst, stream);
+                    let refusal =
+                        |_: u8| b"-ERR this server requires TLS from other machines (use rediss://)\r\n".to_vec();
+                    if let Some((stream, peer)) = crate::tls::accept(&inst, stream, &refusal) {
+                        serve(&inst, stream, peer.ip().is_loopback());
+                    }
                 }
                 inst.clients.fetch_sub(1, Ordering::SeqCst);
             });
@@ -282,9 +286,8 @@ pub fn read_command(r: &mut impl BufRead) -> io::Result<Option<Vec<Vec<u8>>>> {
     }
 }
 
-fn serve(inst: &Arc<Instance>, stream: TcpStream) {
+fn serve(inst: &Arc<Instance>, stream: TcpStream, local: bool) {
     let _ = stream.set_nodelay(true);
-    let local = stream.peer_addr().map(|p| p.ip().is_loopback()).unwrap_or(false);
     let Ok(write_half) = stream.try_clone() else { return };
     let mut writer = io::BufWriter::new(write_half);
     let mut reader = BufReader::new(stream);

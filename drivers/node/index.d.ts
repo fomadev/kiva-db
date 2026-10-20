@@ -11,6 +11,13 @@ export interface ConnectOptions {
   password?: string;
   /** Milliseconds; default 8000. */
   timeout?: number;
+  /**
+   * Encrypt the connection. `true` checks the certificate against the usual
+   * authorities; `{ fingerprint }` accepts only the certificate with that
+   * SHA-256 fingerprint (shown by `kivadb tls` on the server); other keys are
+   * passed to Node's `tls.connect` (for example `ca`).
+   */
+  tls?: boolean | ({ fingerprint?: string } & Record<string, unknown>);
 }
 
 export type KivaType = "string" | "number" | "boolean" | "null" | "array" | "object" | "bytes";

@@ -25,6 +25,48 @@ pub struct ShellOpts {
     pub workspace: Option<String>,
     /// Commands given with `-e`: run them and exit.
     pub commands: Vec<String>,
+    /// Connect with TLS (`--tls`).
+    pub tls: bool,
+    /// Expected certificate fingerprint (`--tls-fingerprint`).
+    pub tls_fingerprint: Option<String>,
+    /// Where trusted servers are remembered (`known_servers`).
+    pub home: Option<std::path::PathBuf>,
+}
+
+/// Opens an encrypted connection, checking the server's certificate against
+/// the fingerprint given or remembered; a new server is shown and, at a
+/// terminal, the user is asked whether to trust it.
+fn connect_secure(addr: &str, opts: &ShellOpts) -> Result<TcpStream, String> {
+    let home = opts.home.clone().unwrap_or_else(crate::config::default_home);
+    let known = crate::tls::known_fingerprint(&home, addr);
+    let expected = opts.tls_fingerprint.clone().or(known.clone());
+    let secure = crate::tls::connect(addr, expected.as_deref(), std::time::Duration::from_secs(10))
+        .map_err(|e| format!("cannot connect to {addr} with TLS: {e}"))?;
+    if expected.is_some() {
+        if known.is_none() {
+            let _ = crate::tls::remember_fingerprint(&home, addr, &secure.fingerprint);
+        }
+        return Ok(secure.stream);
+    }
+    eprintln!("The certificate of {addr} is not known yet. Its SHA-256 fingerprint is:");
+    eprintln!("  {}", secure.fingerprint);
+    eprintln!("Compare it with what 'kivadb tls' shows on the server.");
+    if !io::stdin().is_terminal() {
+        return Err(format!(
+            "unknown certificate. After checking it, connect with: --tls-fingerprint {}",
+            secure.fingerprint
+        ));
+    }
+    eprint!("Trust this server and remember it? [y/N] ");
+    let _ = io::stderr().flush();
+    let mut answer = String::new();
+    let _ = io::stdin().read_line(&mut answer);
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes" | "o" | "oui") {
+        return Err("connection cancelled: the certificate was not trusted".into());
+    }
+    crate::tls::remember_fingerprint(&home, addr, &secure.fingerprint)
+        .map_err(|e| format!("cannot remember the server: {e}"))?;
+    Ok(secure.stream)
 }
 
 trait Backend {
@@ -229,20 +271,33 @@ pub fn run_embedded(inst: Arc<Instance>, opts: ShellOpts) -> i32 {
 
 /// Shell connected to a running instance.
 pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
-    let mut stream = match TcpStream::connect(addr) {
+    let connected = if opts.tls || opts.tls_fingerprint.is_some() {
+        connect_secure(addr, &opts)
+    } else {
+        TcpStream::connect(addr).map_err(|e| format!("cannot connect to {addr}: {e}"))
+    };
+    let mut stream = match connected {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: cannot connect to {addr}: {e}");
+            eprintln!("Error: {e}");
             return 1;
         }
     };
+    let remote = stream.peer_addr().map(|p| !p.ip().is_loopback()).unwrap_or(false);
+    if remote && !opts.tls && opts.tls_fingerprint.is_none() {
+        eprintln!("[WARN] this connection is not encrypted: the password travels in clear. Add --tls.");
+    }
     let _ = stream.set_nodelay(true);
     let hello = write_frame(&mut stream, CMD_HELLO, &[]).and_then(|_| read_frame(&mut stream));
-    let Ok((_, hello)) = hello else {
+    let Ok((code, hello)) = hello else {
         eprintln!("Error: {addr} did not answer like a KivaDB server.");
         return 1;
     };
     let hello = String::from_utf8_lossy(&hello).into_owned();
+    if code == ST_ERR {
+        eprintln!("Error: {hello}");
+        return 1;
+    }
     if io::stdin().is_terminal() && opts.commands.is_empty() {
         println!("Connected to {} at {addr}", hello.lines().next().unwrap_or("KivaDB"));
     }

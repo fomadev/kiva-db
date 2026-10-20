@@ -217,6 +217,8 @@ pub struct Instance {
     pub tcp_port: AtomicU64,
     /// State shared by the Redis-compatible connections.
     pub resp: crate::resp::Shared,
+    /// The TLS certificate, loaded on first use (None when TLS is off or broken).
+    tls_state: std::sync::OnceLock<Option<Arc<crate::tls::ServerTls>>>,
     weak: Weak<Instance>,
     _lock: File,
 }
@@ -260,6 +262,7 @@ impl Instance {
             stop_requested: AtomicBool::new(false),
             tcp_port: AtomicU64::new(0),
             resp: Default::default(),
+            tls_state: std::sync::OnceLock::new(),
             weak: weak.clone(),
             _lock: lock,
         });
@@ -362,6 +365,27 @@ impl Instance {
         fs::create_dir_all(&dir)?;
         self.cfg_mut().set("workspaces", name, &dir.display().to_string())?;
         Ok(dir)
+    }
+
+    /// The server's TLS certificate, loading or creating it on first use.
+    /// `None` when `tls.enabled` is false or the certificate cannot be used
+    /// (the reason is printed once).
+    pub fn tls(&self) -> Option<Arc<crate::tls::ServerTls>> {
+        self.tls_state
+            .get_or_init(|| {
+                if !self.cfg().get_bool("tls", "enabled") {
+                    return None;
+                }
+                let loaded = crate::tls::load_server(&self.home, &self.cfg());
+                match loaded {
+                    Ok(t) => Some(Arc::new(t)),
+                    Err(e) => {
+                        eprintln!("[WARN] encrypted connections are not available: {e}");
+                        None
+                    }
+                }
+            })
+            .clone()
     }
 
     /// Makes sure a user's personal workspace is registered.

@@ -40,8 +40,8 @@ pub fn start_tcp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
                 if inst.clients.fetch_add(1, Ordering::SeqCst) >= max {
                     let mut s = stream;
                     let _ = s.write_all(b"Error: max clients reached\n");
-                } else {
-                    handle_conn(&inst, stream);
+                } else if let Some((stream, peer)) = crate::tls::accept(&inst, stream, &refusal) {
+                    handle_conn(&inst, stream, peer);
                 }
                 inst.clients.fetch_sub(1, Ordering::SeqCst);
             });
@@ -50,9 +50,22 @@ pub fn start_tcp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
     Ok(port)
 }
 
-fn handle_conn(inst: &Arc<Instance>, stream: TcpStream) {
+/// "Encryption required", in the protocol the client started to speak.
+fn refusal(first: u8) -> Vec<u8> {
+    const MSG: &str = "this server requires an encrypted connection (TLS) from other machines";
+    if first == 0 {
+        let mut frame = Vec::new();
+        let _ = crate::proto::write_frame(&mut frame, crate::proto::ST_ERR, MSG.as_bytes());
+        frame
+    } else {
+        format!("Error: {MSG}. Connect with: kivadb --connect <host:port> --tls\n").into_bytes()
+    }
+}
+
+/// Serves one connection; `peer` is the client's address (the stream itself
+/// may be the clear end of a TLS relay, on the loopback interface).
+fn handle_conn(inst: &Arc<Instance>, stream: TcpStream, peer: std::net::SocketAddr) {
     let _ = stream.set_nodelay(true);
-    let Ok(peer) = stream.peer_addr() else { return };
     let mut first = [0u8; 1];
     match stream.peek(&mut first) {
         Ok(1) => {}

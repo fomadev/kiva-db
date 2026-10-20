@@ -317,8 +317,22 @@ pub fn start_replica(inst: &Arc<Instance>, host: &str, port: u16) {
 }
 
 fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result<()> {
-    let sock = addr.to_socket_addrs()?.next().ok_or_else(|| KivaError::Invalid(format!("cannot resolve '{addr}'")))?;
-    let mut stream = TcpStream::connect_timeout(&sock, Duration::from_secs(5))?;
+    let (master_tls, fingerprint) = {
+        let c = inst.cfg();
+        (c.get_bool("replication", "master_tls"), c.get("replication", "master_fingerprint"))
+    };
+    let mut stream = if master_tls {
+        if fingerprint.trim().is_empty() {
+            return Err(KivaError::Invalid(
+                "replication.master_tls is on: set replication.master_fingerprint to the master's (kivadb tls)".into(),
+            ));
+        }
+        crate::tls::connect(addr, Some(&fingerprint), Duration::from_secs(5))?.stream
+    } else {
+        let sock =
+            addr.to_socket_addrs()?.next().ok_or_else(|| KivaError::Invalid(format!("cannot resolve '{addr}'")))?;
+        TcpStream::connect_timeout(&sock, Duration::from_secs(5))?
+    };
     stream.set_read_timeout(Some(Duration::from_secs(1)))?;
     let _ = stream.set_nodelay(true);
 

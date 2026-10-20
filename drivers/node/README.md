@@ -31,11 +31,23 @@ db.close();
 
 A remote host always needs a password: the driver refuses to connect without one, as KivaDB itself does.
 
+Encrypt the connection with TLS, checking the server's certificate by the fingerprint that `kivadb tls` shows on the server:
+
+```js
+const db = await connect({
+  host: "31.25.236.110",
+  password: process.env.KIVADB_PASSWORD,
+  tls: { fingerprint: "77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6" },
+});
+```
+
+With a certificate from an authority (your own domain), `tls: true` is enough.
+
 ## API
 
 | Method | Does |
 | :--- | :--- |
-| `connect({host, port, user, password, timeout})` | Opens a connection and logs in |
+| `connect({host, port, user, password, timeout, tls})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }` |
 | `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer` |
 | `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`). `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
 | `del(key)` | Resolves to whether the key existed |
