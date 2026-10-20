@@ -1,6 +1,6 @@
 # KivaDB roadmap
 
-What KivaDB 1.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md). This page lists what was considered for 1.0.0 and left for later, and why. Each item says what it would really take, so that decisions are made on facts.
+What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and each version's changes in [CHANGELOG.md](CHANGELOG.md). This page lists what was considered and left for later, and why. Each item says what it would really take, so that decisions are made on facts.
 
 ## Delivered in 1.0.0 (for reference)
 
@@ -13,6 +13,14 @@ What KivaDB 1.0 contains is described in [DOCUMENTATION.md](DOCUMENTATION.md). T
 * Shell with persistent history and Tab completion
 * Kiva Studio: data browser, query builder with execution plans, similarity search, activity feed with alerts, users, server health
 * Ready-made executables for Windows x64, Linux x64 and macOS Apple Silicon, and the Docker image `fomadev0/kiva-db`, published automatically for every version
+
+## Delivered since (for reference)
+
+* **1.0.1** `kivadb start` shows every port it opened
+* **1.1.0** `kivadb update`, a daily check for new releases, `install.sh`
+* **1.2.0** Editors may compact their own personal workspace
+* **1.3.0** Redis compatibility complete enough to replace Redis as short-lived memory: Lua scripts (`EVAL`), RESP3, numbered databases, `EXPIRE` options, atomic counters across connections
+* **1.4.0** **TLS** on every port with certificates checked by fingerprint, commands over several lines, `.kva` command files, `install.ps1` for Windows
 
 ## Next, in order of value
 

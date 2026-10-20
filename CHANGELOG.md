@@ -2,7 +2,9 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased
+## 1.4.0 - 2026-10-20
+
+Encrypted connections, commands over several lines with `.kva` command files, and a one-command installer for Windows.
 
 ### Added
 
