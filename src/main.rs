@@ -21,6 +21,7 @@ USAGE:
   kivadb stop                 Stop the running database
   kivadb status               Tell whether the database is running
   kivadb update [--check]     Install the latest release (--check: only tell)
+  kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
@@ -60,6 +61,7 @@ struct Args {
     no_listen: bool,
     check_only: bool,
     renew: bool,
+    run_file: Option<PathBuf>,
     port: Option<u16>,
     bind: Option<String>,
     http_port: Option<u16>,
@@ -93,6 +95,8 @@ fn parse_args() -> Args {
             "update" => args.action = Some("update"),
             "tls" => args.action = Some("tls"),
             "renew" => args.renew = true,
+            "run" => args.run_file = Some(PathBuf::from(value(&mut it, "run"))),
+            "--keep-going" => args.shell.keep_going = true,
             "--tls" => args.shell.tls = true,
             "--tls-fingerprint" => args.shell.tls_fingerprint = Some(value(&mut it, "--tls-fingerprint")),
             "--check" => args.check_only = true,
@@ -517,6 +521,12 @@ fn main() {
     // The interactive history lives next to the data (or in the default home for --connect).
     args.shell.history = Some(home.join("history.txt"));
     args.shell.home = Some(home.clone());
+    if let Some(file) = &args.run_file {
+        match kivadb::kva::load(file) {
+            Ok(statements) => args.shell.script = Some((file.display().to_string(), statements)),
+            Err(e) => fail(&e),
+        }
+    }
     if args.action == Some("update") {
         exit(update::run(args.check_only, &home));
     }

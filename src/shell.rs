@@ -7,7 +7,8 @@
 
 use crate::exec::Action;
 use crate::instance::{Instance, VERSION};
-use crate::lineedit::{Prompt, Sink};
+use crate::kva::Statement;
+use crate::lineedit::{Input, Prompt, Sink};
 use crate::proto::*;
 use crate::session::Session;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -31,6 +32,68 @@ pub struct ShellOpts {
     pub tls_fingerprint: Option<String>,
     /// Where trusted servers are remembered (`known_servers`).
     pub home: Option<std::path::PathBuf>,
+    /// A `.kva` file to run (`kivadb run`): its name and its commands.
+    pub script: Option<(String, Vec<Statement>)>,
+    /// Go on after a failing command of the file (`--keep-going`).
+    pub keep_going: bool,
+}
+
+/// Runs the commands of a `.kva` file. A failing command is reported with
+/// its file and line; the run stops there unless `keep_going`.
+fn run_file(backend: &mut dyn Backend, name: &str, statements: &[Statement], keep_going: bool) -> i32 {
+    let mut failed = 0;
+    for st in statements {
+        let (lines, action) = backend.exec(&st.text);
+        let error = lines.iter().any(|(e, _)| *e);
+        for (e, l) in &lines {
+            if *e {
+                eprintln!("{name}:{}: {l}", st.line);
+            } else {
+                println!("{l}");
+            }
+        }
+        if error {
+            failed += 1;
+            if !keep_going {
+                eprintln!(
+                    "{name}: stopped at line {} ({} of {} commands run).",
+                    st.line,
+                    statements.iter().position(|s| s == st).unwrap_or(0) + 1,
+                    statements.len()
+                );
+                return 1;
+            }
+        }
+        if action == Action::Exit {
+            break;
+        }
+    }
+    if failed > 0 {
+        eprintln!("{name}: {failed} of {} commands failed.", statements.len());
+        return 1;
+    }
+    0
+}
+
+/// `source "file.kva"` typed in the shell: the file is read here, on the
+/// machine of the shell, and its commands are sent one by one.
+fn source(backend: &mut dyn Backend, line: &str) -> Option<i32> {
+    let mut words = line.trim().splitn(2, char::is_whitespace);
+    if !words.next()?.eq_ignore_ascii_case("source") {
+        return None;
+    }
+    let path = words.next().unwrap_or("").trim().trim_matches(['"', '\'']);
+    if path.is_empty() {
+        eprintln!("Error: give the file to run: source \"commands.kva\"");
+        return Some(1);
+    }
+    Some(match crate::kva::load(std::path::Path::new(path)) {
+        Ok(statements) => run_file(backend, path, &statements, false),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    })
 }
 
 /// Opens an encrypted connection, checking the server's certificate against
@@ -149,9 +212,16 @@ fn announce(rx: Receiver<String>, sink: Sink) {
 }
 
 fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32 {
+    if let Some((name, statements)) = &opts.script {
+        return run_file(backend, name, statements, opts.keep_going);
+    }
     if !opts.commands.is_empty() {
         let mut code = 0;
         for cmd in &opts.commands {
+            if let Some(c) = source(backend, cmd) {
+                code = code.max(c);
+                continue;
+            }
             let (lines, action) = backend.exec(cmd);
             if lines.iter().any(|(e, _)| *e) {
                 code = 1;
@@ -167,13 +237,46 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
     if interactive {
         println!("KivaDB Shell v{VERSION}\nType 'help' or 'h' for command list");
     }
-    while let Some(line) = prompt.read() {
+    let mut code = 0;
+    loop {
+        // A command goes on over several lines while a { or [ is open.
+        let mut line = match prompt.read(false) {
+            Input::Line(l) => l,
+            Input::Cancel => continue,
+            Input::End => break,
+        };
         if line.trim().is_empty() {
+            continue;
+        }
+        let mut cancelled = false;
+        while crate::kva::is_open(&line) {
+            match prompt.read(true) {
+                Input::Line(more) => {
+                    line.push('\n');
+                    line.push_str(&more);
+                }
+                Input::Cancel => {
+                    cancelled = true;
+                    break;
+                }
+                // The input ends inside the command: run it, the error says why.
+                Input::End => break,
+            }
+        }
+        if cancelled {
+            continue;
+        }
+        prompt.remember(&line);
+        if let Some(c) = source(backend, &line) {
+            code = code.max(c);
             continue;
         }
         let start = Instant::now();
         let (lines, action) = backend.exec(&line);
         let elapsed = start.elapsed();
+        if lines.iter().any(|(e, _)| *e) {
+            code = 1;
+        }
         show(&lines);
         match action {
             Action::Exit => break,
@@ -192,8 +295,10 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
     prompt.save();
     if interactive {
         println!("Goodbye.");
+        return 0;
     }
-    0
+    // Commands piped in (`kivadb < file`): say whether one of them failed.
+    code
 }
 
 /// Asks for credentials up to three times. `try_login` returns the lines to

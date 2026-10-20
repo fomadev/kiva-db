@@ -584,11 +584,75 @@ visits: 1 [number]
 
 The exit code is `0` when every command succeeded and `1` when one of them reported an error.
 
-A file of commands can be fed on standard input; lines starting with `#` are comments:
+Commands can also be fed on standard input (`kivadb < commands.txt`); the exit code is `1` if one of them failed. For files of commands, prefer the `.kva` files of [3.10](#310-command-files-kva).
+
+### 3.9 Commands over several lines
+
+A document can be written over several lines. As long as a `{` or a `[` is open, pressing Enter goes on to the next line, shown by ` ...>`; the command runs when the document closes:
+
+```text
+kiva> set user:1 {
+ ...>   "name": "Fordi",
+ ...>   "tags": ["admin",
+ ...>            "dev"]
+ ...> }
+OK: user:1 saved.
+```
+
+Brackets inside quoted text do not count (`set note "a { b"` is complete). Ctrl+C abandons a command being typed. The history keeps the whole command, so the Up arrow brings it back in one piece.
+
+### 3.10 Command files (.kva)
+
+A `.kva` file holds KivaDB commands, written as in the shell: one command per line, or over several lines for documents, with comment lines (`#` or `--`) and blank lines between commands.
+
+```text
+# strings
+set nameA "Fordi Malanda"
+set nameB "Nathan Malanda"
+
+# numbers
+set number ageM 24
+
+set user:1 {
+  "nom": "Fordi",
+  "age": 22
+}
+
+set classe:1 [
+  "1er",
+  "2eme",
+  "3eme"
+]
+```
+
+Run it with `kivadb run`:
 
 ```bash
-kivadb < commands.txt
+kivadb run data.kva
 ```
+
+```text
+OK: nameA saved.
+OK: nameB saved.
+OK: ageM saved.
+OK: user:1 saved.
+OK: classe:1 saved.
+```
+
+* **Errors** are reported with the file and the line of the command, and the run **stops there**: the commands after it are not run. `--keep-going` runs them anyway. The exit code is `1` when a command failed.
+
+  ```text
+  data.kva:12: Error: String values like 'oops' must be quoted ("" or '').
+  data.kva: stopped at line 12 (5 of 9 commands run).
+  ```
+
+* A document that is never closed is refused **before anything runs**: `data.kva:7: this command opens a { or [ that is never closed`.
+* The file is read on the machine where you type the command, and runs where the shell is connected: `kivadb --connect 31.25.236.110:2911 --tls -u kiva run data.kva` fills a remote server.
+* In the shell, `source "data.kva"` runs a file the same way.
+* `set` only creates keys, so a file that creates keys fails the second time it runs (`Key 'nameA' already exists`). To make a file you can run again, start it with `del` commands, or use `update` for keys that exist.
+* Kiva Studio runs `.kva` files from its Console ([24.7](#247-kiva-studio-the-graphical-client)).
+
+To run several commands **all or nothing**, put them between `begin` and `commit` in the file ([Chapter 13](#chapter-13--transactions)).
 
 ---
 
@@ -3776,6 +3840,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `kivadb` | Open a shell |
 | `kivadb serve` | Run the server in the foreground |
 | `kivadb -e "<command>"` | Run a command and exit (repeatable) |
+| `kivadb run <file.kva> [--keep-going]` | Run a command file ([3.10](#310-command-files-kva)) |
 | `kivadb -w <workspace>` | Open a workspace |
 | `kivadb -u <user> [-p <password>]` | Log in |
 | `kivadb --connect <host:port> [--tls]` | Shell on a remote KivaDB, encrypted with `--tls` (`--tls-fingerprint <fp>` in scripts) |
@@ -3903,6 +3968,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `help`, `h` | List of commands |
+| `source "<file.kva>"` | Run a command file |
 | `clear` | Clear the screen |
 | `ping` | Answers `PONG` |
 | `version` | Version of KivaDB |
