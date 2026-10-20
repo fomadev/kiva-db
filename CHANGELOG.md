@@ -14,6 +14,7 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * DOCUMENTATION 16.11.
 * **Commands over several lines** in the shell: while a `{` or `[` is open, Enter goes on to a ` ...>` line instead of failing with "Unclosed bracket"; the command runs when the document closes. The history keeps it whole.
 * **`.kva` command files**: commands as in the shell, documents over several lines, `#` and `--` comments. `kivadb run file.kva` runs them (also on a remote server with `--connect`), reports a failing command with its file and line and stops there (`--keep-going` to go on); `source "file.kva"` does the same in the shell. DOCUMENTATION 3.9 and 3.10.
+* **`install.ps1`**: installs the latest release on Windows in one PowerShell command, `irm https://raw.githubusercontent.com/fomadev/kiva-db/main/install.ps1 | iex`: SHA-256 check, `%LOCALAPPDATA%\Programs\KivaDB` without administrator rights, the folder added to the user's `PATH`. `KIVADB_INSTALL_DIR`, `KIVADB_VERSION`, `KIVADB_NO_MODIFY_PATH`.
 
 ### Changed
 
