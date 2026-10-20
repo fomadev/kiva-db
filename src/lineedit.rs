@@ -14,6 +14,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub const PROMPT: &str = "kiva> ";
+/// Shown while a command goes on over several lines.
+pub const CONTINUE: &str = " ...> ";
+
+/// What the user typed.
+pub enum Input {
+    Line(String),
+    /// Ctrl+C: abandon what is being typed.
+    Cancel,
+    /// Ctrl+D or the end of the input.
+    End,
+}
 
 /// First words of every command.
 const COMMANDS: &[&str] = &[
@@ -181,25 +192,30 @@ impl Prompt {
         (Prompt { editor: Some(editor), history }, sink)
     }
 
-    /// The next line, or `None` at the end of input (Ctrl+D).
-    pub fn read(&mut self) -> Option<String> {
+    /// The next line, after `kiva> `, or after ` ...> ` when `more` (a
+    /// command that goes on).
+    pub fn read(&mut self, more: bool) -> Input {
         let Some(editor) = self.editor.as_mut() else {
             let mut line = String::new();
             return match io::stdin().lock().read_line(&mut line) {
-                Ok(0) | Err(_) => None,
-                Ok(_) => Some(line.trim_end_matches(['\r', '\n']).to_string()),
+                Ok(0) | Err(_) => Input::End,
+                Ok(_) => Input::Line(line.trim_end_matches(['\r', '\n']).to_string()),
             };
         };
-        match editor.readline(PROMPT) {
-            Ok(line) => {
-                if !line.trim().is_empty() && !sensitive(&line) {
-                    let _ = editor.add_history_entry(line.as_str());
-                }
-                Some(line)
+        match editor.readline(if more { CONTINUE } else { PROMPT }) {
+            Ok(line) => Input::Line(line),
+            // Ctrl+C abandons what is being typed, as in most shells.
+            Err(ReadlineError::Interrupted) => Input::Cancel,
+            Err(_) => Input::End,
+        }
+    }
+
+    /// Adds a whole command to the history (never one holding a password).
+    pub fn remember(&mut self, command: &str) {
+        if let Some(editor) = self.editor.as_mut() {
+            if !command.trim().is_empty() && !sensitive(command) {
+                let _ = editor.add_history_entry(command);
             }
-            // Ctrl+C abandons the line being typed, as in most shells.
-            Err(ReadlineError::Interrupted) => Some(String::new()),
-            Err(_) => None,
         }
     }
 

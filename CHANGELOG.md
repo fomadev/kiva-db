@@ -12,6 +12,12 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * Shell: `kivadb --connect host:port --tls`. A new server's fingerprint is shown and, at a terminal, the user is asked to trust it; trusted servers are kept in `known_servers`. `--tls-fingerprint` for scripts. A remote connection without `--tls` prints a warning.
 * Rust client: `Client::connect_tls`. Node.js driver: the `tls` option, with `fingerprint`. Replicas: `replication.master_tls` and `replication.master_fingerprint`.
 * DOCUMENTATION 16.11.
+* **Commands over several lines** in the shell: while a `{` or `[` is open, Enter goes on to a ` ...>` line instead of failing with "Unclosed bracket"; the command runs when the document closes. The history keeps it whole.
+* **`.kva` command files**: commands as in the shell, documents over several lines, `#` and `--` comments. `kivadb run file.kva` runs them (also on a remote server with `--connect`), reports a failing command with its file and line and stops there (`--keep-going` to go on); `source "file.kva"` does the same in the shell. DOCUMENTATION 3.9 and 3.10.
+
+### Changed
+
+* Commands piped into the shell (`kivadb < file`) end with exit code 1 when one of them failed (it was always 0).
 
 ## 1.3.0 - 2026-10-18
 

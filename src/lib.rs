@@ -24,6 +24,7 @@ pub mod hint;
 pub mod http;
 pub mod instance;
 pub mod jsonpath;
+pub mod kva;
 pub mod lexer;
 pub mod lineedit;
 pub mod proto;
