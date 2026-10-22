@@ -24,6 +24,8 @@ USAGE:
   kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb keygen               Print a new encryption key (for KIVADB_ENCRYPTION_KEY)
+  kivadb backup -o <f.tar.gz> Save the home (or -w <workspace>) to an archive, even while running
+  kivadb restore <f.tar.gz>   Restore an archive (--target <dir>, --as <name>, --check: only verify)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
@@ -63,6 +65,11 @@ struct Args {
     check_only: bool,
     renew: bool,
     run_file: Option<PathBuf>,
+    /// `backup -o`, `restore <archive>`, `--target`, `--as`.
+    output: Option<PathBuf>,
+    archive: Option<PathBuf>,
+    target: Option<PathBuf>,
+    rename: Option<String>,
     port: Option<u16>,
     bind: Option<String>,
     http_port: Option<u16>,
@@ -96,6 +103,14 @@ fn parse_args() -> Args {
             "update" => args.action = Some("update"),
             "tls" => args.action = Some("tls"),
             "keygen" => args.action = Some("keygen"),
+            "backup" => args.action = Some("backup"),
+            "restore" => {
+                args.action = Some("restore");
+                args.archive = Some(PathBuf::from(value(&mut it, "restore")));
+            }
+            "-o" | "--output" => args.output = Some(PathBuf::from(value(&mut it, "--output"))),
+            "--target" => args.target = Some(PathBuf::from(value(&mut it, "--target"))),
+            "--as" => args.rename = Some(value(&mut it, "--as")),
             "renew" => args.renew = true,
             "run" => args.run_file = Some(PathBuf::from(value(&mut it, "run"))),
             "--keep-going" => args.shell.keep_going = true,
@@ -503,6 +518,69 @@ fn stop(home: &Path, args: &Args) -> i32 {
     1
 }
 
+/// `kivadb backup`: by the running server when there is one, else directly.
+fn backup(home: &Path, args: &Args) -> i32 {
+    let Some(output) = &args.output else {
+        eprintln!("Error: say where to write the archive: kivadb backup --output <file.tar.gz> [-w <workspace>]");
+        return 2;
+    };
+    // The server may run in another folder: give it an absolute path.
+    let output = std::path::absolute(output).unwrap_or_else(|_| output.clone());
+    let workspace = args.shell.workspace.clone();
+    if let Some(port) = running_port(home) {
+        let mut opts = args.shell.clone();
+        opts.workspace = None;
+        let scope = workspace.map(|w| format!(" workspace {w}")).unwrap_or_default();
+        opts.commands = vec![format!("backup to \"{}\"{scope}", output.display())];
+        return shell::run_client(&format!("127.0.0.1:{port}"), opts);
+    }
+    let inst = match Instance::open(home, args.opts.clone()) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let scope = workspace.map(kivadb::backup::Scope::Workspace).unwrap_or(kivadb::backup::Scope::Home);
+    match kivadb::backup::backup(&inst, &scope, &output) {
+        Ok(report) => {
+            for line in report.lines() {
+                println!("{line}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
+}
+
+/// `kivadb restore`: checks the archive, then restores it (KivaDB stopped).
+fn restore(home: &Path, args: &Args) -> i32 {
+    let archive = args.archive.clone().unwrap_or_default();
+    if let Some(note) = kivadb::backup::missing_checksum_note(&archive) {
+        eprintln!("{note}");
+    }
+    let opts = kivadb::backup::RestoreOptions {
+        target: args.target.clone(),
+        rename: args.rename.clone(),
+        check_only: args.check_only,
+    };
+    match kivadb::backup::restore(&archive, home, &opts) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+    }
+}
+
 fn status(home: &Path) -> i32 {
     match running_port(home) {
         Some(port) => {
@@ -544,6 +622,12 @@ fn main() {
     }
     if args.action == Some("tls") {
         exit(show_tls(&home, args.renew));
+    }
+    if args.action == Some("restore") {
+        exit(restore(&home, &args));
+    }
+    if args.action == Some("backup") {
+        exit(backup(&home, &args));
     }
     if args.action == Some("keygen") {
         println!("{}", kivadb::crypt::generate_key());

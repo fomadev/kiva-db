@@ -2338,12 +2338,35 @@ The hint file is written at every clean stop, after every compaction, and period
 
 ### 17.7 Backups
 
-A workspace is a folder. To back it up:
+**Saving.** One command saves everything (configuration, users and their passwords, scripts, every workspace wherever its folder is, the audit log, the TLS certificate) into one `.tar.gz` file:
 
-1. Stop KivaDB (`kivadb stop`) or, at least, make sure nothing is writing.
-2. Copy the workspace folder (the important file is `store.kiva`; the others can be rebuilt).
+```bash
+kivadb backup --output /backups/kivadb-2026-10-22.tar.gz
+```
 
-To back up everything (users, configuration, all default-location workspaces), copy the whole home directory. For a copy that stays up to date continuously, use a replica ([Chapter 25](#chapter-25--replication)).
+```text
+Backup written: /backups/kivadb-2026-10-22.tar.gz (12.4 MB, 9 file(s), workspace(s): default, shop)
+SHA-256: 3b0c...e91f (also in /backups/kivadb-2026-10-22.tar.gz.sha256)
+```
+
+* **KivaDB may keep running.** When it runs, the command asks the server to make the backup (give `-u kiva -p ...` when authentication is on); otherwise it opens the files itself. Each data file is saved as it was at one instant: writes made during the backup simply come after it, and a compaction waits until the copy is done. Nothing is paused.
+* `-w shop` saves one workspace only.
+* Next to the archive, `<archive>.sha256` holds its SHA-256, in the format of `sha256sum -c`. Inside, a manifest lists every file with its own SHA-256.
+* The index snapshot and the HNSW graphs are not saved: KivaDB rebuilds them. Encrypted data stays encrypted in the archive ([16.12](#1612-encryption-at-rest)): keep the key apart from the backups, and do not lose it.
+* An existing file is never overwritten: give each backup its own name, for example with the date. From the shell, `backup to "/backups/x.tar.gz"` does the same (admin; the path is on the server).
+
+**Restoring.** KivaDB must be stopped on the home that receives the data. Nothing is written until the whole archive has been checked: its SHA-256 against the `.sha256` file, every file against the manifest, and the checksum of every record.
+
+```bash
+kivadb restore /backups/kivadb-2026-10-22.tar.gz --check                    # only check
+kivadb restore /backups/kivadb-2026-10-22.tar.gz --target /srv/kivadb-new   # a whole home
+```
+
+* **A home backup** is restored into an empty folder (`--target`, or the home of the command if it is empty); its workspaces are placed inside it (`data`, `workspaces/<name>`) and `kiva.conf` is updated to point at them. Then start it: `kivadb --home /srv/kivadb-new start`. To replace a damaged home, move it away first, then restore in its place.
+* **A workspace backup** becomes a workspace of the current home, under its own name or another one: `kivadb restore shop.tar.gz --as shop_old` (`--target` chooses its folder). An existing workspace is never overwritten.
+* A damaged archive is refused with the reason (`its SHA-256 does not match`, `store.kiva does not match its SHA-256`, `checksum mismatch in the record at byte ...`), and nothing changes.
+
+**Keep them safe.** Copy the archives to another machine or another site: a backup on the same disk dies with it. Restore one now and then, as a test (29.7). For a copy that stays up to date continuously, use a replica ([Chapter 25](#chapter-25--replication)); a replica does not replace backups, since a deletion reaches it too.
 
 ### 17.8 Measuring speed
 
@@ -3926,15 +3949,18 @@ KIVADB_ADMIN_PASSWORD=a-long-secret docker compose up -d
 
 On Windows PowerShell, set the variable first: `$env:KIVADB_ADMIN_PASSWORD = "a-long-secret"`, then `docker compose up -d`.
 
-**Backup.** The volume holds everything. Stop the container, then archive the volume:
+**Backup.** While the container runs, `kivadb backup` writes the archive inside the volume; copy it out with `docker cp`:
 
 ```bash
-docker stop kivadb
-docker run --rm -v kivadb-data:/data -v "$PWD":/backup debian:bookworm-slim tar czf /backup/kivadb-backup.tar.gz -C /data .
-docker start kivadb
+docker exec kivadb kivadb backup -u kiva -p "$KIVADB_ADMIN_PASSWORD" -o /data/backups/kivadb-$(date +%F).tar.gz
+docker cp kivadb:/data/backups/. ./backups/
 ```
 
-To restore, extract the archive into an empty volume the same way (`tar xzf /backup/kivadb-backup.tar.gz -C /data`) before starting the container.
+To restore, put the archive in an empty volume and run `kivadb restore` there before starting the container ([17.7](#177-backups)):
+
+```bash
+docker run --rm -v kivadb-new:/data -v "$PWD/backups":/backups fomadev0/kiva-db restore /backups/kivadb-2026-10-22.tar.gz --target /data
+```
 
 **Upgrade.** Download the new image, remove the container, run it again with the same volume. The data is untouched:
 
@@ -4062,6 +4088,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `kivadb --connect <host:port> [--tls]` | Shell on a remote KivaDB, encrypted with `--tls` (`--tls-fingerprint <fp>` in scripts) |
 | `kivadb tls` / `kivadb tls renew` | Show the TLS certificate and its fingerprint / create a new one |
 | `kivadb keygen` | Print a new encryption key ([16.12](#1612-encryption-at-rest)) |
+| `kivadb backup -o <file.tar.gz> [-w <workspace>]` | Save the home or a workspace, even while KivaDB runs ([17.7](#177-backups)) |
+| `kivadb restore <file.tar.gz> [--target <dir>] [--as <name>] [--check]` | Check, then restore an archive (KivaDB stopped) |
 | `kivadb --no-listen` | Shell on local files that other shells cannot join |
 | `kivadb --home <folder>` | Use another home directory |
 | `kivadb --skip-auth` | Start without authentication (maintenance) |
@@ -4129,6 +4157,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `check` / `check repair` | Verify / repair |
 | `hint info` | State of the index snapshot |
 | `encryption` | Encryption at rest: key in use, records still in clear (admin) |
+| `backup to "<file.tar.gz>" [workspace <name>]` | Archive the home or a workspace, written by the server (admin) |
 | `compress lz4\|zlib\|none` | Re-encode the workspace (admin) |
 | `bench write <N>` / `bench read <N>` | Measure speed (admin) |
 | `shutdown` | Stop the database (admin) |

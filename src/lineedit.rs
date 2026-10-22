@@ -56,6 +56,7 @@ const COMMANDS: &[&str] = &[
     "check",
     "hint",
     "encryption",
+    "backup",
     "compress",
     "workspace",
     "config",

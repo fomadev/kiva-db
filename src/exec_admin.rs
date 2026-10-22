@@ -39,6 +39,7 @@ impl Session {
             "workspace" => self.cmd_workspace(a, out),
             "hint" => self.cmd_hint(a, out),
             "encryption" => self.cmd_encryption(a, out),
+            "backup" => self.cmd_backup(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
             "compact" => {
@@ -981,6 +982,28 @@ impl Session {
 
 /// `on <pattern> ( <field> )`. A pattern without wildcard is used as a prefix.
 impl Session {
+    /// `backup to "<file.tar.gz>" [workspace <name>]`: an archive of the whole
+    /// home, or of one workspace, written by the server while it keeps serving.
+    fn cmd_backup(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "Usage: backup to \"<file.tar.gz>\" [workspace <name>]";
+        let mut c = Cur::new(a);
+        if !c.eat("to") {
+            return Err(USAGE.into());
+        }
+        let file = word(c.next(), "a file name").map_err(|e| format!("{e}\n{USAGE}"))?;
+        let scope = if c.eat("workspace") {
+            crate::backup::Scope::Workspace(word(c.next(), "a workspace name")?)
+        } else {
+            crate::backup::Scope::Home
+        };
+        c.finish(USAGE)?;
+        let report = crate::backup::backup(&self.inst, &scope, std::path::Path::new(&file))?;
+        for line in report.lines() {
+            out.say(line);
+        }
+        Ok(())
+    }
+
     /// `encryption`: whether data is encrypted at rest, and what is left in clear.
     fn cmd_encryption(&mut self, a: &[Token], out: &mut Out) -> R {
         if !a.is_empty() {
