@@ -60,6 +60,48 @@ fn set_get_update_follow_the_typing_rules() {
 }
 
 #[test]
+fn if_not_exists_and_if_exists_make_commands_idempotent() {
+    let dir = TempDir::new("if_exists");
+    let mut s = kiva(&dir);
+
+    // set ... if not exists: creates once, then skips without an error.
+    assert_eq!(ok(&mut s, "set a 1 if not exists"), "OK: a saved.");
+    assert_eq!(ok(&mut s, "set a 2 if not exists"), "OK: a skipped (already exists)");
+    assert_eq!(ok(&mut s, "SET a 3 If Not EXISTS"), "OK: a skipped (already exists)");
+    assert_eq!(ok(&mut s, "get a"), "a: 1 [number]");
+    assert!(fails(&mut s, "set a 4").contains("already exists"));
+
+    // With a type, a TTL and `and` chains (the clause belongs to each segment).
+    assert_eq!(ok(&mut s, "set string name 'Fordi' ttl 60 if not exists"), "OK: name saved.");
+    assert_eq!(
+        ok(&mut s, "set a 9 if not exists and b 2 if not exists"),
+        "OK: a skipped (already exists)\nOK: b saved."
+    );
+    assert!(fails(&mut s, "set a 9 if not exists and b 3").contains("Key 'b' already exists"));
+    // The value is still checked, even when the key would be skipped.
+    assert!(fails(&mut s, "set c oops if not exists").contains("must be quoted"));
+    // A quoted "exists" is a value, not the clause.
+    assert!(fails(&mut s, "set d if not \"exists\"").contains("Invalid set syntax"));
+    assert!(fails(&mut s, "set if not exists").contains("Missing key or value"));
+
+    // del ... if exists: deletes once, then skips.
+    assert_eq!(ok(&mut s, "del a if exists"), "Deleted: a");
+    assert_eq!(ok(&mut s, "del a if exists"), "OK: a skipped (does not exist)");
+    assert_eq!(ok(&mut s, "DEL a IF EXISTS and b if exists"), "OK: a skipped (does not exist)\nDeleted: b");
+    assert!(fails(&mut s, "del number name if exists").contains("Type mismatch"));
+    assert_eq!(ok(&mut s, "del string name if exists"), "Deleted: name");
+
+    // Inside a transaction the check sees the transaction's own writes.
+    ok(&mut s, "begin");
+    assert_eq!(ok(&mut s, "set t 1 if not exists"), "OK: t saved.");
+    assert_eq!(ok(&mut s, "set t 2 if not exists"), "OK: t skipped (already exists)");
+    assert_eq!(ok(&mut s, "del t if exists"), "Deleted: t");
+    assert_eq!(ok(&mut s, "del t if exists"), "OK: t skipped (does not exist)");
+    ok(&mut s, "commit");
+    assert_eq!(ok(&mut s, "has t"), "No: Key 't' does not exist.");
+}
+
+#[test]
 fn structured_types() {
     let dir = TempDir::new("structured");
     let mut s = kiva(&dir);

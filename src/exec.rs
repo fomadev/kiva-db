@@ -140,6 +140,15 @@ pub(crate) fn uint(t: Option<&Token>, what: &str) -> Result<u64, String> {
     }
 }
 
+/// Removes a trailing clause such as `if not exists` (any case) and tells
+/// whether it was there. Quoted words are values, never a clause.
+fn strip_clause<'a>(a: &'a [Token], words: &[&str]) -> (&'a [Token], bool) {
+    match a.len().checked_sub(words.len()) {
+        Some(n) if a[n..].iter().zip(words).all(|(t, w)| t.is_kw(w)) => (&a[..n], true),
+        _ => (a, false),
+    }
+}
+
 fn parse_bytes(text: &str) -> Option<Vec<u8>> {
     if let Some(h) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         return hex_decode(h);
@@ -428,11 +437,12 @@ const HELP: &str = r#"
   - Types          : string, number, boolean, null, array, object, bytes.
 
   DATA:
-  set [t] <key> <val> [ttl <sec>]   : Create a key (fails if it exists).
+  set [t] <key> <val> [ttl <sec>]   : Create a key (fails if it exists;
+                                      'if not exists' skips it instead).
   update [t] <key> <val>            : Replace the value of an existing key (type-safe).
   get [t] <k1> [and <k2>...]        : Read values. 'get user:1.name' reads one field.
   has [t] <key> | typeof <key>      : Existence / type checks.
-  del [t] <key> | del all keys      : Delete keys, or wipe the workspace (admin).
+  del [t] <key> [if exists]         : Delete keys. 'del all keys' wipes the workspace (admin).
   change [t] <old> to [t] <new> [v] : Atomic rename / type migration.
   bump [t] <key> <add|set> <sec>    : Extend or reset a TTL.
   print <expr1>, <expr2>            : Arithmetic and "${key}" interpolation.
@@ -646,7 +656,8 @@ impl Session {
     }
 
     fn set_one(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "set [type] <key> <value> [ttl <sec>]";
+        const USAGE: &str = "set [type] <key> <value> [ttl <sec>] [if not exists]";
+        let (a, if_absent) = strip_clause(a, &["if", "not", "exists"]);
         let mut c = Cur::new(a);
         let forced = match c.peek().and_then(type_kw) {
             Some(ty) if a.len() >= 3 => {
@@ -671,6 +682,10 @@ impl Session {
         let key = key_for_write(kt)?;
         let value = parse_value(vt, forced, &key)?;
         if self.kv_exists(&key)? {
+            if if_absent {
+                out.say(format!("OK: {key} skipped (already exists)"));
+                return Ok(());
+            }
             return Err(format!("Key '{key}' already exists. Use 'update' to change it."));
         }
         let expires_at = if ttl > 0 { now_secs() + ttl } else { 0 };
@@ -819,8 +834,13 @@ impl Session {
     }
 
     fn del_one(&mut self, a: &[Token], out: &mut Out) -> R {
-        let (want, key) = Self::typed_key(a, "del [type] <key> | del all keys")?;
+        let (a, if_present) = strip_clause(a, &["if", "exists"]);
+        let (want, key) = Self::typed_key(a, "del [type] <key> [if exists] | del all keys")?;
         let Some(actual) = self.kv_type(&key)? else {
+            if if_present {
+                out.say(format!("OK: {key} skipped (does not exist)"));
+                return Ok(());
+            }
             out.say(format!("Not found: {key}"));
             return Ok(());
         };

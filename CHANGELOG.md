@@ -2,6 +2,13 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased
+
+### Added
+
+* `set <key> <value> if not exists`: creates the key only when it is absent; otherwise the command succeeds with `OK: <key> skipped (already exists)` instead of an error. Works with a type, `ttl` and `and` chains.
+* `del <key> if exists`: deletes the key when present; otherwise prints `OK: <key> skipped (does not exist)`. Both clauses are case-insensitive and make `.kva` files safe to run again. DOCUMENTATION 6.1, 6.5 and 3.10.
+
 ## 1.4.0 - 2026-10-20
 
 Encrypted connections, commands over several lines with `.kva` command files, and a one-command installer for Windows.

@@ -99,6 +99,28 @@ fn a_failing_command_is_reported_with_its_line_and_stops_the_file() {
 }
 
 #[test]
+fn a_file_with_if_clauses_runs_again_without_errors() {
+    let dir = TempDir::new("kva_again");
+    let file = dir.path().join("seed.kva");
+    std::fs::write(
+        &file,
+        "del old if exists\nset name \"Fordi\" if not exists\nset user:1 {\n  \"age\": 22\n} if not exists\n",
+    )
+    .unwrap();
+    let home = dir.path().join("home");
+    let first = kivadb(&home, &["run", file.to_str().unwrap()], None);
+    assert!(first.status.success(), "{}", err(&first));
+    assert_eq!(out(&first), "OK: old skipped (does not exist)\nOK: name saved.\nOK: user:1 saved.\n");
+
+    let again = kivadb(&home, &["run", file.to_str().unwrap()], None);
+    assert!(again.status.success(), "{}", err(&again));
+    assert_eq!(
+        out(&again),
+        "OK: old skipped (does not exist)\nOK: name skipped (already exists)\nOK: user:1 skipped (already exists)\n"
+    );
+}
+
+#[test]
 fn commands_go_on_over_several_lines_until_their_document_closes() {
     let dir = TempDir::new("kva_lines");
     let home = dir.path().join("home");
