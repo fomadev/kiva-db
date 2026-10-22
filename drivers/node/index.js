@@ -218,6 +218,26 @@ class KivaClient extends EventEmitter {
     return this.api({ op: "stats" });
   }
 
+  /**
+   * Semantic cache: the answer stored for this question or a near-identical
+   * one, or null. Give the question's embedding (vector), its text, or both.
+   * @param {string} cache cache name
+   * @param {object} question text, vector, threshold (default 0.98)
+   */
+  async semanticLookup(cache, question = {}) {
+    const r = await this.api({ op: "semantic", action: "lookup", cache, ...question });
+    return r.hit ? { answer: r.answer, similarity: r.similarity, id: r.id } : null;
+  }
+
+  /**
+   * Semantic cache: remembers the answer to a question.
+   * @param {object} question text, vector, ttl (seconds), depends (key patterns)
+   */
+  async semanticStore(cache, answer, question = {}) {
+    const r = await this.api({ op: "semantic", action: "store", cache, answer, ...question });
+    return r.id;
+  }
+
   /** Receives "change" events for keys matching the pattern. */
   async subscribe(pattern = "*") {
     await this.exec(`subscribe "${String(pattern).replace(/"/g, "")}"`);

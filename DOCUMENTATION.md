@@ -1567,6 +1567,47 @@ Building the graph took 57 s (155 s for the evenly spread vectors); stopping and
 
 The structured request `similar` returns the same results as JSON (`{"op": "similar", "target": "doc:*.embedding", "vector": [...], "limit": 5, "metric": "cosine"}`, plus `"ef"` and `"exact"`; the answer says `"approximate": true` when an HNSW index answered), on port 2911 or with `POST /v1/api`. The Node.js driver has `db.similar(target, vector, {limit, metric, ef, exact})`, and Kiva Studio has a Similarity tab in its Query screen.
 
+
+### 12.8 Semantic cache: reuse answers to the same question
+
+Calling a language model costs time (often seconds) and money, and users ask the same things again and again, rarely with the same words: *"What is the capital of the DRC?"*, *"capital of Congo-Kinshasa?"*. The **semantic cache** keeps each answer next to the embedding of its question; a later question whose embedding is close enough gets that answer back, in a fraction of a millisecond, without calling the model.
+
+KivaDB does not compute embeddings: your application already does (it needs them for its own searches), and gives the vector to KivaDB. A question repeated word for word is also found by its **text** alone (ignoring case and extra spaces), before any embedding is computed.
+
+```text
+kiva> semantic lookup faq vector [0.12, -0.40, ...]
+Miss (closest similarity 0.6000, threshold 0.98)
+                       ...the application calls its model, then:
+kiva> semantic store faq text "What is the capital of the DRC?" vector [0.12, -0.40, ...] answer "Kinshasa" depends "geo:*"
+Stored as faq:1 (expires in 300 s).
+kiva> semantic lookup faq vector [0.12, -0.39, ...]
+Hit (similarity 0.9950, faq:1): "Kinshasa"
+kiva> semantic lookup faq text "what is the capital of the DRC?"
+Hit (similarity 1.0000, faq:1): "Kinshasa"
+```
+
+| Command | Effect |
+| :--- | :--- |
+| `semantic lookup <cache> [text "<q>"] [vector [...]] [threshold <0-1>]` | The stored answer of this question or a near-identical one (`Hit`), or `Miss` with the closest similarity seen |
+| `semantic store <cache> [text "<q>"] [vector [...]] answer <value> [ttl <sec>] [depends "<pattern>", ...]` | Remember an answer (any value: text, number, JSON document) |
+| `semantic stats` | Entries, hits, misses and hit rate of each cache |
+| `semantic clear [<cache>]` | Forget one cache, or every cache of the workspace |
+
+* **Several caches**, by name (`faq`, `support`, `llm`...), per workspace. A cache holds vectors of one length: those of one model.
+* **Similarity**: cosine, through an HNSW graph ([12.5](#125-approximate-index-hnsw-for-large-collections)). `semantic.cache.threshold` (0.98) decides what counts as the same question; lower it and different questions start to share answers. The right value depends on your embedding model: look at the similarities `semantic lookup` reports for a few rewordings and a few different questions, and set the threshold between the two.
+* **Freshness**: an answer lives `semantic.cache.ttl` seconds (300; `ttl` per entry, `ttl 0` = until invalidated). An answer built from your data names it with `depends`: as soon as a key matching one of those patterns is written or deleted, the answer is dropped. Storing the same question again replaces its answer. Beyond `semantic.cache.max_entries` (10 000 per cache), the oldest answers go first.
+* **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
+* The cache lives in memory: it is not saved, replicated or backed up, and fills again after a restart.
+
+**How much it saves.** Measured (release build) on 2 000 cached questions of 128 dimensions: a lookup takes about 0.13 ms. Of 500 questions (400 rewordings of known ones, 100 new), the 400 rewordings were all recognised with the right answer and the 100 new ones all went to the model: 80 % fewer model calls. The test `a_cache_in_front_of_a_slow_model_saves_most_of_its_calls` in `tests/semantic_cache.rs` repeats it.
+
+**From programs.** The structured request `{"op": "semantic", "action": "lookup" | "store", "cache": "faq", "text": "...", "vector": [...], "threshold": 0.98, "answer": ..., "ttl": 300, "depends": ["geo:*"]}` answers `{"hit": true, "answer": ..., "similarity": 0.995, "id": "faq:1"}` or `{"hit": false, "best": 0.6}`. In Node.js:
+
+```js
+const cached = await db.semanticLookup("faq", { vector: embedding });
+const answer = cached ? cached.answer : await askTheModel(question);
+if (!cached) await db.semanticStore("faq", answer, { text: question, vector: embedding, depends: ["kb:*"] });
+```
 ---
 
 ## Chapter 13 — Transactions
@@ -1863,6 +1904,10 @@ network.port = 2911
 | `encryption.old_key_file` | empty | Previous key, read during a key rotation | next start |
 | `encryption.required` | `false` | Refuse to start without a key, and refuse unencrypted records | next start |
 | `replication.*` | | See [Chapter 25](#chapter-25--replication) | |
+| `semantic.cache.enabled` | `false` | Also cache the results of `get similar` ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) | immediately |
+| `semantic.cache.threshold` | `0.98` | Cosine similarity from which two questions count as the same | immediately |
+| `semantic.cache.ttl` | `300` | Seconds a cached answer lives; `0` = until invalidated | immediately |
+| `semantic.cache.max_entries` | `10000` | Answers kept per cache | immediately |
 | `failover.auto` | `false` | Replace a dead master automatically ([25.8](#258-automatic-failover)) | immediately |
 | `failover.heartbeat_ms` | `1000` | Milliseconds between the master's heartbeats | immediately |
 | `failover.down_after_ms` | `5000` | Silence after which a replica considers the master down | immediately |
@@ -4188,6 +4233,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `get similar <pat>.<field> to <vector> [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search |
 | `create vector index on <pat> (<field>)` | Keep vectors in memory, exact search (admin) |
 | `create vector index on <pat> (<field>) using hnsw [metric m] [m N] [ef N]` | Approximate index for large collections (admin) |
+| `semantic lookup / store / stats / clear` | Semantic cache of answers ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) |
 | `drop vector index on <pat> (<field>)` | Remove it (admin) |
 | `convert <key> to msgpack\|json` | Change a document's encoding |
 

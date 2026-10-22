@@ -36,6 +36,7 @@ pub mod pubsub;
 pub mod repl;
 pub mod resp;
 pub mod script;
+pub mod semantic_cache;
 pub mod server;
 pub mod session;
 pub mod shell;

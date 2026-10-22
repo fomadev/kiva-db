@@ -39,6 +39,7 @@ impl Session {
             "workspace" => self.cmd_workspace(a, out),
             "hint" => self.cmd_hint(a, out),
             "encryption" => self.cmd_encryption(a, out),
+            "semantic" => self.cmd_semantic(a, out),
             "backup" => self.cmd_backup(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
@@ -1011,6 +1012,111 @@ impl Session {
             out.say(line);
         }
         Ok(())
+    }
+
+    /// `semantic lookup | store | stats | clear`: the semantic cache.
+    fn cmd_semantic(&mut self, a: &[Token], out: &mut Out) -> R {
+        use crate::semantic_cache::{Lookup, Question, Settings};
+        const USAGE: &str = "Usage: semantic lookup <cache> [text \"<question>\"] [vector [..]] [threshold <0-1>]
+       semantic store <cache> [text \"<question>\"] [vector [..]] answer <value> [ttl <sec>] [depends \"<pattern>\", ...]
+       semantic stats | semantic clear [<cache>]";
+        let settings = Settings::of(&self.inst.cfg());
+        let mut c = Cur::new(a);
+        let action = word(c.next(), "lookup, store, stats or clear").map_err(|_| USAGE.to_string())?;
+        match action.to_ascii_lowercase().as_str() {
+            "stats" => {
+                c.finish(USAGE)?;
+                let stats = self.inst.semantic.stats(&self.ws);
+                if stats.is_empty() {
+                    out.say("No semantic cache in this workspace yet.");
+                }
+                for (name, entries, hits, misses) in stats {
+                    let rate = (hits * 100).checked_div(hits + misses).unwrap_or(0);
+                    out.say(format!("{name}: {entries} entries, {hits} hits, {misses} misses ({rate}% hit rate)"));
+                }
+                Ok(())
+            }
+            "clear" => {
+                let name = c.next().map(|t| t.text.clone());
+                c.finish(USAGE)?;
+                let n = self.inst.semantic.clear(&self.ws, name.as_deref());
+                out.say(format!("Cleared {n} cached answer(s)."));
+                Ok(())
+            }
+            act @ ("lookup" | "store") => {
+                let name = word(c.next(), "a cache name").map_err(|e| format!("{e}\n{USAGE}"))?;
+                let mut q = Question::default();
+                let (mut threshold, mut ttl, mut answer, mut depends) =
+                    (settings.threshold, settings.ttl, None, Vec::new());
+                loop {
+                    if c.eat("text") {
+                        q.text = Some(
+                            c.next().filter(|t| t.is_quoted()).ok_or("text needs a quoted question")?.text.clone(),
+                        );
+                    } else if c.eat("vector") {
+                        let t =
+                            c.next().filter(|t| t.kind == Kind::Json).ok_or("vector needs a JSON array of numbers")?;
+                        let j: serde_json::Value = serde_json::from_str(&t.text).map_err(|e| e.to_string())?;
+                        q.vector = Some(crate::vector::from_json(&j).ok_or("vector needs a JSON array of numbers")?);
+                    } else if c.eat("threshold") {
+                        let t = c.next().map(|t| t.text.clone()).unwrap_or_default();
+                        threshold = t
+                            .parse()
+                            .ok()
+                            .filter(|t: &f32| *t > 0.0 && *t <= 1.0)
+                            .ok_or("threshold is a number between 0 and 1")?;
+                    } else if c.eat("ttl") {
+                        ttl = uint(c.next(), "ttl")? as i64;
+                    } else if c.eat("answer") {
+                        let t = c.next().ok_or("answer needs a value")?;
+                        answer = Some(match t.kind {
+                            Kind::Json => serde_json::from_str(&t.text).map_err(|e| e.to_string())?,
+                            _ if t.is_quoted() => serde_json::Value::String(t.text.clone()),
+                            _ => serde_json::from_str(&t.text).unwrap_or(serde_json::Value::String(t.text.clone())),
+                        });
+                    } else if c.eat("depends") {
+                        loop {
+                            depends.push(
+                                c.next()
+                                    .filter(|t| t.is_quoted())
+                                    .ok_or("depends needs quoted key patterns")?
+                                    .text
+                                    .clone(),
+                            );
+                            if c.peek().is_some_and(|t| t.kind == Kind::Comma) {
+                                c.next();
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                c.finish(USAGE)?;
+                if act == "lookup" {
+                    match self.inst.semantic.lookup(&self.ws, &name, &q, threshold)? {
+                        Lookup::Hit { id, similarity, answer } => {
+                            out.say(format!("Hit (similarity {similarity:.4}, {id}): {answer}"))
+                        }
+                        Lookup::Miss { best: Some(b) } => {
+                            out.say(format!("Miss (closest similarity {b:.4}, threshold {threshold})"))
+                        }
+                        Lookup::Miss { best: None } => out.say("Miss (nothing cached for this question)"),
+                    }
+                    return Ok(());
+                }
+                let answer = answer.ok_or_else(|| format!("store needs an answer.\n{USAGE}"))?;
+                let id = self.inst.semantic.store(&self.ws, &name, &q, answer, ttl, depends, settings.max_entries)?;
+                out.say(if ttl > 0 {
+                    format!("Stored as {id} (expires in {ttl} s).")
+                } else {
+                    format!("Stored as {id} (no expiry).")
+                });
+                Ok(())
+            }
+            _ => Err(USAGE.into()),
+        }
     }
 
     /// `encryption`: whether data is encrypted at rest, and what is left in clear.

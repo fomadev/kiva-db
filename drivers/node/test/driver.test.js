@@ -89,6 +89,12 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     await db.set("doc:1", { t: "cat", embedding: [1, 0, 0] });
     await db.set("doc:2", { t: "car", embedding: [0, 0, 1] });
     const [best] = await db.similar("doc:*.embedding", [0.9, 0.1, 0], { limit: 1 });
+    // Semantic cache: a near-identical question gets the stored answer.
+    assert.equal(await db.semanticStore("faq", { text: "Capital?" }, { vector: [1, 0, 0], ttl: 60 }), "faq:1");
+    const hit = await db.semanticLookup("faq", { vector: [1, 0.05, 0] });
+    assert.deepEqual(hit.answer, { text: "Capital?" });
+    assert.ok(hit.similarity > 0.99);
+    assert.equal(await db.semanticLookup("faq", { vector: [0, 1, 0] }), null);
     assert.equal(best.key, "doc:1");
     assert.equal(best.value.t, "cat");
   });
