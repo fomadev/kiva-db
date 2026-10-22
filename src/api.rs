@@ -192,10 +192,19 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 None => crate::vector::Metric::Cosine,
             };
             let limit = req["limit"].as_u64().unwrap_or(10).clamp(1, 1000) as usize;
-            let r = sess.engine.similar(&crate::engine::VectorQuery { pattern, field, vector, metric, limit })?;
+            let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, limit);
+            q.ef = req["ef"].as_u64().unwrap_or(0).min(100_000) as usize;
+            q.exact = req["exact"].as_bool().unwrap_or(false);
+            let r = sess.engine.similar(&q)?;
             let rows: Vec<Json> =
                 r.rows.iter().map(|(k, score, doc)| json!({ "key": k, "score": score, "value": doc })).collect();
-            Ok(json!({ "results": rows, "metric": metric.name(), "compared": r.compared, "indexed": r.indexed }))
+            Ok(json!({
+                "results": rows,
+                "metric": metric.name(),
+                "compared": r.compared,
+                "indexed": r.indexed,
+                "approximate": r.approximate
+            }))
         }
         "stats" => {
             sess.check(Need::Read)?;

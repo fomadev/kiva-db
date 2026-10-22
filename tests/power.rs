@@ -3,7 +3,8 @@
 mod common;
 
 use common::{fails, instance, ok, TempDir};
-use kivadb::engine::{Engine, EngineOptions, VectorQuery};
+use kivadb::engine::{Engine, EngineOptions, VectorIndexKind, VectorQuery};
+use kivadb::hnsw::Params as HnswParams;
 use kivadb::session::Session;
 use kivadb::value::Value;
 use kivadb::vector::Metric;
@@ -112,7 +113,7 @@ fn embed(e: &Engine, key: &str, v: &[f32], extra: Json) {
 }
 
 fn query(pattern: &str, v: Vec<f32>, metric: Metric, limit: usize) -> VectorQuery {
-    VectorQuery { pattern: pattern.into(), field: "embedding".into(), vector: v, metric, limit }
+    VectorQuery::new(pattern, "embedding", v, metric, limit)
 }
 
 #[test]
@@ -145,7 +146,11 @@ fn similarity_search_with_and_without_an_index() {
     let r = e.similar(&query("doc:*", vec![1.0, 0.0, 0.0], Metric::Cosine, 2)).unwrap();
     assert!(r.indexed);
     assert_eq!(keys(&r), ["doc:cat", "doc:lion"]);
-    assert_eq!(e.list_vector_indexes(), [("doc:*".to_string(), "embedding".to_string(), 3, Some(3), 1)]);
+    let info = &e.list_vector_indexes()[0];
+    assert_eq!(
+        (info.pattern.as_str(), info.field.as_str(), info.vectors, info.dims, info.rejected),
+        ("doc:*", "embedding", 3, Some(3), 1)
+    );
     assert!(e.similar(&query("doc:*", vec![1.0, 0.0], Metric::Cosine, 2)).is_err());
 
     e.delete("doc:cat").unwrap();
@@ -193,6 +198,179 @@ fn vector_search_scales_to_thousands_of_embeddings() {
     assert!(took < Duration::from_secs(2), "search took {took:?}");
 }
 
+/// Deterministic pseudo-random vectors.
+fn random_vectors(n: usize, dims: usize, seed: u64) -> Vec<Vec<f32>> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            (0..dims)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 33) as f32 / u32::MAX as f32) - 0.25
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn hnsw(metric: Metric) -> VectorIndexKind {
+    VectorIndexKind::Hnsw(HnswParams { metric, ..Default::default() })
+}
+
+/// Share of the exact top-k that the approximate search found.
+fn recall(e: &Engine, queries: &[Vec<f32>], k: usize, ef: usize) -> f64 {
+    let mut hits = 0;
+    for q in queries {
+        let mut exact = query("chunk:*", q.clone(), Metric::Cosine, k);
+        exact.exact = true;
+        let truth: Vec<String> = e.similar(&exact).unwrap().rows.into_iter().map(|r| r.0).collect();
+        let mut vq = query("chunk:*", q.clone(), Metric::Cosine, k);
+        vq.ef = ef;
+        let r = e.similar(&vq).unwrap();
+        assert!(r.approximate);
+        hits += r.rows.iter().filter(|row| truth.contains(&row.0)).count();
+    }
+    hits as f64 / (queries.len() * k) as f64
+}
+
+#[test]
+fn hnsw_index_finds_nearly_the_same_neighbours_comparing_far_fewer_vectors() {
+    let dir = TempDir::new("hnsw");
+    let path = dir.path().join("store.kiva");
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    let n = 3000;
+    let vectors = random_vectors(n, 32, 11);
+    for (i, v) in vectors.iter().enumerate() {
+        embed(&e, &format!("chunk:{i:05}"), v, json!({ "n": i }));
+    }
+    assert_eq!(e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap(), n);
+    let info = &e.list_vector_indexes()[0];
+    assert_eq!((info.vectors, info.dims, info.kind), (n, Some(32), hnsw(Metric::Cosine)));
+
+    // Accuracy and work, against the exact search on the same index.
+    let queries = random_vectors(30, 32, 77);
+    let r = recall(&e, &queries, 10, 0);
+    assert!(r >= 0.95, "recall@10 is {r}");
+    let approx = e.similar(&query("chunk:*", queries[0].clone(), Metric::Cosine, 10)).unwrap();
+    let mut full = query("chunk:*", queries[0].clone(), Metric::Cosine, 10);
+    full.exact = true;
+    let exact = e.similar(&full).unwrap();
+    assert!((approx.indexed, approx.approximate, exact.approximate) == (true, true, false));
+    assert_eq!(exact.compared, n);
+    // On so few vectors the gain is modest; it grows with the size (see hnsw_speed).
+    assert!(approx.compared < n / 2, "HNSW compared {} of {n} vectors", approx.compared);
+    // A stored vector is its own nearest neighbour.
+    let me = e.similar(&query("chunk:*", vectors[1234].clone(), Metric::Cosine, 1)).unwrap();
+    assert_eq!(me.rows[0].0, "chunk:01234");
+
+    // Another metric, or a narrower pattern, compares every vector exactly.
+    let l2 = e.similar(&query("chunk:*", queries[0].clone(), Metric::L2, 5)).unwrap();
+    assert!(l2.indexed && !l2.approximate);
+    let narrow = e.similar(&query("chunk:001*", queries[0].clone(), Metric::Cosine, 5)).unwrap();
+    assert!(!narrow.approximate && narrow.rows.iter().all(|r| r.0.starts_with("chunk:001")));
+
+    // Writes, replacements and deletions show at once.
+    e.delete("chunk:01234").unwrap();
+    embed(&e, "chunk:00007", &vectors[1234], json!({ "moved": true }));
+    let r = e.similar(&query("chunk:*", vectors[1234].clone(), Metric::Cosine, 2)).unwrap();
+    assert_eq!(r.rows[0].0, "chunk:00007");
+    assert!(r.rows.iter().all(|row| row.0 != "chunk:01234"));
+    e.put("chunk:expired", &Value::Doc(json!({ "embedding": vectors[1234] })), 1, false).unwrap();
+    assert!(e
+        .similar(&query("chunk:*", vectors[1234].clone(), Metric::Cosine, 3))
+        .unwrap()
+        .rows
+        .iter()
+        .all(|r| r.0 != "chunk:expired"));
+
+    // The graph is saved with the index; writes made after that are replayed
+    // on the next start. A copy taken now has a graph older than its data.
+    assert!(dir.path().join("store.kiva.graphs").exists());
+    e.close();
+    drop(e);
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    let copy = dir.path().join("copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for ext in ["", ".meta", ".graphs"] {
+        std::fs::copy(dir.path().join(format!("store.kiva{ext}")), copy.join(format!("store.kiva{ext}"))).unwrap();
+    }
+    e.delete("chunk:00007").unwrap();
+    embed(&e, "chunk:new", &vectors[99], json!({}));
+    e.close();
+    drop(e);
+    std::fs::copy(&path, copy.join("store.kiva")).unwrap();
+    let e = Engine::open(copy.join("store.kiva"), quiet(0)).unwrap();
+    let r = e.similar(&query("chunk:*", vectors[99].clone(), Metric::Cosine, 2)).unwrap();
+    assert!(r.approximate);
+    let keys: Vec<&str> = r.rows.iter().map(|r| r.0.as_str()).collect();
+    assert!(keys.contains(&"chunk:new") && keys.contains(&"chunk:00099"), "{keys:?}");
+    let r = e.similar(&query("chunk:*", vectors[1234].clone(), Metric::Cosine, 3)).unwrap();
+    assert!(r.rows.iter().all(|row| row.0 != "chunk:00007" && row.0 != "chunk:01234"));
+    assert_eq!(e.list_vector_indexes()[0].vectors, n - 1);
+
+    // A damaged graphs file is ignored: the graph is built again.
+    e.close();
+    drop(e);
+    std::fs::write(copy.join("store.kiva.graphs"), b"garbage").unwrap();
+    let e = Engine::open(copy.join("store.kiva"), quiet(0)).unwrap();
+    assert!(recall(&e, &queries[..5], 10, 0) >= 0.9);
+    assert!(e.drop_vector_index("chunk:*", "embedding").unwrap());
+    assert!(!copy.join("store.kiva.graphs").exists());
+}
+
+/// Speed on a larger set. Run with:
+/// cargo test --release --test power hnsw_speed -- --ignored --nocapture
+#[test]
+#[ignore]
+fn hnsw_speed() {
+    let n: usize = std::env::var("HNSW_N").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let dims: usize = std::env::var("HNSW_DIMS").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+    let dir = TempDir::new("hnsw_speed");
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(0)).unwrap();
+    // Embeddings gather around topics: points around 200 random centres.
+    // HNSW_DATA=uniform spreads them evenly instead, the hardest case.
+    let uniform = std::env::var("HNSW_DATA").is_ok_and(|d| d == "uniform");
+    let centres = random_vectors(200, dims, 8);
+    let noise = random_vectors(n + 100, dims, 5);
+    let around = |i: usize| -> Vec<f32> {
+        if uniform {
+            return noise[i].clone();
+        }
+        centres[i % 200].iter().zip(&noise[i]).map(|(c, x)| 2.0 * c + (x - 0.25) * 0.8).collect()
+    };
+    let vectors: Vec<Vec<f32>> = (0..n).map(around).collect();
+    for (i, v) in vectors.iter().enumerate() {
+        embed(&e, &format!("chunk:{i:07}"), v, json!({}));
+    }
+    let start = std::time::Instant::now();
+    e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap();
+    println!("{n} vectors of {dims} dimensions: graph built in {:?}", start.elapsed());
+    let queries: Vec<Vec<f32>> = (n..n + 100).map(around).collect();
+    let time = |exact: bool| {
+        let start = std::time::Instant::now();
+        let mut compared = 0;
+        for q in &queries {
+            let mut vq = query("chunk:*", q.clone(), Metric::Cosine, 10);
+            vq.exact = exact;
+            compared += e.similar(&vq).unwrap().compared;
+        }
+        (start.elapsed() / queries.len() as u32, compared / queries.len())
+    };
+    let (exact_t, exact_c) = time(true);
+    let (hnsw_t, hnsw_c) = time(false);
+    println!("exact: {exact_t:?} per search, {exact_c} vectors compared");
+    println!("HNSW:  {hnsw_t:?} per search, {hnsw_c} vectors compared");
+    for ef in [50, 100, 200, 400, 800] {
+        println!("recall@10 with ef {ef}: {:.3}", recall(&e, &queries[..30], 10, ef));
+    }
+    let start = std::time::Instant::now();
+    e.close();
+    drop(e);
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(0)).unwrap();
+    println!("restart with the saved graph: {:?}", start.elapsed());
+    assert_eq!(e.list_vector_indexes()[0].vectors, n);
+}
+
 #[test]
 fn vector_commands() {
     let dir = TempDir::new("vector_cmds");
@@ -226,6 +404,22 @@ fn vector_commands() {
     assert!(fails(&mut s, "get similar doc:*.embedding to ghost.embedding").contains("does not exist"));
     assert!(fails(&mut s, "create vector index on doc: (embedding)").contains("already exists"));
     assert_eq!(ok(&mut s, "drop vector index on doc: (embedding)"), "Vector index on doc:* (embedding) dropped.");
+
+    // The approximate index, and the options of a search.
+    assert_eq!(
+        ok(&mut s, "create vector index on doc: (embedding) using hnsw m 8 ef 50"),
+        "HNSW vector index created on doc:* (embedding): 3 vectors in a graph (cosine, m 8, ef 50)."
+    );
+    assert!(ok(&mut s, "indexes")
+        .contains("doc:* (embedding) - HNSW vector index (cosine, m 8, ef 50), 3 vectors, 3 dimensions"));
+    let out = ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 ef 20 return title");
+    assert!(out.starts_with(r#"doc:3: 0.97"#) && out.contains("HNSW index, approximate"), "{out}");
+    assert!(ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 exact")
+        .contains("3 vectors compared, vector index)"));
+    assert!(ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] metric l2").contains("vector index)"));
+    assert!(fails(&mut s, "get similar doc:*.embedding to [0, 0, 1] ef 0").contains("ef must be between"));
+    assert!(fails(&mut s, "create vector index on x: (v) using annoy").contains("only approximate index is hnsw"));
+    assert!(fails(&mut s, "create vector index on x: (v) using hnsw m 1").contains("m must be between"));
 }
 
 // ---------------------------------------------------------------------------

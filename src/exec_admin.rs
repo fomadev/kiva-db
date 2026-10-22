@@ -7,6 +7,7 @@
 
 use crate::auth::{self, Priv, Role};
 use crate::compress::Compression;
+use crate::engine::VectorIndexKind;
 use crate::exec::{key_for_read, uint, word, Cur, Out, R};
 use crate::lexer::{Kind, Token};
 use crate::repl;
@@ -84,11 +85,20 @@ impl Session {
                 for (p, f, n) in list {
                     out.say(format!("{p} ({f}) - {n} documents indexed"));
                 }
-                for (p, f, n, dims, rejected) in vectors {
-                    let dims = dims.map(|d| format!("{d} dimensions")).unwrap_or_else(|| "empty".into());
-                    let extra =
-                        if rejected > 0 { format!(", {rejected} skipped (other length)") } else { String::new() };
-                    out.say(format!("{p} ({f}) - vector index, {n} vectors, {dims}{extra}"));
+                for v in vectors {
+                    let dims = v.dims.map(|d| format!("{d} dimensions")).unwrap_or_else(|| "empty".into());
+                    let mut extra =
+                        if v.rejected > 0 { format!(", {} skipped (other length)", v.rejected) } else { String::new() };
+                    if v.tombstones > 0 {
+                        extra.push_str(&format!(", {} replaced or deleted awaiting a rebuild", v.tombstones));
+                    }
+                    let kind = match v.kind {
+                        VectorIndexKind::Exact => "vector index".to_string(),
+                        VectorIndexKind::Hnsw(p) => {
+                            format!("HNSW vector index ({}, m {}, ef {})", p.metric.name(), p.m, p.ef_construction)
+                        }
+                    };
+                    out.say(format!("{} ({}) - {kind}, {} vectors, {dims}{extra}", v.pattern, v.field, v.vectors));
                 }
                 Ok(())
             }
@@ -161,12 +171,52 @@ impl Session {
             out.say(format!("User '{name}' created with role [{}].", role.name()));
             Ok(())
         } else if c.eat("vector") {
+            const USAGE: &str =
+                "create vector index on <pattern> (<field>) [using hnsw [metric cosine|dot|l2] [m N] [ef N]]";
             if !c.eat("index") {
-                return Err("Usage: create vector index on <pattern> (<field>)".into());
+                return Err(format!("Usage: {USAGE}"));
             }
-            let (pattern, field) = parse_index_spec(&mut c, "create vector index on <pattern> (<field>)")?;
-            let n = self.engine.create_vector_index(&pattern, &field)?;
-            out.say(format!("Vector index created on {pattern} ({field}): {n} vectors in memory."));
+            let (pattern, field) = parse_index_target(&mut c, USAGE)?;
+            let kind = if c.eat("using") {
+                if !c.eat("hnsw") {
+                    return Err(format!("the only approximate index is hnsw.\nUsage: {USAGE}"));
+                }
+                let mut p = crate::hnsw::Params::default();
+                loop {
+                    if c.eat("metric") {
+                        let m = word(c.next(), "a metric")?;
+                        p.metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
+                    } else if c.eat("m") {
+                        p.m = uint(c.next(), "m")? as usize;
+                        if !(2..=100).contains(&p.m) {
+                            return Err("m must be between 2 and 100".into());
+                        }
+                    } else if c.eat("ef") {
+                        p.ef_construction = uint(c.next(), "ef")? as usize;
+                        if !(10..=2000).contains(&p.ef_construction) {
+                            return Err("ef must be between 10 and 2000".into());
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                VectorIndexKind::Hnsw(p)
+            } else {
+                VectorIndexKind::Exact
+            };
+            c.finish(USAGE)?;
+            let n = self.engine.create_vector_index_with(&pattern, &field, kind)?;
+            match kind {
+                VectorIndexKind::Exact => {
+                    out.say(format!("Vector index created on {pattern} ({field}): {n} vectors in memory."))
+                }
+                VectorIndexKind::Hnsw(p) => out.say(format!(
+                    "HNSW vector index created on {pattern} ({field}): {n} vectors in a graph ({}, m {}, ef {}).",
+                    p.metric.name(),
+                    p.m,
+                    p.ef_construction
+                )),
+            }
             Ok(())
         } else if c.eat("index") {
             let (pattern, field) = parse_index_spec(&mut c, "create index on <pattern> (<field>)")?;
@@ -930,6 +980,13 @@ impl Session {
 
 /// `on <pattern> ( <field> )`. A pattern without wildcard is used as a prefix.
 fn parse_index_spec(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
+    let target = parse_index_target(c, usage)?;
+    c.finish(usage)?;
+    Ok(target)
+}
+
+/// `on <pattern> (<field>)`, leaving what follows to the caller.
+fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
     if !c.eat("on") {
         return Err(format!("Usage: {usage}"));
     }
@@ -941,7 +998,6 @@ fn parse_index_spec(c: &mut Cur, usage: &str) -> Result<(String, String), String
     if !c.next().is_some_and(|t| t.kind == Kind::RParen) {
         return Err(format!("Usage: {usage}"));
     }
-    c.finish(usage)?;
     if !pattern.contains(['*', '?']) {
         pattern.push('*');
     }

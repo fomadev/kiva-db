@@ -7,10 +7,13 @@
 //! A vector is a JSON array of numbers stored in a document field, e.g.
 //! `{"text": "...", "embedding": [0.12, -0.4, ...]}`. A search compares a
 //! query vector with every stored vector of the documents matching a key
-//! pattern and returns the closest ones. The search is exact (every
-//! candidate is compared). A vector index keeps the vectors in memory as
-//! `f32` so that the comparison runs without reading documents from disk.
+//! pattern and returns the closest ones. Without an index, or with an exact
+//! index, the search compares every candidate. An exact vector index keeps
+//! the vectors in memory as `f32` so that the comparison runs without
+//! reading documents from disk; an HNSW index ([`crate::hnsw`]) also links
+//! them in a graph, so that a search compares only a few of them.
 
+use crate::hnsw::{Hnsw, Params};
 use crate::jsonpath::{self, Seg};
 use crate::util::glob_match;
 use serde_json::Value as Json;
@@ -48,7 +51,7 @@ impl Metric {
     }
 }
 
-fn norm(v: &[f32]) -> f32 {
+pub(crate) fn norm(v: &[f32]) -> f32 {
     v.iter().map(|x| x * x).sum::<f32>().sqrt()
 }
 
@@ -102,7 +105,7 @@ impl Query {
                     dot(&self.vector, v) / d
                 }
             }
-            Metric::L2 => self.vector.iter().zip(v).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt(),
+            Metric::L2 => l2_squared(&self.vector, v).sqrt(),
         }
     }
 
@@ -119,20 +122,32 @@ impl Query {
     }
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    // Four independent accumulators let the compiler vectorise the loop.
-    let mut acc = [0f32; 4];
-    let chunks = a.len() / 4;
-    for i in 0..chunks {
-        for j in 0..4 {
-            acc[j] += a[i * 4 + j] * b[i * 4 + j];
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
+    // Eight independent accumulators over fixed-size chunks (no bounds checks)
+    // let the compiler use SIMD instructions.
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    let mut acc = [0f32; 8];
+    for (x, y) in ca.iter().zip(cb) {
+        for j in 0..8 {
+            acc[j] += x[j] * y[j];
         }
     }
-    let mut sum = acc.iter().sum::<f32>();
-    for i in chunks * 4..a.len() {
-        sum += a[i] * b[i];
+    acc.iter().sum::<f32>() + tail
+}
+
+/// Squared Euclidean distance, vectorised like [`dot`].
+pub(crate) fn l2_squared(a: &[f32], b: &[f32]) -> f32 {
+    let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| (x - y) * (x - y)).sum();
+    let mut acc = [0f32; 8];
+    for (x, y) in ca.iter().zip(cb) {
+        for j in 0..8 {
+            let d = x[j] - y[j];
+            acc[j] += d * d;
+        }
     }
-    sum
+    acc.iter().sum::<f32>() + tail
 }
 
 /// Keeps the `k` best `(key, score)` pairs, best first.
@@ -150,6 +165,20 @@ pub fn top_k(mut scored: Vec<(String, f32)>, k: usize, query: &Query) -> Vec<(St
     scored
 }
 
+/// How a vector index searches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Every vector is compared: always the true closest ones.
+    Exact,
+    /// An HNSW graph: few vectors compared, very rarely a miss.
+    Hnsw(Params),
+}
+
+enum Store {
+    Exact(HashMap<String, (Vec<f32>, f32)>),
+    Graph(Hnsw),
+}
+
 /// In-memory copy of one vector field of the documents matching a pattern.
 pub struct VecIndex {
     pub pattern: String,
@@ -157,68 +186,150 @@ pub struct VecIndex {
     path: Vec<Seg>,
     /// Fixed by the first vector indexed.
     pub dims: Option<usize>,
-    vectors: HashMap<String, (Vec<f32>, f32)>,
+    store: Store,
     /// Documents whose vector had another length than `dims`.
     pub rejected: usize,
 }
 
 impl VecIndex {
     pub fn new(pattern: &str, field: &str, path: Vec<Seg>) -> VecIndex {
+        VecIndex::with_kind(pattern, field, path, Kind::Exact)
+    }
+
+    pub fn with_kind(pattern: &str, field: &str, path: Vec<Seg>, kind: Kind) -> VecIndex {
         VecIndex {
             pattern: pattern.to_string(),
             field: field.to_string(),
             path,
             dims: None,
-            vectors: HashMap::new(),
+            store: match kind {
+                Kind::Exact => Store::Exact(HashMap::new()),
+                Kind::Hnsw(p) => Store::Graph(Hnsw::new(p)),
+            },
             rejected: 0,
         }
     }
 
+    pub fn kind(&self) -> Kind {
+        match &self.store {
+            Store::Exact(_) => Kind::Exact,
+            Store::Graph(g) => Kind::Hnsw(g.params),
+        }
+    }
+
+    pub fn graph(&self) -> Option<&Hnsw> {
+        match &self.store {
+            Store::Graph(g) => Some(g),
+            Store::Exact(_) => None,
+        }
+    }
+
+    pub fn graph_mut(&mut self) -> Option<&mut Hnsw> {
+        match &mut self.store {
+            Store::Graph(g) => Some(g),
+            Store::Exact(_) => None,
+        }
+    }
+
+    /// Installs a graph read back from disk, with what it knew of the vectors.
+    pub fn restore(&mut self, graph: Hnsw, dims: Option<usize>, rejected: usize) {
+        self.store = Store::Graph(graph);
+        self.dims = dims;
+        self.rejected = rejected;
+    }
+
     pub fn len(&self) -> usize {
-        self.vectors.len()
+        match &self.store {
+            Store::Exact(m) => m.len(),
+            Store::Graph(g) => g.len(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.vectors.is_empty()
+        self.len() == 0
     }
 
     pub fn memory_bytes(&self) -> usize {
-        self.vectors.iter().map(|(k, (v, _))| k.len() + v.len() * 4 + 64).sum()
+        match &self.store {
+            Store::Exact(m) => m.iter().map(|(k, (v, _))| k.len() + v.len() * 4 + 64).sum(),
+            Store::Graph(g) => g.memory_bytes(),
+        }
+    }
+
+    /// The keys of every indexed vector.
+    pub fn keys(&self) -> Vec<String> {
+        match &self.store {
+            Store::Exact(m) => m.keys().cloned().collect(),
+            Store::Graph(g) => g.iter().map(|(k, _, _)| k.to_string()).collect(),
+        }
+    }
+
+    /// The vector indexed for `key`, with its norm.
+    pub fn get(&self, key: &str) -> Option<(&[f32], f32)> {
+        match &self.store {
+            Store::Exact(m) => m.get(key).map(|(v, n)| (v.as_slice(), *n)),
+            Store::Graph(g) => g.get(key),
+        }
     }
 
     pub fn clear(&mut self) {
-        self.vectors.clear();
+        match &mut self.store {
+            Store::Exact(m) => m.clear(),
+            Store::Graph(g) => g.clear(),
+        }
         self.dims = None;
         self.rejected = 0;
     }
 
     pub fn remove(&mut self, key: &str) {
-        self.vectors.remove(key);
+        match &mut self.store {
+            Store::Exact(m) => {
+                m.remove(key);
+            }
+            Store::Graph(g) => g.remove(key),
+        }
     }
 
     pub fn update(&mut self, key: &str, doc: Option<&Json>) {
         if !glob_match(&self.pattern, key) {
             return;
         }
-        self.vectors.remove(key);
-        let Some(v) = doc.and_then(|d| extract(d, &self.path)) else { return };
-        match self.dims {
-            Some(d) if d != v.len() => self.rejected += 1,
-            _ => {
-                self.dims = Some(v.len());
+        let Some(v) = doc.and_then(|d| extract(d, &self.path)) else {
+            self.remove(key);
+            return;
+        };
+        if self.dims.is_some_and(|d| d != v.len()) {
+            self.remove(key);
+            self.rejected += 1;
+            return;
+        }
+        self.dims = Some(v.len());
+        match &mut self.store {
+            Store::Exact(m) => {
                 let n = norm(&v);
-                self.vectors.insert(key.to_string(), (v, n));
+                m.insert(key.to_string(), (v, n));
+            }
+            // A document changed elsewhere than in its vector keeps its node:
+            // replacing it would only leave a tombstone behind.
+            Store::Graph(g) => {
+                if g.get(key).is_none_or(|(old, _)| old != v.as_slice()) {
+                    g.insert(key, v);
+                }
             }
         }
     }
 
     /// Scores every indexed vector whose key matches `pattern` and passes `alive`.
     pub fn scores(&self, pattern: &str, query: &Query, alive: impl Fn(&str) -> bool) -> Vec<(String, f32)> {
-        self.vectors
-            .iter()
-            .filter(|(k, (v, _))| v.len() == query.dims() && glob_match(pattern, k) && alive(k))
-            .map(|(k, (v, n))| (k.clone(), query.score(v, *n)))
-            .collect()
+        let keep = |k: &str, v: &[f32]| v.len() == query.dims() && glob_match(pattern, k) && alive(k);
+        match &self.store {
+            Store::Exact(m) => {
+                m.iter().filter(|(k, (v, _))| keep(k, v)).map(|(k, (v, n))| (k.clone(), query.score(v, *n))).collect()
+            }
+            Store::Graph(g) => {
+                g.iter().filter(|(k, v, _)| keep(k, v)).map(|(k, v, n)| (k.to_string(), query.score(v, n))).collect()
+            }
+        }
     }
 }
 

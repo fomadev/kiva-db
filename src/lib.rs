@@ -21,6 +21,7 @@ mod exec_admin;
 pub mod expr;
 pub mod format;
 pub mod hint;
+pub mod hnsw;
 pub mod http;
 pub mod instance;
 pub mod jsonpath;

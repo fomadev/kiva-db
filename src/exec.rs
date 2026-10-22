@@ -1127,7 +1127,7 @@ impl Session {
 
     fn cmd_similar(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
-            "get similar <pattern>.<field> to [n1, n2, ...] | <key>.<field> [limit N] [metric cosine|dot|l2] [return f1, f2]";
+            "get similar <pattern>.<field> to [n1, n2, ...] | <key>.<field> [limit N] [metric cosine|dot|l2] [ef N] [exact] [return f1, f2]";
         let mut c = Cur::new(a);
         let target = word(c.next(), "<pattern>.<field>").map_err(|e| format!("{e}\nUsage: {USAGE}"))?;
         let (pattern, field) = split_target(&target)?;
@@ -1147,10 +1147,22 @@ impl Session {
         let vector = crate::vector::from_json(&json).ok_or("The query vector must be a non-empty array of numbers.")?;
         let mut metric = crate::vector::Metric::Cosine;
         let mut tail = Tail::default();
+        let (mut ef, mut exact) = (0, false);
         loop {
             if c.eat("metric") {
                 let m = word(c.next(), "a metric")?;
                 metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
+                continue;
+            }
+            if c.eat("ef") {
+                ef = uint(c.next(), "ef")? as usize;
+                if !(1..=100_000).contains(&ef) {
+                    return Err("ef must be between 1 and 100000".into());
+                }
+                continue;
+            }
+            if c.eat("exact") {
+                exact = true;
                 continue;
             }
             let before = c.i;
@@ -1166,7 +1178,9 @@ impl Session {
             }
         }
         c.finish(USAGE)?;
-        let q = crate::engine::VectorQuery { pattern, field, vector, metric, limit: tail.limit };
+        let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, tail.limit);
+        q.ef = ef;
+        q.exact = exact;
         let r = self.engine.similar(&q)?;
         for (key, score, doc) in &r.rows {
             let shown = match &tail.fields {
@@ -1180,7 +1194,11 @@ impl Session {
             r.rows.len(),
             metric.name(),
             r.compared,
-            if r.indexed { "vector index" } else { "documents read from disk" }
+            match (r.indexed, r.approximate) {
+                (true, true) => "HNSW index, approximate",
+                (true, false) => "vector index",
+                _ => "documents read from disk",
+            }
         ));
         Ok(())
     }

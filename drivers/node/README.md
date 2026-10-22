@@ -52,7 +52,7 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`). `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
 | `del(key)` | Resolves to whether the key existed |
 | `scan(pattern, limit)` | Keys with type, size, modification time and TTL |
-| `similar(target, vector, {limit, metric})` | Vector search: `similar("doc:*.embedding", [0.1, ...], {limit: 5})` returns `{key, score, value}` best first. Metrics: `cosine` (default), `dot`, `l2` |
+| `similar(target, vector, {limit, metric, ef, exact})` | Vector search: `similar("doc:*.embedding", [0.1, ...], {limit: 5})` returns `{key, score, value}` best first. Metrics: `cosine` (default), `dot`, `l2`. With an HNSW index, `ef` trades speed for accuracy and `exact: true` compares every vector |
 | `exec(command)` | Any command of the KivaDB shell language; resolves to the output lines, rejects with `KivaError` on an error |
 | `api({op, ...})` | Structured request (`whoami`, `workspaces`, `scan`, `get`, `put`, `del`, `similar`, `stats`, `users`) |
 | `subscribe(pattern)` | Then `db.on("change", e => ...)` receives `{event, key, type}` for every set, update and delete |
