@@ -7,6 +7,7 @@
 
 use crate::cache::ValueCache;
 use crate::compress::{self, Compression};
+use crate::crypt::{self, Keys};
 use crate::error::{KivaError, Result};
 use crate::format::*;
 use crate::hint;
@@ -113,6 +114,10 @@ pub struct EngineOptions {
     pub background: bool,
     /// Memory budget of the value cache in bytes; 0 = no cache.
     pub cache_bytes: usize,
+    /// Encryption at rest: new records are encrypted with the current key.
+    pub keys: Option<Arc<Keys>>,
+    /// Refuse unencrypted records (and an unencrypted index snapshot).
+    pub require_encryption: bool,
 }
 
 impl Default for EngineOptions {
@@ -127,6 +132,8 @@ impl Default for EngineOptions {
             sync_writes: false,
             background: true,
             cache_bytes: 0,
+            keys: None,
+            require_encryption: false,
         }
     }
 }
@@ -396,6 +403,7 @@ struct Inner {
     sec: Vec<SecIndex>,
     vecs: Vec<VecIndex>,
     cache: ValueCache,
+    keys: Option<Arc<Keys>>,
     active_txns: usize,
     /// Versions of keys deleted while a transaction was open.
     tomb_versions: HashMap<String, u64>,
@@ -456,14 +464,18 @@ struct ScanOutcome {
     corrupted: u64,
 }
 
-/// Replays the log from `start`, applying records to `index`.
+/// Replays the log from `start`, applying records to `index`. Encrypted
+/// records are decrypted with `keys`; one that needs a key this engine does
+/// not have stops the scan with an error.
 fn scan_log(
     file: &File,
     start: u64,
     file_len: u64,
     index: &mut BTreeMap<String, Entry>,
     seq: &mut u64,
-) -> std::io::Result<ScanOutcome> {
+    keys: Option<&Keys>,
+    require_encryption: bool,
+) -> Result<ScanOutcome> {
     let mut r = BufReader::with_capacity(1 << 20, file);
     r.seek(SeekFrom::Start(start))?;
     let mut pos = start;
@@ -503,10 +515,32 @@ fn scan_log(
         let mut hasher = crc32fast::Hasher::new();
         hasher.update(&hdr[4..]);
         hasher.update(&body);
+        let crc_ok = hasher.finalize() == h.crc;
         let tombstone = h.flags & FLAG_TOMBSTONE != 0;
-        let key = std::str::from_utf8(&body[..h.k_size as usize]).ok();
+        // The key and the stored value, decrypted if need be.
+        let mut opened = None;
+        if crc_ok {
+            if h.flags & FLAG_ENCRYPTED != 0 {
+                let mut rec = hdr.to_vec();
+                rec.extend_from_slice(&body);
+                match crypt::open_record(keys, &rec) {
+                    Ok(kv) => opened = Some(kv),
+                    Err(crypt::OpenError::Tampered) => {}
+                    Err(e) => return Err(e.into_error("this workspace")),
+                }
+            } else if require_encryption {
+                return Err(KivaError::Denied(format!(
+                    "encryption.required is on, but the data file holds an unencrypted record at byte {pos}: \
+                     turn it off, run 'compact' to encrypt the whole file, then turn it on again"
+                )));
+            } else {
+                let k = h.k_size as usize;
+                opened = Some((body[..k].to_vec(), body[k..].to_vec()));
+            }
+        }
+        let key = opened.as_ref().and_then(|(k, _)| std::str::from_utf8(k).ok());
         let ty = Type::from_u8(h.ty);
-        let valid = hasher.finalize() == h.crc && key.is_some() && (tombstone || ty.is_some());
+        let valid = crc_ok && key.is_some() && (tombstone || ty.is_some());
         if !valid {
             if pos + total == file_len {
                 break; // last record: a torn write
@@ -521,11 +555,11 @@ fn scan_log(
             None
         } else {
             let comp = h.flags & FLAG_COMP_MASK != 0;
-            let k = h.k_size as usize;
-            let raw_size = if comp && h.v_size >= 4 {
-                u32::from_le_bytes([body[k], body[k + 1], body[k + 2], body[k + 3]])
+            let stored = opened.as_ref().map(|(_, v)| v.as_slice()).unwrap_or_default();
+            let raw_size = if comp && stored.len() >= 4 {
+                u32::from_le_bytes([stored[0], stored[1], stored[2], stored[3]])
             } else {
-                h.v_size
+                stored.len() as u32
             };
             Some(Entry {
                 offset: pos,
@@ -584,10 +618,26 @@ impl Inner {
         Ok(rec)
     }
 
-    fn read_value(&mut self, key: &str, e: &Entry) -> Result<Value> {
+    /// The value bytes of the record behind `e`, decrypted and decompressed.
+    fn read_raw(&mut self, key: &str, e: &Entry) -> Result<Vec<u8>> {
         let rec = self.read_record(key, e)?;
-        let raw = compress::unpack(&rec[REC_HEADER_LEN + e.k_size as usize..], e.compression())?;
+        let (_, stored) = crypt::open_record(self.keys.as_deref(), &rec).map_err(|err| {
+            if err == crypt::OpenError::Tampered {
+                self.corrupted_detected += 1;
+            }
+            err.into_error(&format!("the record of '{key}'"))
+        })?;
+        compress::unpack(&stored, e.compression())
+    }
+
+    fn read_value(&mut self, key: &str, e: &Entry) -> Result<Value> {
+        let raw = self.read_raw(key, e)?;
         Value::decode(e.ty, &raw, e.is_msgpack())
+    }
+
+    /// Encodes a record, encrypted when this engine has a key.
+    fn encode(&self, key: &str, value: &[u8], ty: u8, flags: u8, timestamp: i64, expires_at: i64) -> Vec<u8> {
+        crypt::encode_record(self.keys.as_deref(), key, value, ty, flags, timestamp, expires_at)
     }
 
     /// Like `read_value`, served from the value cache when possible.
@@ -676,6 +726,10 @@ impl Inner {
         }
         let crc = crc32fast::hash(&out);
         out.extend_from_slice(&crc.to_le_bytes());
+        if let Some(keys) = &self.keys {
+            keys.seal(crypt::Domain::Graphs, &self.file_id.to_le_bytes(), &mut out);
+            out.splice(0..0, GRAPHS_SEALED.iter().copied());
+        }
         let tmp = sidecar(path, "graphs.tmp");
         let written = File::create(&tmp).and_then(|mut f| {
             f.write_all(&out)?;
@@ -813,7 +867,9 @@ impl Inner {
         let _ = self.file.sync_data();
         self.unsynced = false;
         let hp = hint::hint_path(path);
-        if hint::write_hint(&hp, self.file_id, self.file_len, &self.index, self.compression).is_ok() {
+        if hint::write_hint(&hp, self.file_id, self.file_len, &self.index, self.compression, self.keys.as_deref())
+            .is_ok()
+        {
             self.dirty_ops = 0;
             self.last_hint = Instant::now();
         }
@@ -821,8 +877,9 @@ impl Inner {
 }
 
 /// Encodes a put as a full record plus the index entry (offset left at 0).
+/// `inner` gives the compression and the encryption key.
 fn build_put(
-    compression: Compression,
+    inner: &Inner,
     key: &str,
     value: &Value,
     expires_at: i64,
@@ -837,19 +894,20 @@ fn build_put(
     if raw.len() > MAX_VALUE_LEN {
         return Err(KivaError::Invalid("value is larger than 256 MB".into()));
     }
-    let (stored, cflag) = compress::pack(&raw, compression);
+    let (stored, cflag) = compress::pack(&raw, inner.compression);
     let mut flags = cflag | extra_flags;
     if msgpack {
         flags |= FLAG_MSGPACK;
     }
-    let rec = encode_record(key, &stored, ty as u8, flags, timestamp, expires_at);
+    let rec = inner.encode(key, &stored, ty as u8, flags, timestamp, expires_at);
+    let h = parse_header(&rec);
     let entry = Entry {
         offset: 0,
-        k_size: key.len() as u16,
-        v_size: stored.len() as u32,
+        k_size: h.k_size,
+        v_size: h.v_size,
         raw_size: raw.len() as u32,
         ty,
-        flags,
+        flags: h.flags,
         timestamp,
         expires_at,
         version: 0,
@@ -900,8 +958,12 @@ impl Engine {
 
             let mut scan_from = FILE_HEADER_LEN;
             let mut m = "scan";
-            if let Ok(hd) = hint::read_hint(&hint::hint_path(&path)) {
-                if hd.file_id == file_id && hd.data_len <= file_len && hd.data_len >= FILE_HEADER_LEN {
+            if let Ok(hd) = hint::read_hint(&hint::hint_path(&path), opts.keys.as_deref()) {
+                // With encryption required, a snapshot written in clear (or
+                // listing records in clear) is not trusted: scan the log.
+                let trusted = !opts.require_encryption
+                    || (hd.encrypted && hd.entries.iter().all(|(_, e)| e.flags & FLAG_ENCRYPTED != 0));
+                if trusted && hd.file_id == file_id && hd.data_len <= file_len && hd.data_len >= FILE_HEADER_LEN {
                     for (k, mut e) in hd.entries {
                         seq += 1;
                         e.version = seq;
@@ -912,7 +974,15 @@ impl Engine {
                 }
             }
             mode = m;
-            let outcome = scan_log(&file, scan_from, file_len, &mut index, &mut seq)?;
+            let outcome = scan_log(
+                &file,
+                scan_from,
+                file_len,
+                &mut index,
+                &mut seq,
+                opts.keys.as_deref(),
+                opts.require_encryption,
+            )?;
             corrupted = outcome.corrupted;
             if outcome.end < file_len {
                 recovered_bytes = file_len - outcome.end;
@@ -929,6 +999,16 @@ impl Engine {
 
         let now = now_secs();
         index.retain(|_, e| !e.is_expired(now));
+        // A missing or wrong key shows now, not at the first read.
+        if let Some((k, e)) = index.iter().find(|(_, e)| e.flags & FLAG_ENCRYPTED != 0) {
+            let mut rec = vec![0u8; e.rec_len() as usize];
+            file.seek(SeekFrom::Start(e.offset))?;
+            file.read_exact(&mut rec)?;
+            match crypt::open_record(opts.keys.as_deref(), &rec) {
+                Ok(_) | Err(crypt::OpenError::Tampered) => {}
+                Err(err) => return Err(err.into_error(&format!("this workspace (record '{k}')"))),
+            }
+        }
 
         let mut inner = Inner {
             file,
@@ -944,6 +1024,7 @@ impl Engine {
             sec: Vec::new(),
             vecs: Vec::new(),
             cache: ValueCache::new(opts.cache_bytes),
+            keys: opts.keys.clone(),
             active_txns: 0,
             tomb_versions: HashMap::new(),
             reset_seq: 0,
@@ -965,7 +1046,8 @@ impl Engine {
         // Secondary index definitions live in a small sidecar file.
         if let Ok(text) = fs::read_to_string(sidecar(&path, "meta")) {
             if let Ok(meta) = serde_json::from_str::<Json>(&text) {
-                let mut saved = read_graphs(&sidecar(&path, "graphs"), inner.file_id, inner.file_len);
+                let mut saved =
+                    read_graphs(&sidecar(&path, "graphs"), inner.file_id, inner.file_len, inner.keys.as_deref());
                 for def in meta["vector_indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
                         if let Ok(segs) = jsonpath::parse_path(f) {
@@ -1077,8 +1159,7 @@ impl Engine {
         let Some(e) = inner.live(key, now_secs()) else {
             return Ok(None);
         };
-        let rec = inner.read_record(key, &e)?;
-        let raw = compress::unpack(&rec[REC_HEADER_LEN + e.k_size as usize..], e.compression())?;
+        let raw = inner.read_raw(key, &e)?;
         Ok(Some((raw, e)))
     }
 
@@ -1147,7 +1228,7 @@ impl Engine {
 
     fn put_at(&self, key: &str, value: &Value, expires_at: i64, msgpack: bool, timestamp: i64) -> Result<bool> {
         let mut inner = self.lock();
-        let (rec, mut entry, raw) = build_put(inner.compression, key, value, expires_at, msgpack, timestamp, 0)?;
+        let (rec, mut entry, raw) = build_put(&inner, key, value, expires_at, msgpack, timestamp, 0)?;
         let created = inner.live(key, now_secs()).is_none();
         entry.offset = inner.append(&rec, self.opts.sync_writes)?;
         inner.seq += 1;
@@ -1183,7 +1264,7 @@ impl Engine {
         if inner.live(key, now_secs()).is_none() {
             return Ok(false);
         }
-        let rec = encode_record(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
+        let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
         inner.append(&rec, self.opts.sync_writes)?;
         inner.seq += 1;
         inner.idx_remove(key);
@@ -1234,8 +1315,7 @@ impl Engine {
         for op in ops {
             match op {
                 BatchOp::Put { key, value, expires_at, msgpack } => {
-                    let (rec, entry, raw) =
-                        build_put(inner.compression, &key, &value, expires_at, msgpack, now, FLAG_TXN)?;
+                    let (rec, entry, raw) = build_put(&inner, &key, &value, expires_at, msgpack, now, FLAG_TXN)?;
                     let exists = match shadow.get(&key) {
                         Some(e) => *e,
                         None => inner.live(&key, now).is_some(),
@@ -1257,7 +1337,7 @@ impl Engine {
                         continue;
                     }
                     shadow.insert(key.clone(), false);
-                    recs.push(encode_record(&key, &[], 0, FLAG_TOMBSTONE | FLAG_TXN, now, 0));
+                    recs.push(inner.encode(&key, &[], 0, FLAG_TOMBSTONE | FLAG_TXN, now, 0));
                     staged.push(Staged::Del { key });
                 }
             }
@@ -1430,6 +1510,7 @@ impl Engine {
             let snap: Vec<(String, Entry)> = inner.index.iter().map(|(k, e)| (k.clone(), e.clone())).collect();
             (snap, inner.file_len, inner.file_id)
         };
+        let keys = self.opts.keys.clone();
 
         // Phase 2 (unlocked): copy live records into a fresh file.
         let new_id = random_u64();
@@ -1450,10 +1531,15 @@ impl Engine {
             let mut ne = e.clone();
             let has_txn_flags = e.flags & (FLAG_TXN | FLAG_TXN_COMMIT) != 0;
             let wrong_algo = recompress.is_some_and(|c| c != e.compression());
-            if has_txn_flags || wrong_algo {
-                let stored = &buf[REC_HEADER_LEN + e.k_size as usize..];
+            // Encrypted with the current key, or in clear when there is none.
+            let wrong_key = crypt::record_key_id(&buf) != keys.as_deref().map(|k| k.current.id);
+            if has_txn_flags || wrong_algo || wrong_key {
+                let Ok((_, stored)) = crypt::open_record(keys.as_deref(), &buf) else {
+                    dropped += 1;
+                    continue;
+                };
                 let (stored2, cflag) = if wrong_algo {
-                    match compress::unpack(stored, e.compression()) {
+                    match compress::unpack(&stored, e.compression()) {
                         Ok(raw) => compress::pack(&raw, recompress.unwrap()),
                         Err(_) => {
                             dropped += 1;
@@ -1461,11 +1547,14 @@ impl Engine {
                         }
                     }
                 } else {
-                    (stored.to_vec(), e.flags & FLAG_COMP_MASK)
+                    (stored, e.flags & FLAG_COMP_MASK)
                 };
-                ne.flags = (e.flags & FLAG_MSGPACK) | cflag;
-                ne.v_size = stored2.len() as u32;
-                let rec = encode_record(key, &stored2, e.ty as u8, ne.flags, e.timestamp, e.expires_at);
+                let flags = (e.flags & FLAG_MSGPACK) | cflag;
+                let rec =
+                    crypt::encode_record(keys.as_deref(), key, &stored2, e.ty as u8, flags, e.timestamp, e.expires_at);
+                let h = parse_header(&rec);
+                ne.flags = h.flags;
+                ne.v_size = h.v_size;
                 out.write_all(&rec)?;
                 ne.offset = pos;
                 pos += rec.len() as u64;
@@ -1570,7 +1659,7 @@ impl Engine {
             fs::copy(&self.path, &bak)?;
             report.backup = Some(bak);
             for k in &report.corrupted {
-                let rec = encode_record(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
+                let rec = inner.encode(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
                 inner.append(&rec, true)?;
                 inner.seq += 1;
                 inner.idx_remove(k);
@@ -1604,7 +1693,7 @@ impl Engine {
                 compression: "none",
             };
         }
-        match hint::read_hint(&path) {
+        match hint::read_hint(&path, inner.keys.as_deref()) {
             Ok(h) => {
                 let status = if h.file_id != inner.file_id || h.data_len > inner.file_len {
                     "STALE (belongs to an older data file)".to_string()
@@ -1750,6 +1839,45 @@ impl Engine {
                 Err(e) => Some(e.to_string()),
             };
         }
+    }
+
+    /// What the data file holds, encrypted or not, record by record
+    /// (current versions and the older ones a compaction has not removed yet).
+    pub fn encryption_report(&self) -> Result<EncryptionReport> {
+        let inner = self.lock();
+        let _ = inner.file.sync_data();
+        let current = inner.keys.as_ref().map(|k| k.current.id);
+        let mut report =
+            EncryptionReport { key_id: inner.keys.as_ref().map(|k| k.current.id_hex()), ..Default::default() };
+        let len = inner.file_len;
+        let mut r = BufReader::with_capacity(1 << 20, &inner.file);
+        let mut pos = FILE_HEADER_LEN;
+        let mut hdr = [0u8; REC_HEADER_LEN];
+        while pos + REC_HEADER_LEN as u64 <= len {
+            r.seek(SeekFrom::Start(pos))?;
+            r.read_exact(&mut hdr)?;
+            let h = parse_header(&hdr);
+            let total = h.total_len();
+            if h.k_size == 0 || pos + total > len {
+                break;
+            }
+            report.records += 1;
+            if h.flags & FLAG_ENCRYPTED == 0 {
+                report.plain += 1;
+            } else {
+                let mut id = [0u8; 4];
+                r.seek(SeekFrom::Start(pos + total - 4))?;
+                r.read_exact(&mut id)?;
+                if Some(id) != current {
+                    report.other_key += 1;
+                }
+            }
+            pos += total;
+        }
+        drop(r);
+        report.hint_encrypted =
+            hint::read_hint(&hint::hint_path(&self.path), inner.keys.as_deref()).map(|h| h.encrypted).unwrap_or(false);
+        Ok(report)
     }
 
     // -- secondary indexes --------------------------------------------------
@@ -2114,6 +2242,8 @@ fn maintenance(weak: Weak<Engine>, signal: Arc<Signal>) {
 }
 
 const GRAPHS_MAGIC: &[u8; 8] = b"KVGRAPH1";
+/// An encrypted graphs file starts with this, then the sealed plain file.
+const GRAPHS_SEALED: &[u8; 8] = b"KVGRAPE1";
 
 /// An HNSW graph read back from the graphs file.
 struct SavedGraph {
@@ -2127,8 +2257,12 @@ struct SavedGraph {
 /// Reads the graphs file when it belongs to this data file: the same log
 /// identity, and written at a point the log still reaches. Returns that
 /// point and the graphs; `None` when the graphs must be built again.
-fn read_graphs(file: &Path, file_id: u64, file_len: u64) -> Option<(u64, Vec<SavedGraph>)> {
-    let buf = fs::read(file).ok()?;
+fn read_graphs(file: &Path, file_id: u64, file_len: u64, keys: Option<&Keys>) -> Option<(u64, Vec<SavedGraph>)> {
+    let mut buf = fs::read(file).ok()?;
+    if buf.starts_with(GRAPHS_SEALED) {
+        buf =
+            crypt::open_with(keys, crypt::Domain::Graphs, &file_id.to_le_bytes(), &buf[GRAPHS_SEALED.len()..]).ok()?;
+    }
     let (body, crc) = buf.split_at(buf.len().checked_sub(4)?);
     if crc32fast::hash(body).to_le_bytes() != crc {
         return None;
@@ -2173,6 +2307,20 @@ fn kind_from_json(def: &Json) -> VectorIndexKind {
         p.ef_construction = ef as usize;
     }
     VectorIndexKind::Hnsw(p)
+}
+
+/// See [`Engine::encryption_report`].
+#[derive(Clone, Debug, Default)]
+pub struct EncryptionReport {
+    /// Id of the key new records are encrypted with; `None` when encryption is off.
+    pub key_id: Option<String>,
+    /// Records in the data file, current or superseded.
+    pub records: u64,
+    /// Of them, records in clear.
+    pub plain: u64,
+    /// Of them, records encrypted with another key than the current one.
+    pub other_key: u64,
+    pub hint_encrypted: bool,
 }
 
 /// A similarity search: `<pattern>.<field>` closest to `vector`.

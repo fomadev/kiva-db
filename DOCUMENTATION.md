@@ -1784,6 +1784,11 @@ cert =
 key =
 hosts =
 
+[encryption]
+key_file =
+old_key_file =
+required = false
+
 [replication]
 role = master
 master_host =
@@ -1854,6 +1859,9 @@ network.port = 2911
 | `tls.required` | `false` | Refuse plain connections from other machines | immediately |
 | `tls.cert`, `tls.key` | empty | Your own certificate and key; empty: KivaDB's own | next start |
 | `tls.hosts` | empty | Extra names for KivaDB's certificate | `kivadb tls renew` |
+| `encryption.key_file` | empty | File holding the encryption key ([16.12](#1612-encryption-at-rest)) | next start |
+| `encryption.old_key_file` | empty | Previous key, read during a key rotation | next start |
+| `encryption.required` | `false` | Refuse to start without a key, and refuse unencrypted records | next start |
 | `replication.*` | | See [Chapter 25](#chapter-25--replication) | |
 | `scripting.timeout_ms` | `5000` | Longest a Lua script may run | immediately |
 | `scripting.memory_limit_mb` | `64` | Most memory a Lua script may use | immediately |
@@ -2098,6 +2106,75 @@ kiva> config set tls.key "/etc/letsencrypt/live/db.example.com/privkey.pem"
 | `tls.required` | `false` | Refuse plain connections from other machines |
 | `tls.cert`, `tls.key` | empty | Your certificate and key (PEM); empty: the one KivaDB creates |
 | `tls.hosts` | empty | Extra names or addresses for the certificate KivaDB creates |
+
+### 16.12 Encryption at rest
+
+TLS protects data while it travels. **Encryption at rest** protects it where it sleeps: a stolen disk, a copied backup or a cloud snapshot of the server shows only random bytes, not your keys and values. KivaDB encrypts with **AES-256-GCM**, the algorithm of disk and cloud encryption, through the `ring` library already used for TLS.
+
+**1. Create a key.**
+
+```bash
+kivadb keygen
+```
+
+It prints 64 hexadecimal characters: 32 random bytes. **Keep this key apart from the data and keep a copy in a safe place** (a password manager, a vault). Without it, encrypted data cannot be read by anyone, KivaDB included: there is no recovery.
+
+**2. Give it to KivaDB**, in one of two ways:
+
+* the environment variable `KIVADB_ENCRYPTION_KEY`:
+
+  ```bash
+  export KIVADB_ENCRYPTION_KEY=3f9c...   # the 64 characters
+  kivadb start
+  ```
+
+* or a file holding it, readable only by the account running KivaDB, named in `kiva.conf`:
+
+  ```bash
+  kivadb keygen > /etc/kivadb/key && chmod 600 /etc/kivadb/key
+  kivadb -e "config set encryption.key_file /etc/kivadb/key"
+  ```
+
+The key itself is never written in `kiva.conf` nor anywhere in the data folder. KivaDB reads it when it starts; a change of key file needs a restart. With systemd, put the variable in a file readable by root only and load it with `EnvironmentFile=`; with Docker, pass `-e KIVADB_ENCRYPTION_KEY` or mount the key file as a secret.
+
+**3. Check.**
+
+```text
+kiva> encryption
+Encryption at rest: on (AES-256-GCM, key 5d1e07a2)
+Workspace 'default': 1250 records in the data file, 1250 encrypted, 0 in clear
+ - every record is encrypted with the current key
+Index snapshot (hint): encrypted
+```
+
+The key id (`5d1e07a2`) identifies the key without revealing it.
+
+**What is encrypted.** In every workspace and in the system database (users, password hashes, stored scripts, triggers):
+
+* each record of the data file: its key and its value, together. The record's header (sizes, type, dates of writing and expiry) stays readable, so that KivaDB can find its way through the file, but it is authenticated with the record: changing any byte of a record, even with its checksum fixed, makes it rejected instead of read;
+* the index snapshot (`.hint`), which lists every key;
+* the HNSW graphs (`.graphs`), which hold keys and vectors;
+* copies made by KivaDB (`.bak`, the temporary file of a compaction), which are copies of encrypted records.
+
+Every encryption uses a fresh random number (nonce): the same value written twice never gives the same bytes.
+
+**What stays in clear**, by design:
+
+* `kiva.conf`, the index definitions (`.meta`: patterns and field names), the TLS certificate;
+* `audit.log` and `server.log`: user names, actions, and the names of deleted keys. They are meant to be read and forwarded;
+* the memory of the running server (values in use, the value cache) and anything the operating system writes from it (swap, crash dumps): use the system's disk encryption for those;
+* on a client computer, the shell history of `kivadb --connect`. On the server itself, the shell does not keep a history file when encryption is on;
+* what leaves through the protocol: replicas receive the data and encrypt it with their own key (give them one, and use TLS between them); exports you make yourself are yours to protect.
+
+**Data written before the key.** Turning encryption on does not rewrite the past: old records stay in clear and readable, new ones are encrypted. `compact` rewrites the whole file with the key, old versions included; `encryption` then shows `0 in clear`. Do it in every workspace (`workspace switch`, then `compact`).
+
+**`encryption.required true`** turns the protection into a rule: KivaDB refuses to start without a key, and refuses a data file holding records in clear (someone could otherwise slip readable records into it). Turn it on once every workspace is compacted.
+
+**Changing the key (rotation).** Give the new key as usual, and the old one as `KIVADB_ENCRYPTION_OLD_KEY` (or `encryption.old_key_file`); restart. Both are read, new writes use the new key. Run `compact` in each workspace: `encryption` no longer counts records `encrypted with an older key`. The old key can then be removed. Rotate when a key may have been exposed, when someone who knew it leaves, and, as good practice, every year or so. (AES-GCM with random nonces stays safe for some four billion writes per key; a yearly rotation keeps far below.)
+
+**Cost.** 32 bytes per record. In our measurements (`bench write` / `bench read` of 100 000 keys), writes were 10 to 15 % slower; reads were within the variation between two runs.
+
+**Errors.** `this workspace is encrypted: start KivaDB with its key`: no key was given. `encrypted with key 5d1e07a2, which this server does not have`: the key given is another one. In both cases nothing is changed on disk; start again with the right key.
 
 ---
 
@@ -3848,6 +3925,7 @@ docker build -t kivadb:local .
 | One account per person or application, with the smallest role that works | A leaked `viewer` password cannot destroy data |
 | Only the needed ports are open, ideally only to known addresses | Fewer doors |
 | `tls.required` is `true` and clients connect with TLS | Otherwise the password and the data cross the Internet in clear ([16.11](#1611-encrypted-connections-tls)) |
+| Data is encrypted at rest, the key is kept apart from the data and from the backups | A copied disk or backup then reveals nothing ([16.12](#1612-encryption-at-rest)) |
 | Backups exist and were restored once as a test | A backup that was never restored is a hope, not a backup |
 | `audit failed-logins` and the metrics are looked at | To notice password guessing early |
 
@@ -3949,6 +4027,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `kivadb -u <user> [-p <password>]` | Log in |
 | `kivadb --connect <host:port> [--tls]` | Shell on a remote KivaDB, encrypted with `--tls` (`--tls-fingerprint <fp>` in scripts) |
 | `kivadb tls` / `kivadb tls renew` | Show the TLS certificate and its fingerprint / create a new one |
+| `kivadb keygen` | Print a new encryption key ([16.12](#1612-encryption-at-rest)) |
 | `kivadb --no-listen` | Shell on local files that other shells cannot join |
 | `kivadb --home <folder>` | Use another home directory |
 | `kivadb --skip-auth` | Start without authentication (maintenance) |
@@ -4015,6 +4094,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `autocompact on\|off\|status\|threshold <N>` | Automatic compaction |
 | `check` / `check repair` | Verify / repair |
 | `hint info` | State of the index snapshot |
+| `encryption` | Encryption at rest: key in use, records still in clear (admin) |
 | `compress lz4\|zlib\|none` | Re-encode the workspace (admin) |
 | `bench write <N>` / `bench read <N>` | Measure speed (admin) |
 | `shutdown` | Stop the database (admin) |

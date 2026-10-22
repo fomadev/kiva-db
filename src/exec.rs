@@ -466,7 +466,7 @@ const HELP: &str = r#"
   savepoint <name> | rollback to <name> | transaction status
 
   MAINTENANCE:
-  stats | compact | check [repair] | hint info
+  stats | compact | check [repair] | hint info | encryption
   autocompact on|off|status|threshold <N>
   compress lz4|zlib|none            : Re-encode the whole workspace.
 
@@ -1490,7 +1490,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         // Compacting only rewrites one's own file: allowed at home.
         "compact" => Need::Owner,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
-        | "bench" | "shutdown" => Need::Admin,
+        | "bench" | "shutdown" | "encryption" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         "workspace" if sub("create") || sub("remove") => Need::Admin,

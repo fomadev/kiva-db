@@ -19,6 +19,8 @@ pub const REC_HEADER_LEN: usize = 28;
 
 pub const FLAG_COMP_MASK: u8 = 0b0000_0011;
 pub const FLAG_MSGPACK: u8 = 0b0000_0100;
+/// Key and value are encrypted (AES-256-GCM); see [`crate::crypt`].
+pub const FLAG_ENCRYPTED: u8 = 0b0000_1000;
 /// Record belongs to an atomic batch; it only takes effect once the batch's
 /// final record (carrying `FLAG_TXN_COMMIT` as well) is present on disk.
 pub const FLAG_TXN: u8 = 0b0010_0000;
