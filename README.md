@@ -6,7 +6,7 @@
 
 KivaDB is a multi-model database you can start in one command: typed key-value data, JSON documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
 
-**Current release: 1.4.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
+**Current release: 1.5.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
 
 ## What it does
 
@@ -21,7 +21,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 * **Backs up in one command**: `kivadb backup -o all.tar.gz` while it runs, `kivadb restore all.tar.gz` after checking every SHA-256.
 * **Encrypts its data at rest** (AES-256-GCM): records, index snapshots and vector graphs, with a key kept outside the data folder, key rotation, and `kivadb keygen`.
 * **Encrypts its connections**: TLS on every port (shell, Kiva Studio, drivers, HTTPS, `rediss://`), with a certificate it creates itself and checks by fingerprint like SSH, or your own.
-* **Grows with you**: users and roles, isolated workspaces, an optional in-memory value cache, compression, replication to other machines, Lua scripts and triggers, change notifications, Prometheus metrics, Docker image, official Node.js driver.
+* **Grows with you**: users and roles, isolated workspaces, an optional in-memory value cache, compression, Lua scripts and triggers, change notifications, Prometheus metrics, Docker image, official Node.js driver.
 
 ## Install
 
@@ -30,7 +30,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 | **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/fomadev/kiva-db/main/install.ps1` &#124; `iex` |
 | **Linux, macOS** | `curl -sSL https://raw.githubusercontent.com/fomadev/kiva-db/main/install.sh` &#124; `bash` |
 | **Download** | Get the archive for Windows, Linux or macOS from the [releases page](https://github.com/fomadev/kiva-db/releases), unpack it, put `kivadb` in your `PATH` |
-| **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.4.0` |
+| **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.5.0` |
 | **From source** | Install [Rust](https://rustup.rs) and a C compiler (used once, for the embedded Lua), then `cargo build --release`; the executable is `target/release/kivadb` |
 
 Step-by-step instructions for each system are in [Chapter 1](DOCUMENTATION.md#chapter-1--installation) of the documentation.
@@ -72,6 +72,7 @@ kivadb status     is the database running?
 kivadb stop       stop it
 kivadb update     install the latest release
 kivadb run x.kva  run a file of commands
+kivadb backup -o all.tar.gz   save everything, even while it runs
 kivadb --help     every option
 ```
 
@@ -98,7 +99,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | Path | Contents |
 | :--- | :--- |
 | `src/` | The database: storage engine, command language, servers (KivaDB protocol, REST, Redis), replication, scripting |
-| `tests/` | Automated tests (storage, commands, network, Redis, vectors) - run them with `cargo test` |
+| `tests/` | Automated tests (storage, commands, network, Redis, vectors, encryption, backups, failover, semantic cache) - run them with `cargo test` |
 | `drivers/node/` | The official Node.js driver (npm package `kivadb`) |
 | `examples/nodejs/` | A dependency-free Node.js client, to read the protocol |
 | `Dockerfile`, `docker-compose.yml` | The Docker image and a ready-to-use Compose file |
@@ -109,7 +110,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 
 ## Scope of this release
 
-KivaDB 1.4.0 is a single-node database with replicas. Automatic leader election, clustering and SQL / the PostgreSQL protocol are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
+KivaDB 1.5.0 stores the whole database on each node, with replicas and automatic failover. Clustering (spreading the data over several machines) and SQL / the PostgreSQL protocol are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
 
 ## License
 

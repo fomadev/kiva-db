@@ -21,6 +21,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 * **1.2.0** Editors may compact their own personal workspace
 * **1.3.0** Redis compatibility complete enough to replace Redis as short-lived memory: Lua scripts (`EVAL`), RESP3, numbered databases, `EXPIRE` options, atomic counters across connections
 * **1.4.0** **TLS** on every port with certificates checked by fingerprint, commands over several lines, `.kva` command files, `install.ps1` for Windows
+* **1.5.0** **Encryption at rest**, **automatic failover**, **HNSW** vector index, **semantic cache**, Redis **sets, sorted sets and publish/subscribe**, `kivadb backup` / `restore`, `if not exists` / `if exists`
 
 ## Next, in order of value
 
@@ -47,7 +48,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 | **Plugins in WebAssembly, scripts in JavaScript or Python** | Lua already provides sandboxed, atomic scripts and triggers. A WebAssembly runtime (Wasmtime) is a large dependency; it becomes worth it when there is demand for plugins written in other languages |
 | **"Time travel" (see a key's past values)** | The log does keep old versions, but compaction deletes them on purpose to reclaim space. Time travel needs a retention policy (keep N versions or N days), an index of versions, and disk budgeting |
 | **MQTT, gRPC, GraphQL listeners** | Each is a protocol to maintain. The REST API, Server-Sent Events, WebSocket, the binary protocol and the Redis protocol already cover web, mobile, scripts and IoT gateways |
-| **Clustering (sharding, Raft, quorum, distributed queries)** | A distributed database is a multi-year effort to get right. Replication with failover covers safety and read scaling for a single node's worth of data |
+| **Clustering (sharding, Raft, quorum, distributed queries)** | A distributed database is a multi-year effort to get right. Replication with automatic failover covers safety, availability and read scaling for a single node's worth of data |
 | **Kiva Studio cloud accounts** | Syncing settings and sending notifications through a FomaDev service means running that service: servers, security, privacy obligations and costs. Local remembered connections and the in-app activity feed cover the need without it |
 
 ## About a few claims

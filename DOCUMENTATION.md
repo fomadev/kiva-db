@@ -1,6 +1,6 @@
 # KivaDB Documentation
 
-The complete manual for KivaDB 1.4.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
+The complete manual for KivaDB 1.5.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
 
 ## Table of contents
 
@@ -103,7 +103,10 @@ You talk to KivaDB with short commands: `set` to store, `get` to read, `del` to 
 | Memory of an AI assistant, search by meaning | Vector search ([Chapter 12](#chapter-12--vector-search-for-ai)) |
 | Event logs, sensor readings by time | Sorted keys make time ranges cheap ([Chapter 9](#chapter-9--listing-keys-and-ranges)) |
 | Live dashboards, notifications to web pages | Change notifications over WebSocket and Server-Sent Events ([Chapter 22](#chapter-22--change-notifications)) |
-| Replacing a Redis used as a cache or a session store, with data kept on disk | The Redis protocol ([Chapter 23](#chapter-23--redis-compatibility)) |
+| Replacing a Redis used as a cache or a session store, with data kept on disk | The Redis protocol, sets and sorted sets included ([Chapter 23](#chapter-23--redis-compatibility)) |
+| Applications that call a language model | A semantic cache that answers a question already asked in other words ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) |
+| Personal, health or payment data | Encryption at rest and on the network ([16.11](#1611-encrypted-connections-tls), [16.12](#1612-encryption-at-rest)) |
+| A service that must keep running | Replicas and automatic failover ([Chapter 25](#chapter-25--replication)), backups in one command ([17.7](#177-backups)) |
 
 KivaDB is **not** a relational database: there are no tables, no joins and no SQL. Applications built around relations between many tables and complex reports are better served by PostgreSQL or MySQL, possibly next to KivaDB. [Chapter 32](#chapter-32--limits-and-scope) lists the limits honestly.
 
@@ -223,7 +226,7 @@ Then go to [1.4](#14-make-it-available-everywhere).
 The image is published on Docker Hub as `fomadev0/kiva-db`:
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.4.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.5.0
 ```
 
 KivaDB is then running, reachable on the three ports, with `kiva` as administrator and the password you chose. Every part of that line, Compose, backups and upgrades are explained in [29.6](#296-docker). With Docker you can skip the rest of this chapter and [Chapter 2](#chapter-2--starting-and-stopping-kivadb): to open a shell, run `docker exec -it kivadb kivadb -u kiva`.
@@ -272,7 +275,7 @@ kivadb --version
 ```
 
 ```text
-KivaDB 1.4.0
+KivaDB 1.5.0
 ```
 
 `kivadb --help` lists every option.
@@ -304,10 +307,10 @@ kivadb update
 
 ```text
 Checking for a new version of KivaDB...
-New version available: 1.5.0 (current: 1.4.0).
+New version available: 1.6.0 (current: 1.5.0).
 Downloading kivadb_win_x64.zip...
 Checksum verified (SHA-256).
-KivaDB successfully updated to version 1.5.0!
+KivaDB successfully updated to version 1.6.0!
 ```
 
 What it does, in order:
@@ -323,13 +326,13 @@ What it does, in order:
 **Knowing when there is a new version.** When you use `kivadb` in a terminal, it checks GitHub at most once a day, in the background, and mentions a new release when the command ends:
 
 ```text
-A new version of KivaDB is available: 1.5.0 (current: 1.4.0)
+A new version of KivaDB is available: 1.6.0 (current: 1.5.0)
 Run 'kivadb update' to install the latest release.
 ```
 
 The check never slows a command down and never runs for scripts, services, `kivadb serve` or containers (only when a person is at the terminal). Its result is kept in `version_check.json` in the home directory. Set `KIVADB_NO_UPDATE_CHECK=1` to turn it off.
 
-**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.4.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
+**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.5.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert.
 
 ### 1.7 Uninstalling
 
@@ -426,7 +429,7 @@ kivadb serve
 ```
 
 ```text
-KivaDB 1.4.0 server
+KivaDB 1.5.0 server
   Home         : C:\Users\you\AppData\Roaming\KivaDB
   TCP protocol : 127.0.0.1:2911 (binary and plain text)
   TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
@@ -485,12 +488,12 @@ kivadb
 ```
 
 ```text
-KivaDB Shell v1.4.0
+KivaDB Shell v1.5.0
 Type 'help' or 'h' for command list
 kiva>
 ```
 
-`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.4.0 at 127.0.0.1:2911` is shown first.
+`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.5.0 at 127.0.0.1:2911` is shown first.
 
 ### 3.2 Store and read a value
 
@@ -2651,7 +2654,7 @@ KivaDB decides which language a connection speaks from its very first byte: `0x0
 
 | Command | Code | Payload | Reply payload |
 | :--- | :--- | :--- | :--- |
-| HELLO | 1 | empty | Three lines: `KivaDB 1.4.0`, `auth=required` or `auth=none`, `user=<name>` |
+| HELLO | 1 | empty | Three lines: `KivaDB 1.5.0`, `auth=required` or `auth=none`, `user=<name>` |
 | AUTH | 2 | user, a zero byte, password | A welcome text |
 | EXEC | 3 | A command line, as in the shell | Output lines separated by `\n`; each line starts with `+` (normal) or `-` (error) |
 | PING | 4 | empty | `PONG` |
@@ -2842,7 +2845,7 @@ curl -X POST http://localhost:8080/v1/exec -d '{"command": "count where user:*.a
 | `GET /ws` | WebSocket change notifications ([Chapter 22](#chapter-22--change-notifications)) |
 | `GET /v1/stream` | Server-Sent Events change notifications ([22.4](#224-over-server-sent-events)) |
 | `POST /v1/api` | Structured requests, including `query` and `similar` ([20.4](#204-structured-requests-for-tools)) |
-| `GET /health` | `{"version":"1.4.0","status":"ok","timestamp":...}` - no login needed |
+| `GET /health` | `{"version":"1.5.0","status":"ok","timestamp":...}` - no login needed |
 | `GET /docs` | An interactive page listing the routes, with a "Try it" button for each |
 | `GET /openapi.json` | The same description in OpenAPI format |
 
@@ -3266,7 +3269,7 @@ Add KivaDB as a dependency of your project, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.4.0" }
+kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.5.0" }
 ```
 
 Then use its client:
@@ -3851,7 +3854,7 @@ KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
 
 ```text
   Security     : administrator password set, authentication turned on
-KivaDB 1.4.0 server
+KivaDB 1.5.0 server
   Home         : /var/lib/kivadb
   TCP protocol : 0.0.0.0:2911 (binary and plain text)
   TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
@@ -3867,7 +3870,7 @@ Press Ctrl+C to stop.
 This is the usual case at a hosting provider. The steps below download KivaDB, create a dedicated system user, install the executable and let systemd start KivaDB at boot and restart it if it stops.
 
 ```bash
-curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.4.0/kivadb_linux_x64.tar.gz
+curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.5.0/kivadb_linux_x64.tar.gz
 tar -xzf kivadb_linux_x64.tar.gz
 sudo useradd --system --home-dir /var/lib/kivadb --create-home kivadb
 sudo install -m 755 kivadb /usr/local/bin/kivadb
@@ -4001,13 +4004,13 @@ The official image is `fomadev0/kiva-db` on Docker Hub. It holds only the `kivad
 
 | Tag | Meaning |
 | :--- | :--- |
-| `fomadev0/kiva-db:1.4.0` | Exactly version 1.4.0. Use this on servers: it never changes under you |
+| `fomadev0/kiva-db:1.5.0` | Exactly version 1.5.0. Use this on servers: it never changes under you |
 | `fomadev0/kiva-db:latest` | The most recent version |
 
 **Run it:**
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.4.0
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.5.0
 ```
 
 | Part | Meaning |
@@ -4071,7 +4074,7 @@ docker rm -f kivadb
 
 then the `docker run` line again with the new tag. With Compose: change the tag in the file, then `docker compose up -d`.
 
-**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.4.0` in the commands above:
+**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.5.0` in the commands above:
 
 ```bash
 docker build -t kivadb:local .
@@ -4327,12 +4330,11 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 ## Chapter 32 — Limits and scope
 
-KivaDB 1.4.0 is a single-node database with replicas. Knowing what it does not do is as useful as knowing what it does.
+KivaDB 1.5.0 keeps the whole database on each node, with replicas and automatic failover. Knowing what it does not do is as useful as knowing what it does.
 
-**Not included in 1.4.0**
+**Not included in 1.5.0**
 
-* **Distributed consensus beyond failover.** Automatic failover elects a new master by majority ([25.8](#258-automatic-failover)), but replication stays asynchronous by default and every node holds the whole database.
-* **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
+* **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).
 * **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing, sets and sorted sets are meant for thousands of members per key, not millions, and expiry times are kept to the second ([23.3](#233-supported-commands)).
@@ -4370,10 +4372,14 @@ What is planned next, and what was considered and set aside with the reasons, is
 | **Document** | A value with named fields (object) or a list (array) |
 | **Driver** | A library that lets a programming language talk to KivaDB |
 | **Embedding** | A vector produced by an AI model to represent the meaning of a text, an image or a sound |
-| **Failover** | Handing the master role to a replica |
+| **Encryption at rest** | Data stored encrypted on disk, readable only with the key ([16.12](#1612-encryption-at-rest)) |
+| **Epoch** | The number of the current master's term in a replication group; it grows at each failover ([25.8](#258-automatic-failover)) |
+| **Failover** | Handing the master role to a replica, by command or automatically ([25.7](#257-failover)) |
 | **Fragmentation** | The share of the data file occupied by obsolete records |
 | **Grant** | Permission given to a user on a workspace |
+| **Heartbeat** | A short message the master sends regularly so that replicas know it is alive |
 | **Hint file** | A saved copy of the index, for fast start |
+| **HNSW** | A graph of vectors that finds the nearest ones while comparing only a few ([12.5](#125-approximate-index-hnsw-for-large-collections)) |
 | **Home directory** | The folder holding KivaDB's configuration, users and data |
 | **Index** | The in-memory table telling where each key's value is on disk |
 | **JSON** | The text format of documents: `{"name": "Alice"}` |
@@ -4385,14 +4391,17 @@ What is planned next, and what was considered and set aside with the reasons, is
 | **Pattern** | A key template with `*` and `?` |
 | **Port** | The number that tells which program of a machine a network connection is for: 2911, 8080, 6379 |
 | **Projection** | Keeping only some fields of the documents returned |
+| **Quorum** | The number of nodes that must agree before a new master is elected; by default a majority |
 | **REST API** | Access to KivaDB over plain HTTP, on port 8080 ([Chapter 21](#chapter-21--the-rest-api)) |
 | **RESP** | The network protocol of Redis, spoken by KivaDB on port 6379 ([Chapter 23](#chapter-23--redis-compatibility)) |
 | **Role** | What a user is allowed to do: admin, editor, viewer |
 | **Rollback** | Cancel the changes of a transaction |
 | **Savepoint** | A bookmark inside a transaction |
 | **Secondary index** | An index on a field of documents, to speed up queries |
+| **Semantic cache** | Answers kept for questions and given back for questions that mean the same ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) |
 | **Server-Sent Events (SSE)** | An HTTP connection that stays open to receive notifications ([22.4](#224-over-server-sent-events)) |
 | **Shell** | The interactive command line opened by `kivadb`, with the `kiva>` prompt |
+| **Sorted set** | A Redis set whose members carry a score and stay ordered by it ([23.8](#238-sets-and-sorted-sets)) |
 | **Tombstone** | The record that marks a key as deleted |
 | **Transaction** | A group of changes applied together |
 | **Trigger** | A script run automatically when keys change |

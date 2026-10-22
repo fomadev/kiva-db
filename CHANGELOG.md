@@ -2,7 +2,9 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased
+## 1.5.0 - 2026-10-22
+
+Security, availability and AI: data encrypted on disk, a new master elected by itself when the old one dies, backups in one command, an approximate vector index and a semantic cache for large AI workloads, and Redis sets, sorted sets and publish/subscribe.
 
 ### Added
 
@@ -15,6 +17,16 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * **`kivadb backup` and `kivadb restore`**: `kivadb backup --output <file.tar.gz> [-w <workspace>]` saves the whole home (configuration, users, every workspace, audit log, TLS certificate) or one workspace, with a SHA-256 per file in a manifest and `<file>.sha256` for the archive. It works while KivaDB runs (the server makes the backup; each data file is copied as it was at one instant, writes go on, compactions wait) or stopped. `kivadb restore <file.tar.gz> [--target <dir>] [--as <name>] [--check]` checks the archive, every file and every record before writing anything, then restores a home into an empty folder (with `kiva.conf` pointing at its new place) or a workspace under its name or another; it refuses while KivaDB runs on that home. Shell: `backup to "<file>" [workspace <name>]` (admin). DOCUMENTATION 17.7.
 * **Automatic failover** (`failover.auto`): the master sends heartbeats listing the group's nodes; a replica that hears nothing for `failover.down_after_ms` checks the master itself, asks the other replicas, and a new master is elected only when a majority of the group (the master counted; `failover.quorum` to change it) sees the master down. The most up-to-date replica wins (then `failover.priority`, 0 = never); votes are given once per epoch to a candidate at least as up to date. The new master tells the other replicas, which resynchronise from it; an old master that comes back finds the newer epoch and becomes a replica. `failover status`, `READONLY` errors that name the master, `master_host` / `master_port` in Redis `INFO`. `replica promote` and `failover to` open a new epoch too. DOCUMENTATION 25.8.
 * **Semantic cache**: `semantic lookup | store | stats | clear` keep answers (of a language model, say) next to the embedding of their question, and give them back for a question at cosine similarity >= `semantic.cache.threshold` (0.98), or for the same text word for word. Named caches per workspace, HNSW search, TTL (`semantic.cache.ttl`, per entry), invalidation as soon as a key matching a `depends` pattern is written or deleted, `semantic.cache.max_entries`. With `semantic.cache.enabled`, `get similar` reuses the results of a near-identical recent query. Structured request `semantic`, `cached` in `similar` answers, `semanticLookup` / `semanticStore` in the Node.js driver. In memory, not saved. DOCUMENTATION 12.8.
+
+### Changed
+
+* A write refused on a replica names the master: `READONLY: this node is a replica of <host:port>; ...`.
+* `config set required ...` (without its section) is ambiguous since `encryption.required` exists next to `tls.required`: write `config set tls.required true` or `config set encryption.required true`, as the documentation does.
+* The distance functions of vector search are vectorised: exact searches are faster too.
+
+### Fixed
+
+* Reopening a database right after it was closed could fail with "database is locked" on Linux, while another process was being started (it inherits open files for an instant). KivaDB now waits up to half a second for such a lock.
 
 ## 1.4.0 - 2026-10-20
 
