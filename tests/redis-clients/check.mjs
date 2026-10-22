@@ -1,5 +1,6 @@
 // Redis client libraries, used the way applications commonly use Redis
-// (pending registrations with an expiry, resend locks, login rate limits),
+// (pending registrations with an expiry, resend locks, login rate limits,
+// notifying every instance through publish/subscribe),
 // against a running KivaDB.
 //
 //   npm install && node check.mjs <redis port> <password of kiva>
@@ -120,6 +121,44 @@ await step("node-redis (RESP3): hashes come back as objects", async () => {
 });
 await step("node-redis: EVAL", async () => {
   assert.equal(await pay.eval("return redis.call('INCR', KEYS[1])", { keys: ["tries"] }), 2);
+});
+
+// --- Publish/subscribe: every instance hears that the texts changed ------------
+const nextMessage = (subscribe) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("no message within 5 s")), 5000);
+    subscribe((channel, message) => {
+      clearTimeout(timer);
+      resolve([channel, message]);
+    });
+  });
+await step("ioredis: SUBSCRIBE on a dedicated connection, PUBLISH from another", async () => {
+  const listener = new Redis(url(2));
+  assert.equal(await listener.subscribe("lp:texts:changed"), 1);
+  const got = nextMessage((cb) => listener.once("message", cb));
+  assert.equal(await io.publish("lp:texts:changed", "fr"), 1);
+  assert.deepEqual(await got, ["lp:texts:changed", "fr"]);
+  const pat = new Redis(url(0));
+  await pat.psubscribe("lp:texts:*");
+  const pgot = nextMessage((cb) => pat.once("pmessage", (_p, ch, m) => cb(ch, m)));
+  assert.equal(await io.publish("lp:texts:ln", "v2"), 1);
+  assert.deepEqual(await pgot, ["lp:texts:ln", "v2"]);
+  listener.disconnect();
+  pat.disconnect();
+});
+await step("node-redis (RESP3): subscriber made with duplicate()", async () => {
+  const listener = pay.duplicate();
+  listener.on("error", (e) => console.error("node-redis listener:", e.message));
+  await listener.connect();
+  const got = nextMessage((cb) => listener.subscribe("lp:texts:changed", (message, channel) => cb(channel, message)));
+  // Wait for the subscription to be confirmed before publishing.
+  for (let i = 0; i < 50 && (await pay.pubSubNumSub("lp:texts:changed"))["lp:texts:changed"] < 1; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(await pay.publish("lp:texts:changed", "all"), 1);
+  assert.deepEqual(await got, ["lp:texts:changed", "all"]);
+  await listener.unsubscribe("lp:texts:changed");
+  await listener.quit();
 });
 
 await pay.quit();

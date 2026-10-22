@@ -241,6 +241,8 @@ enum R {
     A(Option<Vec<R>>),
     /// A RESP3 map, as its flattened key-value list.
     M(Vec<R>),
+    /// A RESP3 push (pub/sub messages).
+    P(Vec<R>),
 }
 
 fn read_reply(r: &mut impl BufRead) -> R {
@@ -275,6 +277,10 @@ fn read_reply(r: &mut impl BufRead) -> R {
             let n: usize = rest.parse().unwrap();
             R::M((0..n * 2).map(|_| read_reply(r)).collect())
         }
+        ">" => {
+            let n: usize = rest.parse().unwrap();
+            R::P((0..n).map(|_| read_reply(r)).collect())
+        }
         other => panic!("unexpected reply type {other:?} in {line:?}"),
     }
 }
@@ -298,6 +304,11 @@ impl Redis {
             req.push_str(&format!("${}\r\n{a}\r\n", a.len()));
         }
         self.stream.write_all(req.as_bytes()).unwrap();
+        read_reply(&mut self.reader)
+    }
+
+    /// The next reply or message, without sending anything.
+    fn next(&mut self) -> R {
         read_reply(&mut self.reader)
     }
 }
@@ -659,6 +670,92 @@ fn redis_scripts_obey_roles() {
 // ---------------------------------------------------------------------------
 // HTTP: Server-Sent Events and structured requests
 // ---------------------------------------------------------------------------
+
+fn msg(parts: &[&str]) -> R {
+    R::A(Some(parts.iter().map(|p| b(p)).collect()))
+}
+
+fn notice(kind: &str, name: &str, n: i64) -> R {
+    R::A(Some(vec![b(kind), b(name), R::I(n)]))
+}
+
+#[test]
+fn redis_publish_and_subscribe() {
+    let dir = TempDir::new("resp_pubsub");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, r#"create user "eve" identified by "evepw" role editor"#);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut sub = Redis::connect(port);
+    let mut publ = Redis::connect(port);
+
+    // One confirmation per channel, then the messages as they are published.
+    assert_eq!(sub.cmd(&["SUBSCRIBE", "texts", "news"]), notice("subscribe", "texts", 1));
+    assert_eq!(sub.next(), notice("subscribe", "news", 2));
+    assert_eq!(publ.cmd(&["PUBLISH", "texts", "v2"]), R::I(1));
+    assert_eq!(sub.next(), msg(&["message", "texts", "v2"]));
+    assert_eq!(publ.cmd(&["PUBLISH", "nobody", "x"]), R::I(0));
+
+    // Patterns, with Redis's glob syntax.
+    assert_eq!(sub.cmd(&["PSUBSCRIBE", "app.[ab]*"]), notice("psubscribe", "app.[ab]*", 3));
+    assert_eq!(publ.cmd(&["PUBLISH", "app.b1", "hi"]), R::I(1));
+    assert_eq!(sub.next(), msg(&["pmessage", "app.[ab]*", "app.b1", "hi"]));
+    assert_eq!(publ.cmd(&["PUBLISH", "app.c1", "hi"]), R::I(0));
+
+    // In RESP2, a listening connection only accepts pub/sub commands and PING.
+    assert!(matches!(sub.cmd(&["GET", "k"]), R::E(e) if e.contains("Can't execute 'get'")));
+    assert_eq!(sub.cmd(&["PING"]), msg(&["pong", ""]));
+
+    assert_eq!(publ.cmd(&["PUBSUB", "CHANNELS"]), msg(&["news", "texts"]));
+    assert_eq!(publ.cmd(&["PUBSUB", "CHANNELS", "t*"]), msg(&["texts"]));
+    assert_eq!(
+        publ.cmd(&["PUBSUB", "NUMSUB", "texts", "ghost"]),
+        R::A(Some(vec![b("texts"), R::I(1), b("ghost"), R::I(0)]))
+    );
+    assert_eq!(publ.cmd(&["PUBSUB", "NUMPAT"]), R::I(1));
+
+    // SELECT does not change the channels, as in Redis.
+    assert_eq!(publ.cmd(&["SELECT", "2"]), ok_reply());
+    assert_eq!(publ.cmd(&["PUBLISH", "texts", "from db2"]), R::I(1));
+    assert_eq!(sub.next(), msg(&["message", "texts", "from db2"]));
+    // Another user has channels of their own.
+    let mut eve = Redis::connect(port);
+    assert_eq!(eve.cmd(&["AUTH", "eve", "evepw"]), ok_reply());
+    assert_eq!(eve.cmd(&["PUBLISH", "texts", "spy"]), R::I(0));
+
+    // Messages published in MULTI or a script leave when it commits, and
+    // never when the script fails.
+    publ.cmd(&["MULTI"]);
+    publ.cmd(&["PUBLISH", "texts", "in multi"]);
+    assert_eq!(publ.cmd(&["EXEC"]), R::A(Some(vec![R::I(1)])));
+    assert_eq!(sub.next(), msg(&["message", "texts", "in multi"]));
+    assert!(matches!(publ.cmd(&["EVAL", "redis.call('PUBLISH', 'texts', 'lost') error('boom')", "0"]), R::E(_)));
+    assert_eq!(publ.cmd(&["EVAL", "return redis.call('PUBLISH', 'texts', 'lua')", "0"]), R::I(1));
+    assert_eq!(sub.next(), msg(&["message", "texts", "lua"]));
+
+    // Unsubscribing confirms each channel; then the connection is normal again.
+    assert_eq!(sub.cmd(&["UNSUBSCRIBE"]), notice("unsubscribe", "news", 2));
+    assert_eq!(sub.next(), notice("unsubscribe", "texts", 1));
+    assert_eq!(sub.cmd(&["PUNSUBSCRIBE"]), notice("punsubscribe", "app.[ab]*", 0));
+    assert_eq!(sub.cmd(&["GET", "k"]), R::B(None));
+    assert_eq!(publ.cmd(&["PUBLISH", "texts", "x"]), R::I(0));
+
+    // RESP3: messages are pushes, and other commands stay allowed.
+    let mut s3 = Redis::connect(port);
+    assert!(matches!(s3.cmd(&["HELLO", "3"]), R::M(_)));
+    assert_eq!(s3.cmd(&["SUBSCRIBE", "texts"]), R::P(vec![b("subscribe"), b("texts"), R::I(1)]));
+    assert_eq!(s3.cmd(&["SET", "k", "v"]), ok_reply());
+    assert_eq!(publ.cmd(&["PUBLISH", "texts", "v3"]), R::I(1));
+    assert_eq!(s3.next(), R::P(vec![b("message"), b("texts"), b("v3")]));
+
+    // A closed connection stops counting as a subscriber.
+    drop(s3);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while publ.cmd(&["PUBLISH", "texts", "gone"]) != R::I(0) {
+        assert!(std::time::Instant::now() < deadline, "the closed subscriber is still listed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 #[test]
 fn server_sent_events_stream_key_changes() {

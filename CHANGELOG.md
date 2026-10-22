@@ -8,6 +8,7 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 * `set <key> <value> if not exists`: creates the key only when it is absent; otherwise the command succeeds with `OK: <key> skipped (already exists)` instead of an error. Works with a type, `ttl` and `and` chains.
 * `del <key> if exists`: deletes the key when present; otherwise prints `OK: <key> skipped (does not exist)`. Both clauses are case-insensitive and make `.kva` files safe to run again. DOCUMENTATION 6.1, 6.5 and 3.10.
+* **Redis publish/subscribe**: `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE` (Redis glob patterns), `PUBSUB CHANNELS | NUMSUB | NUMPAT`, in RESP2 and RESP3 (push frames). An application with several instances can tell all of them that something changed. Channels belong to the user's database 0 workspace; messages published inside `MULTI` or a Lua script leave when it commits; a listener that stops reading is disconnected after 65,536 waiting messages. Checked with ioredis and node-redis. DOCUMENTATION 23.7.
 
 ## 1.4.0 - 2026-10-20
 

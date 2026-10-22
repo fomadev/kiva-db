@@ -23,11 +23,15 @@
 //! Lua scripts (EVAL) are atomic with respect to each other. Numbered
 //! databases map to workspaces: 0 is the user's own, `SELECT n` (1 to 15)
 //! uses the workspace `db<n>`.
+//!
+//! Publish/subscribe (`PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`, `PUBSUB`) is
+//! described in [`crate::pubsub`].
 
 use crate::auth::Role;
 use crate::engine::BatchOp;
 use crate::error::{KivaError, Result};
 use crate::instance::{Instance, VERSION};
+use crate::pubsub::{Frame, Held, Outbox, OUTBOX_FRAMES};
 use crate::session::{Meta, Need, Session};
 use crate::util::{glob_match, now_secs};
 use crate::value::{fmt_f64, Type, Value};
@@ -37,7 +41,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,8 +70,12 @@ const NOT_IN_SCRIPTS: &[&str] = &[
     "SELECT",
     "SUBSCRIBE",
     "PSUBSCRIBE",
-    "PUBLISH",
+    "UNSUBSCRIBE",
+    "PUNSUBSCRIBE",
 ];
+
+/// Commands a client in RESP2 may send while it listens to channels.
+const WHILE_SUBSCRIBED: &[&str] = &["SUBSCRIBE", "PSUBSCRIBE", "UNSUBSCRIBE", "PUNSUBSCRIBE", "PING", "QUIT", "RESET"];
 
 /// State shared by the Redis connections of one instance.
 #[derive(Default)]
@@ -76,6 +85,8 @@ pub struct Shared {
     turn: Mutex<()>,
     /// Lua scripts by SHA-1, for EVALSHA.
     scripts: Mutex<HashMap<String, String>>,
+    /// Connections listening to channels.
+    pub hub: crate::pubsub::Hub,
 }
 
 impl Shared {
@@ -104,6 +115,10 @@ pub enum Reply {
     Array(Option<Vec<Reply>>),
     /// Field-value pairs: a map in RESP3, a flat array in RESP2.
     Map(Vec<(Reply, Reply)>),
+    /// A pub/sub message or notice: a push in RESP3, an array in RESP2.
+    Push(Vec<Reply>),
+    /// Nothing to write: the command already queued its replies (SUBSCRIBE).
+    Sent,
 }
 
 impl Reply {
@@ -142,6 +157,14 @@ impl Reply {
                     v.encode(out, resp3);
                 }
             }
+            Reply::Push(items) => {
+                let mark = if resp3 { '>' } else { '*' };
+                out.extend_from_slice(format!("{mark}{}\r\n", items.len()).as_bytes());
+                for i in items {
+                    i.encode(out, resp3);
+                }
+            }
+            Reply::Sent => {}
             Reply::Map(pairs) => {
                 out.extend_from_slice(format!("*{}\r\n", pairs.len() * 2).as_bytes());
                 for (k, v) in pairs {
@@ -288,34 +311,69 @@ pub fn read_command(r: &mut impl BufRead) -> io::Result<Option<Vec<Vec<u8>>>> {
 
 fn serve(inst: &Arc<Instance>, stream: TcpStream, local: bool) {
     let _ = stream.set_nodelay(true);
-    let Ok(write_half) = stream.try_clone() else { return };
-    let mut writer = io::BufWriter::new(write_half);
+    let (Ok(write_half), Ok(control)) = (stream.try_clone(), stream.try_clone()) else { return };
+    // Replies and published messages leave in order through the outbox.
+    let (tx, rx) = mpsc::sync_channel(OUTBOX_FRAMES);
+    let resp3 = Arc::new(AtomicBool::new(false));
+    let shared = resp3.clone();
+    let writer =
+        std::thread::Builder::new().name("kiva-resp-out".into()).spawn(move || write_frames(write_half, rx, &shared));
+    let Ok(writer) = writer else { return };
     let mut reader = BufReader::new(stream);
     let mut conn = Conn::new(Session::new(inst.clone(), local, None));
-    let mut out = Vec::new();
+    conn.outbox = Some(Outbox { tx: tx.clone(), stream: control });
     loop {
         let args = match read_command(&mut reader) {
             Ok(Some(a)) => a,
             Ok(None) => break,
             Err(e) => {
-                let _ = writer.write_all(format!("-ERR Protocol error: {e}\r\n").as_bytes());
-                let _ = writer.flush();
+                let _ = tx.send(Frame::Bytes(format!("-ERR Protocol error: {e}\r\n").into_bytes()));
                 break;
             }
         };
         let quit = args[0].eq_ignore_ascii_case(b"QUIT");
-        out.clear();
+        let mut out = Vec::new();
         conn.handle(&args).encode(&mut out, conn.resp3);
-        if writer.write_all(&out).is_err() {
+        resp3.store(conn.resp3, Ordering::SeqCst);
+        if (!out.is_empty() && tx.send(Frame::Bytes(out)).is_err()) || quit {
             break;
         }
-        // Pipelined commands are answered together.
-        if reader.buffer().is_empty() && writer.flush().is_err() {
-            break;
+    }
+    // Stop listening, then let the writer send what is left.
+    drop(conn);
+    drop(tx);
+    let _ = writer.join();
+}
+
+/// Writes a connection's replies and messages, flushing when none is waiting
+/// (pipelined commands are answered together).
+fn write_frames(stream: TcpStream, rx: Receiver<Frame>, resp3: &AtomicBool) {
+    let control = stream.try_clone();
+    let mut w = io::BufWriter::new(stream);
+    while let Ok(mut frame) = rx.recv() {
+        loop {
+            let bytes = match frame {
+                Frame::Bytes(b) => b,
+                Frame::Push(r) => {
+                    let mut b = Vec::new();
+                    r.encode(&mut b, resp3.load(Ordering::SeqCst));
+                    b
+                }
+            };
+            if w.write_all(&bytes).is_err() {
+                // The client is gone: wake the reader up too.
+                if let Ok(s) = &control {
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                }
+                return;
+            }
+            match rx.try_recv() {
+                Ok(f) => frame = f,
+                Err(_) => break,
+            }
         }
-        if quit {
-            let _ = writer.flush();
-            break;
+        if w.flush().is_err() {
+            return;
         }
     }
 }
@@ -328,6 +386,20 @@ pub struct Conn {
     home: Option<String>,
     /// Whether the client switched to RESP3 with `HELLO 3`.
     pub resp3: bool,
+    /// Where pub/sub messages go; `None` outside a network connection.
+    pub outbox: Option<Outbox>,
+    /// How many channels and patterns this connection listens to.
+    subs: i64,
+    /// Messages published inside MULTI or a script, sent when it commits.
+    held: Option<Vec<Held>>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        if self.outbox.is_some() {
+            self.sess.inst.resp.hub.leave(self.sess.id);
+        }
+    }
 }
 
 fn text(arg: &[u8]) -> std::result::Result<String, Reply> {
@@ -387,6 +459,10 @@ fn json_text(j: &Json) -> Vec<u8> {
     }
 }
 
+fn no_outbox() -> Reply {
+    Reply::err("publish/subscribe needs its own Redis connection")
+}
+
 fn arity(args: &[Vec<u8>], min: usize) -> std::result::Result<(), Reply> {
     if args.len() < min {
         let name = String::from_utf8_lossy(&args[0]).to_ascii_lowercase();
@@ -397,11 +473,18 @@ fn arity(args: &[Vec<u8>], min: usize) -> std::result::Result<(), Reply> {
 
 impl Conn {
     pub fn new(sess: Session) -> Conn {
-        Conn { sess, queued: None, home: None, resp3: false }
+        Conn { sess, queued: None, home: None, resp3: false, outbox: None, subs: 0, held: None }
     }
 
     pub fn handle(&mut self, args: &[Vec<u8>]) -> Reply {
         let name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
+        // In RESP2, a listening connection only receives messages.
+        if self.subs > 0 && !self.resp3 && !WHILE_SUBSCRIBED.contains(&name.as_str()) {
+            return Reply::err(format!(
+                "Can't execute '{}': only (P|S)SUBSCRIBE / (P)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+                name.to_ascii_lowercase()
+            ));
+        }
         // Inside MULTI, commands are queued until EXEC.
         if let Some(queue) = self.queued.as_mut() {
             if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT") {
@@ -435,6 +518,9 @@ impl Conn {
 
     fn run(&mut self, name: &str, args: &[Vec<u8>]) -> Res {
         match name {
+            "PING" if self.subs > 0 && !self.resp3 => {
+                Ok(Reply::array(vec![Reply::bulk("pong"), Reply::bulk(args.get(1).cloned().unwrap_or_default())]))
+            }
             "PING" => Ok(match args.get(1) {
                 Some(m) => Reply::bulk(m.clone()),
                 None => Reply::Simple("PONG".into()),
@@ -562,9 +648,53 @@ impl Conn {
             "EXEC" => self.exec(),
             "WATCH" => Err(Reply::err("WATCH is not supported: KivaDB checks conflicts at EXEC time instead")),
             "UNWATCH" => Ok(Reply::ok()),
-            "SUBSCRIBE" | "PSUBSCRIBE" | "PUBLISH" => Err(Reply::err(
-                "publish/subscribe is not supported on this port; use 'subscribe' on port 2911, /v1/stream or /ws",
-            )),
+            "SUBSCRIBE" | "PSUBSCRIBE" => {
+                arity(args, 2)?;
+                let outbox = self.outbox.as_ref().ok_or_else(no_outbox)?;
+                let scope = self.scope();
+                let n =
+                    self.sess.inst.resp.hub.subscribe(self.sess.id, outbox, &scope, &args[1..], name == "PSUBSCRIBE");
+                self.subs = n;
+                Ok(Reply::Sent)
+            }
+            "UNSUBSCRIBE" | "PUNSUBSCRIBE" => {
+                let outbox = self.outbox.as_ref().ok_or_else(no_outbox)?;
+                let n = self.sess.inst.resp.hub.unsubscribe(self.sess.id, outbox, &args[1..], name == "PUNSUBSCRIBE");
+                self.subs = n;
+                Ok(Reply::Sent)
+            }
+            "PUBLISH" => {
+                if args.len() != 3 {
+                    return Err(Reply::err("wrong number of arguments for 'publish' command"));
+                }
+                let scope = self.scope();
+                let inst = self.sess.inst.clone();
+                Ok(Reply::Int(match self.held.as_mut() {
+                    // Inside MULTI or a script: sent once it commits.
+                    Some(held) => {
+                        held.push(Held { scope: scope.clone(), channel: args[1].clone(), message: args[2].clone() });
+                        inst.resp.hub.publish(&scope, &args[1], &args[2], true)
+                    }
+                    None => inst.resp.hub.publish(&scope, &args[1], &args[2], false),
+                }))
+            }
+            "PUBSUB" => {
+                arity(args, 2)?;
+                let scope = self.scope();
+                let hub = &self.sess.inst.resp.hub;
+                match String::from_utf8_lossy(&args[1]).to_ascii_uppercase().as_str() {
+                    "CHANNELS" => Ok(Reply::array(
+                        hub.channels(&scope, args.get(2).map(|p| p.as_slice())).into_iter().map(Reply::bulk).collect(),
+                    )),
+                    "NUMSUB" => Ok(Reply::Map(
+                        args[2..].iter().map(|c| (Reply::bulk(c.clone()), Reply::Int(hub.numsub(&scope, c)))).collect(),
+                    )),
+                    "NUMPAT" => Ok(Reply::Int(hub.numpat(&scope))),
+                    other => {
+                        Err(Reply::err(format!("unknown subcommand '{}' for 'pubsub'", other.to_ascii_lowercase())))
+                    }
+                }
+            }
 
             // -- strings ----------------------------------------------------
             "GET" => {
@@ -1156,12 +1286,17 @@ impl Conn {
         let implicit = self.sess.txn.is_none() && self.sess.writable().is_ok();
         if implicit {
             self.sess.begin()?;
+            self.held = Some(Vec::new());
         }
         let result = self.run_script(&lua, source, keys, argv);
         lua.remove_hook();
         if implicit {
+            let held = self.held.take();
             match &result {
-                Ok(_) => self.sess.commit().map(|_| ())?,
+                Ok(_) => {
+                    self.sess.commit()?;
+                    self.release(held);
+                }
                 Err(_) => {
                     self.sess.rollback();
                 }
@@ -1347,16 +1482,23 @@ impl Conn {
         }
         let begun = self.sess.begin();
         let in_txn = begun.is_ok();
+        if in_txn {
+            self.held = Some(Vec::new());
+        }
         let mut replies = Vec::with_capacity(queued.len());
         for args in &queued {
             let name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
-            let r = if matches!(name.as_str(), "FLUSHDB" | "FLUSHALL" | "MULTI" | "EXEC") {
+            let r = if matches!(
+                name.as_str(),
+                "FLUSHDB" | "FLUSHALL" | "MULTI" | "EXEC" | "SUBSCRIBE" | "PSUBSCRIBE" | "UNSUBSCRIBE" | "PUNSUBSCRIBE"
+            ) {
                 Reply::err(format!("{name} is not allowed inside MULTI"))
             } else {
                 self.run(&name, args).unwrap_or_else(|e| e)
             };
             replies.push(r);
         }
+        let held = self.held.take();
         if in_txn {
             if let Err(e) = self.sess.commit() {
                 return Ok(match e {
@@ -1365,7 +1507,20 @@ impl Conn {
                 });
             }
         }
+        self.release(held);
         Ok(Reply::array(replies))
+    }
+
+    /// Sends the messages held during a transaction that committed.
+    fn release(&self, held: Option<Vec<Held>>) {
+        for m in held.unwrap_or_default() {
+            self.sess.inst.resp.hub.publish(&m.scope, &m.channel, &m.message, false);
+        }
+    }
+
+    /// The workspace whose channels this connection uses: its database 0.
+    fn scope(&self) -> String {
+        self.home.clone().unwrap_or_else(|| self.sess.ws.clone())
     }
 
     fn info(&self) -> Vec<u8> {
@@ -1416,7 +1571,8 @@ fn reply_to_lua(lua: &Lua, r: &Reply) -> mlua::Result<LVal> {
             t.set("err", e.as_str())?;
             LVal::Table(t)
         }
-        Reply::Array(Some(items)) => {
+        Reply::Sent => LVal::Boolean(false),
+        Reply::Array(Some(items)) | Reply::Push(items) => {
             let t = lua.create_table()?;
             for (i, item) in items.iter().enumerate() {
                 t.raw_set(i + 1, reply_to_lua(lua, item)?)?;

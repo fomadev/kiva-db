@@ -79,7 +79,7 @@ jobs:
           KIVADB_BIN="$GITHUB_WORKSPACE/target/debug/kivadb" npm test
 
       - name: Test with real Redis client libraries
-        # ioredis, node-redis (RESP3), rate-limiter-flexible and rate-limit-redis.
+        # ioredis, node-redis (RESP3), rate-limiter-flexible and rate-limit-redis, publish/subscribe.
         if: matrix.os-name == 'linux'
         shell: bash
         run: |
