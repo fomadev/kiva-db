@@ -23,6 +23,7 @@ USAGE:
   kivadb update [--check]     Install the latest release (--check: only tell)
   kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
+  kivadb keygen               Print a new encryption key (for KIVADB_ENCRYPTION_KEY)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
@@ -94,6 +95,7 @@ fn parse_args() -> Args {
             "status" => args.action = Some("status"),
             "update" => args.action = Some("update"),
             "tls" => args.action = Some("tls"),
+            "keygen" => args.action = Some("keygen"),
             "renew" => args.renew = true,
             "run" => args.run_file = Some(PathBuf::from(value(&mut it, "run"))),
             "--keep-going" => args.shell.keep_going = true,
@@ -287,6 +289,16 @@ fn running_port(home: &Path) -> Option<u16> {
 
 fn running_pid(home: &Path) -> String {
     std::fs::read_to_string(home.join("instance.pid")).map(|p| p.trim().to_string()).unwrap_or_else(|_| "?".into())
+}
+
+/// Whether this home encrypts its data: a key in the environment, or a key file configured.
+fn encryption_configured(home: &Path) -> bool {
+    if std::env::var(kivadb::crypt::KEY_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    home.join("kiva.conf").exists()
+        && kivadb::config::Config::load(home)
+            .is_ok_and(|c| !c.get("encryption", "key_file").trim().is_empty() || c.get_bool("encryption", "required"))
 }
 
 /// `kivadb tls`: the certificate clients should expect, created if needed.
@@ -532,6 +544,20 @@ fn main() {
     }
     if args.action == Some("tls") {
         exit(show_tls(&home, args.renew));
+    }
+    if args.action == Some("keygen") {
+        println!("{}", kivadb::crypt::generate_key());
+        eprintln!(
+            "Keep this key safe and away from the data: without it, encrypted data cannot be read. \
+             Give it to KivaDB in {} or in a file named by encryption.key_file.",
+            kivadb::crypt::KEY_ENV
+        );
+        exit(0);
+    }
+    // The shell history holds the commands typed, values included: with
+    // encryption at rest, it is not written to disk.
+    if encryption_configured(&home) {
+        args.shell.history = None;
     }
     // A server runs unattended: nobody would read the notice.
     let notice = if args.serve { None } else { update::Notice::begin(&home) };

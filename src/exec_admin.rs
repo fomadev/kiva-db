@@ -38,6 +38,7 @@ impl Session {
             "config" => self.cmd_config(a, out),
             "workspace" => self.cmd_workspace(a, out),
             "hint" => self.cmd_hint(a, out),
+            "encryption" => self.cmd_encryption(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
             "compact" => {
@@ -979,6 +980,40 @@ impl Session {
 }
 
 /// `on <pattern> ( <field> )`. A pattern without wildcard is used as a prefix.
+impl Session {
+    /// `encryption`: whether data is encrypted at rest, and what is left in clear.
+    fn cmd_encryption(&mut self, a: &[Token], out: &mut Out) -> R {
+        if !a.is_empty() {
+            return Err("Usage: encryption".into());
+        }
+        let r = self.engine.encryption_report()?;
+        match &r.key_id {
+            Some(id) => out.say(format!("Encryption at rest: on (AES-256-GCM, key {id})")),
+            None => out.say("Encryption at rest: off (no key: set KIVADB_ENCRYPTION_KEY or encryption.key_file)"),
+        }
+        let encrypted = r.records - r.plain;
+        out.say(format!(
+            "Workspace '{}': {} records in the data file, {encrypted} encrypted, {} in clear",
+            self.ws, r.records, r.plain
+        ));
+        if r.key_id.is_some() {
+            if r.other_key > 0 {
+                out.say(format!(" - {} encrypted with an older key", r.other_key));
+            }
+            if r.plain > 0 || r.other_key > 0 {
+                out.say(" - run 'compact' to rewrite them with the current key (older versions included)");
+            } else {
+                out.say(" - every record is encrypted with the current key");
+            }
+            out.say(format!(
+                "Index snapshot (hint): {}",
+                if r.hint_encrypted { "encrypted" } else { "not written yet with the key" }
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn parse_index_spec(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
     let target = parse_index_target(c, usage)?;
     c.finish(usage)?;

@@ -6,7 +6,10 @@
 //! values) so that startup does not have to scan the whole data file.
 //!
 //! Header (44 bytes): `KHNT` | version u32 | file_id u64 | data_len u64 |
-//! count u64 | compression u8 | pad[3] | body_crc u32 | header_crc u32
+//! count u64 | compression u8 | encrypted u8 | pad[2] | body_crc u32 | header_crc u32
+//!
+//! When encrypted, the (compressed) body is sealed with the instance key
+//! ([`crate::crypt`]): the hint lists every key, so it is protected like the data.
 //!
 //! Entry: `k_size u16 | key | offset u64 | v_size u32 | raw_size u32 |
 //! type u8 | flags u8 | timestamp i64 | expires_at i64 | crc32 u32`
@@ -15,6 +18,7 @@
 //! appended after it is replayed from the log at startup.
 
 use crate::compress::{self, Compression};
+use crate::crypt::{self, Domain, Keys};
 use crate::engine::Entry;
 use crate::error::{KivaError, Result};
 use crate::value::Type;
@@ -30,6 +34,8 @@ pub struct HintData {
     pub file_id: u64,
     pub data_len: u64,
     pub compression: Compression,
+    /// Whether the snapshot was written encrypted.
+    pub encrypted: bool,
     pub entries: Vec<(String, Entry)>,
 }
 
@@ -45,6 +51,7 @@ pub fn write_hint(
     data_len: u64,
     index: &BTreeMap<String, Entry>,
     compression: Compression,
+    keys: Option<&Keys>,
 ) -> Result<()> {
     let mut body = Vec::with_capacity(index.len() * 48);
     for (key, e) in index {
@@ -61,7 +68,10 @@ pub fn write_hint(
         let crc = crc32fast::hash(&body[start..]);
         body.extend_from_slice(&crc.to_le_bytes());
     }
-    let (stored, flag) = compress::pack(&body, compression);
+    let (mut stored, flag) = compress::pack(&body, compression);
+    if let Some(keys) = keys {
+        keys.seal(Domain::Hint, &file_id.to_le_bytes(), &mut stored);
+    }
 
     let mut out = Vec::with_capacity(HINT_HEADER_LEN + stored.len());
     out.extend_from_slice(HINT_MAGIC);
@@ -70,7 +80,8 @@ pub fn write_hint(
     out.extend_from_slice(&data_len.to_le_bytes());
     out.extend_from_slice(&(index.len() as u64).to_le_bytes());
     out.push(flag);
-    out.extend_from_slice(&[0u8; 3]);
+    out.push(keys.is_some() as u8);
+    out.extend_from_slice(&[0u8; 2]);
     out.extend_from_slice(&crc32fast::hash(&stored).to_le_bytes());
     let header_crc = crc32fast::hash(&out);
     out.extend_from_slice(&header_crc.to_le_bytes());
@@ -89,7 +100,7 @@ fn bad(msg: &str) -> KivaError {
     KivaError::Corrupted(format!("hint file: {msg}"))
 }
 
-pub fn read_hint(path: &Path) -> Result<HintData> {
+pub fn read_hint(path: &Path, keys: Option<&Keys>) -> Result<HintData> {
     let data = fs::read(path)?;
     if data.len() < HINT_HEADER_LEN || &data[..4] != HINT_MAGIC {
         return Err(bad("missing signature"));
@@ -114,6 +125,15 @@ pub fn read_hint(path: &Path) -> Result<HintData> {
     if u32_at(36) != crc32fast::hash(stored) {
         return Err(bad("body checksum mismatch"));
     }
+    let encrypted = data[33] == 1;
+    let opened;
+    let stored = if encrypted {
+        opened = crypt::open_with(keys, Domain::Hint, &file_id.to_le_bytes(), stored)
+            .map_err(|e| e.into_error("the hint file"))?;
+        &opened[..]
+    } else {
+        stored
+    };
     let body = compress::unpack(stored, compression).map_err(|_| bad("body cannot be decompressed"))?;
 
     let mut entries = Vec::with_capacity(count.min(1 << 24));
@@ -160,5 +180,5 @@ pub fn read_hint(path: &Path) -> Result<HintData> {
     if entries.len() != count {
         return Err(bad("entry count mismatch"));
     }
-    Ok(HintData { file_id, data_len, compression, entries })
+    Ok(HintData { file_id, data_len, compression, encrypted, entries })
 }

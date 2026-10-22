@@ -14,6 +14,7 @@ pub mod cache;
 pub mod client;
 pub mod compress;
 pub mod config;
+pub mod crypt;
 pub mod engine;
 pub mod error;
 pub mod exec;

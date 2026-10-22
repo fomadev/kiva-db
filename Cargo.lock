@@ -552,6 +552,7 @@ dependencies = [
  "mlua",
  "pbkdf2",
  "rcgen",
+ "ring",
  "rmp-serde",
  "rpassword",
  "rustls",

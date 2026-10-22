@@ -198,6 +198,8 @@ pub struct Instance {
     pub config: RwLock<Config>,
     /// Hidden database holding users, stored scripts and triggers.
     pub system: Arc<Engine>,
+    /// Encryption at rest, for every workspace and the system database.
+    pub keys: Option<Arc<crate::crypt::Keys>>,
     engines: Mutex<HashMap<String, Arc<Engine>>>,
     pub pubsub: PubSub,
     pub metrics: Metrics,
@@ -235,9 +237,16 @@ impl Instance {
         let _ = fs::remove_file(home.join("instance.port"));
         let _ = fs::remove_file(home.join("instance.pid"));
         let config = Config::load(home)?;
+        let keys = crate::crypt::Keys::load(&config)?;
+        let require_encryption = config.get_bool("encryption", "required");
         let system = Engine::open(
             home.join("system").join("system.kiva"),
-            EngineOptions { auto_compact_min_bytes: 16 * 1024, ..Default::default() },
+            EngineOptions {
+                auto_compact_min_bytes: 16 * 1024,
+                keys: keys.clone(),
+                require_encryption,
+                ..Default::default()
+            },
         )?;
         auth::ensure_admin(&system)?;
         let threads = config.get_u64("server", "threads") as usize;
@@ -246,6 +255,7 @@ impl Instance {
             home: home.to_path_buf(),
             config: RwLock::new(config),
             system,
+            keys,
             engines: Mutex::new(HashMap::new()),
             pubsub: PubSub::default(),
             metrics: Metrics::default(),
@@ -307,6 +317,9 @@ impl Instance {
             } else {
                 0
             },
+            // Keys are read once, at start: changing them needs a restart.
+            keys: self.keys.clone(),
+            require_encryption: self.keys.is_some() && c.get_bool("encryption", "required"),
             ..Default::default()
         }
     }
