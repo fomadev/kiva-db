@@ -506,7 +506,14 @@ impl Session {
                     "storage",
                     "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb",
                 ) => self.inst.apply_storage_config(),
-                ("security", _) | ("http", "rate_limit" | "cors") | ("scripting", _) => {}
+                // Read again at every use: nothing to restart.
+                ("security", _)
+                | ("http", "rate_limit" | "cors" | "stream")
+                | ("scripting", _)
+                | ("tls", "required")
+                | ("server", "max_clients")
+                | ("semantic", _)
+                | ("failover", _) => {}
                 ("replication", "sync_mode" | "min_slaves_ack" | "master_user" | "master_password") => {}
                 ("replication", _) => {
                     out.say("Note: use 'replica start' or 'replica promote' to change the replication role now.")

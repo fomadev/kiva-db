@@ -472,6 +472,18 @@ fn workspaces_and_configuration() {
 
     assert_eq!(ok(&mut s, "config get auto_compact"), "storage.auto_compact = true");
     ok(&mut s, "config set compact_threshold 25");
+    // Settings read at every use say nothing about a restart; the others do.
+    for live in [
+        "semantic.cache.enabled true",
+        "failover.auto true",
+        "tls.required false",
+        "http.stream true",
+        "server.max_clients 500",
+    ] {
+        let out = ok(&mut s, &format!("config set {live}"));
+        assert!(!out.contains("next time KivaDB starts"), "{live}: {out}");
+    }
+    assert!(ok(&mut s, "config set storage.snapshot_interval 300").contains("next time KivaDB starts"));
     assert_eq!(s.engine.auto_compact(), (true, 25));
     assert!(ok(&mut s, "autocompact off").contains("OFF"));
     assert_eq!(s.engine.auto_compact(), (false, 25));

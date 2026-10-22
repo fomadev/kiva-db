@@ -2,6 +2,13 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased
+
+### Fixed
+
+* `config set` no longer says that a setting "takes effect the next time KivaDB starts" when it applies at once: `semantic.*`, `failover.*`, `tls.required`, `http.stream` and `server.max_clients` are read again at every use.
+* The shell's `help` lists the `semantic` commands, `using hnsw` and `failover status`.
+
 ## 1.5.0 - 2026-10-22
 
 Security, availability and AI: data encrypted on disk, a new master elected by itself when the old one dies, backups in one command, an approximate vector index and a semantic cache for large AI workloads, and Redis sets, sorted sets and publish/subscribe.

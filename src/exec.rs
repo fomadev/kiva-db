@@ -457,7 +457,8 @@ const HELP: &str = r#"
   create index on <pat> (<field>)   : Secondary index. Also: drop index, indexes.
   get similar <pat>.<field> to [..] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
-  create vector index on <pat> (<field>) : Keep vectors in memory. Also: drop vector index.
+  create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
+  semantic lookup|store|stats|clear : Semantic cache of answers (questions found by meaning).
   explain <query>                   : Show how a query would be executed.
   convert <key> to msgpack|json     : Change a document's storage encoding.
 
@@ -491,7 +492,7 @@ const HELP: &str = r#"
 
   REPLICATION & EVENTS:
   replica status|start|stop|sync|promote | replica of <host> <port>
-  wait <N> [timeout_ms] | failover to <replica>
+  wait <N> [timeout_ms] | failover to <replica> | failover status
   subscribe <pattern> | unsubscribe [pattern]
 
   clear | help | exit | shutdown (stops the whole database, admin)
