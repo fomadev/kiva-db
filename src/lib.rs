@@ -28,6 +28,7 @@ pub mod kva;
 pub mod lexer;
 pub mod lineedit;
 pub mod proto;
+pub mod pubsub;
 pub mod repl;
 pub mod resp;
 pub mod script;

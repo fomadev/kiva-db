@@ -2805,8 +2805,9 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Lists | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX` |
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
+| Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
 
-Pipelining works, in RESP2 and RESP3. Not supported: sets, sorted sets, streams, publish/subscribe, `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
+Pipelining works, in RESP2 and RESP3. Not supported: sets, sorted sets, streams, sharded publish/subscribe (`SPUBLISH`), `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
 
 **One command at a time.** Like Redis, KivaDB runs the Redis commands of all connections one after the other. `INCR` from many clients at once never loses a step, and a `MULTI ... EXEC` block or a script is never interleaved with another client's commands.
 
@@ -2840,7 +2841,7 @@ Libraries such as rate limiters send small Lua scripts that read and write sever
 * `KEYS` and `ARGV` hold the keys and arguments; `redis.call` runs a command and raises its error, `redis.pcall` returns the error as a table; `redis.error_reply`, `redis.status_reply`, `redis.sha1hex` and `redis.log` exist.
 * Replies convert as in Redis: integers to numbers, strings to strings, a missing value to `false`, arrays to tables; in the other direction, numbers are truncated to integers and a table becomes an array.
 * `EVALSHA` runs a script by its SHA-1 after `SCRIPT LOAD` or a first `EVAL`; an unknown one answers `NOSCRIPT`, which clients handle by sending `EVAL`. The cache lives until KivaDB stops or `SCRIPT FLUSH`.
-* Scripts run in the sandbox of [26.5](#265-the-sandbox) (no files, no operating system, the same time and memory limits) and cannot run `MULTI`, `EVAL`, `SELECT` or `AUTH`.
+* Scripts run in the sandbox of [26.5](#265-the-sandbox) (no files, no operating system, the same time and memory limits) and cannot run `MULTI`, `EVAL`, `SELECT`, `AUTH` or `SUBSCRIBE`. They may `PUBLISH`: the messages leave when the script succeeds.
 * **All or nothing.** A script's writes are applied together when it ends. If it fails, none of them is kept. Redis keeps the writes made before the error: KivaDB is stricter here, never looser.
 * Each command inside the script is checked against the user's role, as if sent directly.
 
@@ -2856,7 +2857,36 @@ KivaDB fits the uses where Redis serves as short-lived memory: pending sign-ups 
 
 Data that lives a few minutes does not need to be copied: at worst, a sign-up in progress at the moment of the switch asks for a new code. Before switching, check with `MONITOR` on Redis, or by reading the code, that the application only uses commands of [23.3](#233-supported-commands).
 
-### 23.7 Configuration
+### 23.7 Publish and subscribe
+
+An application that runs as several instances can tell all of them that something changed, for example that its texts were edited and must be reloaded. One connection listens, the others publish:
+
+```text
+# connection 1
+127.0.0.1:6379> SUBSCRIBE app:texts:changed
+1) "subscribe"
+2) "app:texts:changed"
+3) (integer) 1
+1) "message"
+2) "app:texts:changed"
+3) "fr"
+
+# connection 2
+127.0.0.1:6379> PUBLISH app:texts:changed fr
+(integer) 1
+```
+
+`PUBLISH` answers how many listeners received the message. `PSUBSCRIBE app:texts:*` listens to every channel matching a pattern (`*`, `?`, `[abc]`, `[a-z]`, `[^a]` and `\` to escape, as in Redis). `PUBSUB CHANNELS`, `PUBSUB NUMSUB` and `PUBSUB NUMPAT` show who listens. Client libraries work unchanged: ioredis (a connection used for `subscribe`), node-redis (`client.duplicate()` then `subscribe`); both are checked with every change of KivaDB.
+
+* **Messages are not stored.** As in Redis, a message reaches the connections listening at that moment; one that connects later never sees it, and nothing is written to disk. Keep the state itself in keys, and use messages to say "go and read it again".
+* **Channels belong to the user's database 0 workspace.** Two applications logged in as different users never hear each other's channels. `SELECT` does not change them, as in Redis: a publisher on `/2` reaches a listener on `/0` of the same user.
+* **A listening connection** in RESP2 accepts only `SUBSCRIBE`, `PSUBSCRIBE`, `UNSUBSCRIBE`, `PUNSUBSCRIBE`, `PING` and `QUIT`, like Redis; libraries use a separate connection for it. In RESP3 (`HELLO 3`), messages arrive as push frames between replies and every command stays allowed.
+* **Inside `MULTI` or a script**, published messages leave when it commits, and never when it fails.
+* **A listener that stops reading** is disconnected once 65,536 messages wait for it, so it cannot slow the publishers or fill the server's memory (Redis does the same with its output buffer limit).
+* **One server.** Messages reach the clients of the KivaDB they were published on; replicas do not forward them.
+* These are Redis channels. To be told when *keys* change, use `subscribe` on port 2911, WebSocket or Server-Sent Events ([Chapter 22](#chapter-22--change-notifications)).
+
+### 23.8 Configuration
 
 | Setting | Default | |
 | :--- | :--- | :--- |
@@ -4014,7 +4044,7 @@ KivaDB 1.4.0 is a single-node database with replicas. Knowing what it does not d
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Approximate vector indexes (HNSW)** for many millions of vectors ([12.5](#125-how-fast-and-the-limits)).
-* **The full Redis command set**: sets, sorted sets, streams, publish/subscribe and `WATCH` are missing, and expiry times are kept to the second ([23.3](#233-supported-commands)).
+* **The full Redis command set**: sets, sorted sets, streams, sharded publish/subscribe and `WATCH` are missing, and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 
