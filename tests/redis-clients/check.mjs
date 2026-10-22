@@ -1,6 +1,6 @@
 // Redis client libraries, used the way applications commonly use Redis
 // (pending registrations with an expiry, resend locks, login rate limits,
-// notifying every instance through publish/subscribe),
+// sets, leaderboards, notifying every instance through publish/subscribe),
 // against a running KivaDB.
 //
 //   npm install && node check.mjs <redis port> <password of kiva>
@@ -121,6 +121,55 @@ await step("node-redis (RESP3): hashes come back as objects", async () => {
 });
 await step("node-redis: EVAL", async () => {
   assert.equal(await pay.eval("return redis.call('INCR', KEYS[1])", { keys: ["tries"] }), 2);
+});
+
+// --- Sets and sorted sets ---------------------------------------------------
+await step("ioredis: sets of tags", async () => {
+  assert.equal(await io.sadd("post:1:tags", "rust", "db", "rust"), 2);
+  assert.deepEqual((await io.smembers("post:1:tags")).sort(), ["db", "rust"]);
+  assert.equal(await io.sismember("post:1:tags", "db"), 1);
+  await io.sadd("post:2:tags", "db", "ai");
+  assert.deepEqual(await io.sinter("post:1:tags", "post:2:tags"), ["db"]);
+  assert.equal(await io.type("post:1:tags"), "set");
+});
+await step("ioredis: leaderboard with ZADD, ZINCRBY, ZREVRANGE WITHSCORES", async () => {
+  await io.zadd("game:lb", 120, "amani", 80, "baraka", 200, "chiku");
+  assert.equal(await io.zincrby("game:lb", 100, "baraka"), "180");
+  assert.deepEqual(await io.zrevrange("game:lb", 0, 1, "WITHSCORES"), ["chiku", "200", "baraka", "180"]);
+  assert.equal(await io.zrevrank("game:lb", "amani"), 2);
+  assert.equal(await io.zscore("game:lb", "amani"), "120");
+  assert.deepEqual(await io.zrangebyscore("game:lb", "(120", "+inf"), ["baraka", "chiku"]);
+});
+await step("ioredis: sliding-window rate limit in MULTI", async () => {
+  const now = Date.now();
+  for (let i = 1; i <= 3; i++) {
+    const r = await io
+      .multi()
+      .zremrangebyscore("rl:window:ip", 0, now - 60000)
+      .zadd("rl:window:ip", now + i, `req${i}`)
+      .zcard("rl:window:ip")
+      .pexpire("rl:window:ip", 60000)
+      .exec();
+    assert.equal(r[2][1], i);
+  }
+});
+await step("node-redis (RESP3): sets and sorted sets", async () => {
+  assert.equal(await pay.sAdd("pay:seen", ["tx1", "tx2"]), 2);
+  assert.equal(await pay.sIsMember("pay:seen", "tx1"), 1);
+  assert.equal((await pay.sMembers("pay:seen")).length, 2);
+  await pay.zAdd("pay:queue", [
+    { score: 3, value: "c" },
+    { score: 1, value: "a" },
+    { score: 2.5, value: "b" },
+  ]);
+  assert.equal(await pay.zScore("pay:queue", "b"), 2.5);
+  assert.deepEqual(await pay.zRangeWithScores("pay:queue", 0, -1), [
+    { value: "a", score: 1 },
+    { value: "b", score: 2.5 },
+    { value: "c", score: 3 },
+  ]);
+  assert.deepEqual(await pay.zPopMin("pay:queue"), { value: "a", score: 1 });
+  assert.deepEqual(await pay.zRange("pay:queue", 0, -1), ["b", "c"]);
 });
 
 // --- Publish/subscribe: every instance hears that the texts changed ------------

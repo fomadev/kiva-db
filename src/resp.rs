@@ -17,6 +17,8 @@
 //! | string | string (UTF-8) or bytes; INCR -> number  |
 //! | hash   | object, field values as strings          |
 //! | list   | array of strings                         |
+//! | set    | object `{"redis": "set", "members": [..]}` |
+//! | zset   | object `{"redis": "zset", "members": {..}}` |
 //!
 //! Like Redis, the connections of an instance execute one command at a time,
 //! so read-modify-write commands (INCR, HINCRBY, LPUSH...), MULTI/EXEC and
@@ -44,6 +46,9 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+
+#[path = "resp_sets.rs"]
+mod sets;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ARGS: usize = 1024 * 1024;
@@ -117,6 +122,10 @@ pub enum Reply {
     Map(Vec<(Reply, Reply)>),
     /// A pub/sub message or notice: a push in RESP3, an array in RESP2.
     Push(Vec<Reply>),
+    /// A floating-point number (scores): a double in RESP3, text in RESP2.
+    Double(f64),
+    /// Members of a set: a set in RESP3, an array in RESP2.
+    Set(Vec<Reply>),
     /// Nothing to write: the command already queued its replies (SUBSCRIBE).
     Sent,
 }
@@ -165,6 +174,18 @@ impl Reply {
                 }
             }
             Reply::Sent => {}
+            Reply::Double(f) if resp3 => {
+                let text = if f.is_nan() { "nan".to_string() } else { fmt_f64(*f) };
+                out.extend_from_slice(format!(",{text}\r\n").as_bytes());
+            }
+            Reply::Double(f) => Reply::bulk(fmt_f64(*f)).encode(out, resp3),
+            Reply::Set(items) => {
+                let mark = if resp3 { '~' } else { '*' };
+                out.extend_from_slice(format!("{mark}{}\r\n", items.len()).as_bytes());
+                for i in items {
+                    i.encode(out, resp3);
+                }
+            }
             Reply::Map(pairs) => {
                 out.extend_from_slice(format!("*{}\r\n", pairs.len() * 2).as_bytes());
                 for (k, v) in pairs {
@@ -511,9 +532,25 @@ impl Conn {
     fn doc(&mut self, k: &str, want: Type) -> std::result::Result<Option<(Json, Meta)>, Reply> {
         match self.get(k)? {
             None => Ok(None),
-            Some((Value::Doc(j), m)) if Value::Doc(j.clone()).ty() == want => Ok(Some((j, m))),
+            // A set or sorted set is an object too, but not a hash.
+            Some((Value::Doc(j), m)) if Value::Doc(j.clone()).ty() == want && sets::marked(&j).is_none() => {
+                Ok(Some((j, m)))
+            }
             Some(_) => Err(Reply::wrong_type()),
         }
+    }
+
+    /// The Redis type of a key: `hash` and `list` from the KivaDB type,
+    /// `set` and `zset` from the object's marker.
+    fn redis_type(&mut self, k: &str, ty: Type) -> std::result::Result<&'static str, Reply> {
+        Ok(match ty {
+            Type::Object => match self.get(k)? {
+                Some((Value::Doc(j), _)) => sets::marked(&j).unwrap_or("hash"),
+                _ => "hash",
+            },
+            Type::Array => "list",
+            _ => "string",
+        })
     }
 
     fn run(&mut self, name: &str, args: &[Vec<u8>]) -> Res {
@@ -854,11 +891,10 @@ impl Conn {
             }
             "TYPE" => {
                 arity(args, 2)?;
-                let t = match self.sess.kv_type(&key(&args[1])?)? {
+                let k = key(&args[1])?;
+                let t = match self.sess.kv_type(&k)? {
                     None => "none",
-                    Some(Type::Object) => "hash",
-                    Some(Type::Array) => "list",
-                    Some(_) => "string",
+                    Some(ty) => self.redis_type(&k, ty)?,
                 };
                 Ok(Reply::Simple(t.into()))
             }
@@ -1197,6 +1233,9 @@ impl Conn {
                 ))
             }
             _ => {
+                if let Some(r) = self.run_sets(name, args) {
+                    return r;
+                }
                 let first = args.get(1).map(|a| format!("'{}' ", String::from_utf8_lossy(a))).unwrap_or_default();
                 Err(Reply::err(format!(
                     "unknown command '{}', with args beginning with: {first}",
@@ -1460,12 +1499,15 @@ impl Conn {
         let end = (cursor + count).min(all.len());
         let mut keys = Vec::new();
         for (k, e) in all.get(cursor..end).unwrap_or(&[]) {
-            let t = match e.ty {
-                Type::Object => "hash",
-                Type::Array => "list",
-                _ => "string",
+            if !glob_match(&pattern, k) {
+                continue;
+            }
+            // Telling a set from a hash means reading the value: only with TYPE.
+            let wanted = match &kind {
+                None => true,
+                Some(w) => self.redis_type(k, e.ty)? == w.as_str(),
             };
-            if glob_match(&pattern, k) && kind.as_deref().is_none_or(|w| w == t) {
+            if wanted {
                 keys.push(Reply::bulk(k.clone()));
             }
         }
@@ -1572,7 +1614,9 @@ fn reply_to_lua(lua: &Lua, r: &Reply) -> mlua::Result<LVal> {
             LVal::Table(t)
         }
         Reply::Sent => LVal::Boolean(false),
-        Reply::Array(Some(items)) | Reply::Push(items) => {
+        // Scripts see Redis 2 replies: a score is text.
+        Reply::Double(f) => LVal::String(lua.create_string(fmt_f64(*f))?),
+        Reply::Array(Some(items)) | Reply::Push(items) | Reply::Set(items) => {
             let t = lua.create_table()?;
             for (i, item) in items.iter().enumerate() {
                 t.raw_set(i + 1, reply_to_lua(lua, item)?)?;

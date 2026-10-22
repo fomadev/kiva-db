@@ -2914,8 +2914,10 @@ Unlike a default Redis, every write is on disk before the answer: keys, counters
 | string | `string` when the bytes are UTF-8 text, `bytes` otherwise. `INCR` and friends store a `number` |
 | hash | `object` whose fields hold strings |
 | list | `array` of strings |
+| set | `object` `{"redis": "set", "members": ["a", "b"]}` ([23.8](#238-sets-and-sorted-sets)) |
+| sorted set | `object` `{"redis": "zset", "members": {"alice": 12.5}}` |
 
-KivaDB values read through Redis: strings, numbers, booleans, null and bytes come back as Redis strings; objects are hashes and arrays are lists (`GET` on them answers `WRONGTYPE`, as Redis does).
+KivaDB values read through Redis: strings, numbers, booleans, null and bytes come back as Redis strings; objects are hashes and arrays are lists (`GET` on them answers `WRONGTYPE`, as Redis does). An object marked `"redis": "set"` or `"zset"` is a set or a sorted set, never a hash.
 
 ### 23.3 Supported commands
 
@@ -2926,11 +2928,13 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `KEYS`, `SCAN`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HDEL`, `HINCRBY` |
 | Lists | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX` |
+| Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SINTERCARD`, `SSCAN` ([23.8](#238-sets-and-sorted-sets)) |
+| Sorted sets | `ZADD` (`NX`, `XX`, `GT`, `LT`, `CH`, `INCR`), `ZINCRBY`, `ZREM`, `ZSCORE`, `ZMSCORE`, `ZCARD`, `ZCOUNT`, `ZLEXCOUNT`, `ZRANK`, `ZREVRANK` (`WITHSCORE`), `ZRANGE` (`BYSCORE`, `BYLEX`, `REV`, `LIMIT`, `WITHSCORES`), `ZRANGESTORE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYLEX`, `ZRANDMEMBER`, `ZSCAN`, `ZUNION`, `ZINTER`, `ZDIFF`, `ZUNIONSTORE`, `ZINTERSTORE`, `ZDIFFSTORE`, `ZINTERCARD` |
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
 
-Pipelining works, in RESP2 and RESP3. Not supported: sets, sorted sets, streams, sharded publish/subscribe (`SPUBLISH`), `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
+Pipelining works, in RESP2 and RESP3. Not supported: streams, blocking commands (`BLPOP`, `BZPOPMIN`...), sharded publish/subscribe (`SPUBLISH`), `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
 
 **One command at a time.** Like Redis, KivaDB runs the Redis commands of all connections one after the other. `INCR` from many clients at once never loses a step, and a `MULTI ... EXEC` block or a script is never interleaved with another client's commands.
 
@@ -3009,7 +3013,37 @@ An application that runs as several instances can tell all of them that somethin
 * **One server.** Messages reach the clients of the KivaDB they were published on; replicas do not forward them.
 * These are Redis channels. To be told when *keys* change, use `subscribe` on port 2911, WebSocket or Server-Sent Events ([Chapter 22](#chapter-22--change-notifications)).
 
-### 23.8 Configuration
+### 23.8 Sets and sorted sets
+
+A **set** holds distinct members: tags of a post, users who already voted, tokens already used. A **sorted set** gives each member a score and keeps them ordered by it: leaderboards, priority queues, and the sliding-window rate limits many libraries build with `ZADD`, `ZREMRANGEBYSCORE` and `ZCARD`.
+
+```text
+127.0.0.1:6379> ZADD game:lb 120 amani 80 baraka 200 chiku
+(integer) 3
+127.0.0.1:6379> ZINCRBY game:lb 100 baraka
+"180"
+127.0.0.1:6379> ZREVRANGE game:lb 0 1 WITHSCORES
+1) "chiku"
+2) "200"
+3) "baraka"
+4) "180"
+```
+
+They are stored as KivaDB objects, so they are written to disk, replicated and encrypted like everything else, and readable from the shell:
+
+```text
+kiva> get game:lb
+game:lb: {"redis":"zset","members":{"amani":120,"baraka":180,"chiku":200}} [object]
+```
+
+* Scores are 64-bit floating-point numbers; `+inf` and `-inf` are accepted (saved as the text `"inf"` and `"-inf"`, which JSON has no number for). Members of equal score are ordered by their bytes, as in Redis.
+* `TYPE` answers `set` or `zset`; `SCAN ... TYPE set` finds them. Hash, list and string commands on them answer `WRONGTYPE`, and the other way round.
+* An emptied set or sorted set disappears, as in Redis. Changing one keeps its expiry; `...STORE` commands replace the destination and its expiry.
+* In RESP3 (`HELLO 3`, node-redis), scores come back as doubles, `SMEMBERS` as a set and `WITHSCORES` as pairs; in RESP2, as text and flat lists. Both were checked with ioredis and node-redis.
+* `SSCAN` and `ZSCAN` return every member in one answer (cursor `0`); `MATCH` follows Redis patterns.
+* **Size.** Each command reads and rewrites the whole value, and a sorted set is ordered when it is read: right for up to a few thousand members per key (a rate-limit window, the tags of a post, the leaderboard of a game or a shop). For millions of members in one key, a real Redis remains the better tool.
+
+### 23.9 Configuration
 
 | Setting | Default | |
 | :--- | :--- | :--- |
@@ -4171,7 +4205,7 @@ KivaDB 1.4.0 is a single-node database with replicas. Knowing what it does not d
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).
-* **The full Redis command set**: sets, sorted sets, streams, sharded publish/subscribe and `WATCH` are missing, and expiry times are kept to the second ([23.3](#233-supported-commands)).
+* **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing, sets and sorted sets are meant for thousands of members per key, not millions, and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 
