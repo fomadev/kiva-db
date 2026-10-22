@@ -437,6 +437,10 @@ enum R {
     M(Vec<R>),
     /// A RESP3 push (pub/sub messages).
     P(Vec<R>),
+    /// A RESP3 double, as its text.
+    D(String),
+    /// A RESP3 set.
+    Set(Vec<R>),
 }
 
 fn read_reply(r: &mut impl BufRead) -> R {
@@ -467,6 +471,11 @@ fn read_reply(r: &mut impl BufRead) -> R {
         }
         // RESP3: null and maps.
         "_" => R::B(None),
+        "," => R::D(rest.into()),
+        "~" => {
+            let n: usize = rest.parse().unwrap();
+            R::Set((0..n).map(|_| read_reply(r)).collect())
+        }
         "%" => {
             let n: usize = rest.parse().unwrap();
             R::M((0..n * 2).map(|_| read_reply(r)).collect())
@@ -949,6 +958,182 @@ fn redis_publish_and_subscribe() {
         assert!(std::time::Instant::now() < deadline, "the closed subscriber is still listed");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn ints(v: &[i64]) -> R {
+    R::A(Some(v.iter().map(|i| R::I(*i)).collect()))
+}
+
+fn bulks(v: &[&str]) -> R {
+    R::A(Some(v.iter().map(|s| b(s)).collect()))
+}
+
+fn is_wrongtype(r: R) -> bool {
+    matches!(r, R::E(e) if e.starts_with("WRONGTYPE"))
+}
+
+#[test]
+fn redis_sets() {
+    let dir = TempDir::new("resp_sets");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+
+    assert_eq!(r.cmd(&["SADD", "tags", "a", "b", "c", "a"]), R::I(3));
+    assert_eq!(r.cmd(&["SADD", "tags", "d"]), R::I(1));
+    assert_eq!(r.cmd(&["SCARD", "tags"]), R::I(4));
+    assert_eq!(r.cmd(&["SISMEMBER", "tags", "a"]), R::I(1));
+    assert_eq!(r.cmd(&["SMISMEMBER", "tags", "a", "z"]), ints(&[1, 0]));
+    assert_eq!(r.cmd(&["SREM", "tags", "a", "z"]), R::I(1));
+    assert_eq!(r.cmd(&["SMEMBERS", "tags"]), bulks(&["b", "c", "d"]));
+    assert_eq!(r.cmd(&["TYPE", "tags"]), R::S("set".into()));
+    assert_eq!(r.cmd(&["SMEMBERS", "ghost"]), bulks(&[]));
+
+    // A set is not a hash, a list or a string, and the other way round.
+    assert!(is_wrongtype(r.cmd(&["HGET", "tags", "b"])));
+    assert!(is_wrongtype(r.cmd(&["GET", "tags"])));
+    assert!(is_wrongtype(r.cmd(&["LPUSH", "tags", "x"])));
+    r.cmd(&["HSET", "user", "name", "Alice"]);
+    assert!(is_wrongtype(r.cmd(&["SADD", "user", "x"])));
+    assert!(is_wrongtype(r.cmd(&["ZADD", "tags", "1", "x"])));
+
+    r.cmd(&["SADD", "other", "c", "d", "e"]);
+    assert_eq!(r.cmd(&["SINTER", "tags", "other"]), bulks(&["c", "d"]));
+    assert_eq!(r.cmd(&["SUNION", "tags", "other"]), bulks(&["b", "c", "d", "e"]));
+    assert_eq!(r.cmd(&["SDIFF", "tags", "other"]), bulks(&["b"]));
+    assert_eq!(r.cmd(&["SINTERCARD", "2", "tags", "other", "LIMIT", "1"]), R::I(1));
+    assert_eq!(r.cmd(&["SUNIONSTORE", "all", "tags", "other"]), R::I(4));
+    assert_eq!(r.cmd(&["SDIFFSTORE", "none", "tags", "tags"]), R::I(0));
+    assert_eq!(r.cmd(&["EXISTS", "none"]), R::I(0));
+    assert_eq!(r.cmd(&["SMOVE", "tags", "other", "b"]), R::I(1));
+    assert_eq!(r.cmd(&["SISMEMBER", "other", "b"]), R::I(1));
+    assert_eq!(r.cmd(&["SSCAN", "all", "0", "MATCH", "[cd]"]), R::A(Some(vec![b("0"), bulks(&["c", "d"])])));
+
+    // Random members, with and without removal; an emptied set disappears.
+    let R::A(Some(five)) = r.cmd(&["SRANDMEMBER", "all", "-5"]) else { panic!() };
+    assert_eq!(five.len(), 5);
+    let R::A(Some(two)) = r.cmd(&["SPOP", "tags", "5"]) else { panic!() };
+    assert_eq!(two.len(), 2);
+    assert_eq!(r.cmd(&["EXISTS", "tags"]), R::I(0));
+
+    // The same set from the KivaDB side, saved like any document.
+    let mut s = Session::new(inst.clone(), true, None);
+    assert!(ok(&mut s, "get other.members").contains(r#"["c","d","e","b"]"#));
+}
+
+#[test]
+fn redis_sorted_sets() {
+    let dir = TempDir::new("resp_zsets");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+
+    assert_eq!(r.cmd(&["ZADD", "lb", "10", "alice", "20", "bob", "15", "carol"]), R::I(3));
+    assert_eq!(r.cmd(&["ZADD", "lb", "XX", "CH", "25", "bob", "5", "dave"]), R::I(1));
+    assert_eq!(r.cmd(&["ZADD", "lb", "NX", "1", "alice"]), R::I(0));
+    assert_eq!(r.cmd(&["ZADD", "lb", "GT", "5", "alice"]), R::I(0));
+    assert_eq!(r.cmd(&["ZSCORE", "lb", "alice"]), b("10"));
+    assert_eq!(r.cmd(&["ZADD", "lb", "LT", "CH", "5", "alice"]), R::I(1));
+    assert_eq!(r.cmd(&["ZADD", "lb", "INCR", "2", "alice"]), b("7"));
+    assert_eq!(r.cmd(&["ZADD", "lb", "NX", "INCR", "2", "alice"]), R::B(None));
+    assert_eq!(r.cmd(&["ZINCRBY", "lb", "1.5", "carol"]), b("16.5"));
+    assert_eq!(r.cmd(&["ZMSCORE", "lb", "bob", "nobody"]), R::A(Some(vec![b("25"), R::B(None)])));
+    assert_eq!(r.cmd(&["ZCARD", "lb"]), R::I(3));
+    assert_eq!(r.cmd(&["TYPE", "lb"]), R::S("zset".into()));
+
+    assert_eq!(r.cmd(&["ZRANGE", "lb", "0", "-1", "WITHSCORES"]), bulks(&["alice", "7", "carol", "16.5", "bob", "25"]));
+    assert_eq!(r.cmd(&["ZREVRANGE", "lb", "0", "0"]), bulks(&["bob"]));
+    assert_eq!(r.cmd(&["ZRANK", "lb", "carol"]), R::I(1));
+    assert_eq!(r.cmd(&["ZREVRANK", "lb", "alice"]), R::I(2));
+    assert_eq!(r.cmd(&["ZRANK", "lb", "bob", "WITHSCORE"]), R::A(Some(vec![R::I(2), b("25")])));
+    assert_eq!(r.cmd(&["ZRANK", "lb", "nobody"]), R::B(None));
+    assert_eq!(r.cmd(&["ZRANGEBYSCORE", "lb", "(7", "+inf"]), bulks(&["carol", "bob"]));
+    assert_eq!(r.cmd(&["ZREVRANGEBYSCORE", "lb", "+inf", "-inf", "LIMIT", "1", "1"]), bulks(&["carol"]));
+    assert_eq!(r.cmd(&["ZRANGE", "lb", "+inf", "-inf", "BYSCORE", "REV", "LIMIT", "0", "1"]), bulks(&["bob"]));
+    assert_eq!(r.cmd(&["ZCOUNT", "lb", "-inf", "20"]), R::I(2));
+    assert!(matches!(r.cmd(&["ZRANGE", "lb", "0", "1", "LIMIT", "0", "1"]), R::E(e) if e.contains("LIMIT")));
+    assert!(matches!(r.cmd(&["ZADD", "lb", "NX", "XX", "1", "a"]), R::E(e) if e.contains("not compatible")));
+    assert!(matches!(r.cmd(&["ZADD", "lb", "abc", "x"]), R::E(e) if e.contains("not a valid float")));
+    assert!(matches!(r.cmd(&["ZADD", "lb", "1"]), R::E(e) if e.contains("wrong number of arguments")));
+    assert!(matches!(r.cmd(&["ZADD", "lb", "1", "a", "2"]), R::E(e) if e.contains("syntax error")));
+
+    // Combining sorted sets (and plain sets, whose members score 1).
+    r.cmd(&["ZADD", "other", "100", "bob", "3", "erin"]);
+    r.cmd(&["SADD", "plain", "bob", "zed"]);
+    assert_eq!(r.cmd(&["ZUNIONSTORE", "u", "2", "lb", "other", "AGGREGATE", "MAX"]), R::I(4));
+    assert_eq!(r.cmd(&["ZRANGE", "u", "-1", "-1", "WITHSCORES"]), bulks(&["bob", "100"]));
+    assert_eq!(r.cmd(&["ZINTER", "2", "lb", "other", "WEIGHTS", "2", "1", "WITHSCORES"]), bulks(&["bob", "150"]));
+    assert_eq!(r.cmd(&["ZINTERSTORE", "i", "2", "lb", "plain"]), R::I(1));
+    assert_eq!(r.cmd(&["ZSCORE", "i", "bob"]), b("26"));
+    assert_eq!(r.cmd(&["ZDIFF", "2", "lb", "other"]), bulks(&["alice", "carol"]));
+    assert_eq!(r.cmd(&["ZINTERCARD", "2", "lb", "other"]), R::I(1));
+    assert_eq!(r.cmd(&["ZRANGESTORE", "top", "lb", "0", "1"]), R::I(2));
+
+    // Lexicographic ranges, among members of equal score.
+    r.cmd(&["ZADD", "names", "0", "a", "0", "b", "0", "c", "0", "d"]);
+    assert_eq!(r.cmd(&["ZRANGEBYLEX", "names", "[b", "+"]), bulks(&["b", "c", "d"]));
+    assert_eq!(r.cmd(&["ZREVRANGEBYLEX", "names", "(c", "-"]), bulks(&["b", "a"]));
+    assert_eq!(r.cmd(&["ZLEXCOUNT", "names", "-", "+"]), R::I(4));
+    assert_eq!(r.cmd(&["ZREMRANGEBYLEX", "names", "[a", "[b"]), R::I(2));
+
+    // Popping and removing; an emptied sorted set disappears.
+    assert_eq!(r.cmd(&["ZPOPMIN", "lb"]), bulks(&["alice", "7"]));
+    assert_eq!(r.cmd(&["ZPOPMAX", "lb", "1"]), bulks(&["bob", "25"]));
+    assert_eq!(r.cmd(&["ZREMRANGEBYRANK", "lb", "0", "-1"]), R::I(1));
+    assert_eq!(r.cmd(&["EXISTS", "lb"]), R::I(0));
+
+    // A sliding-window rate limiter, as libraries write it, inside MULTI.
+    for (i, want) in [(1, 1), (2, 2), (3, 3)] {
+        r.cmd(&["MULTI"]);
+        r.cmd(&["ZREMRANGEBYSCORE", "rl:ip", "0", "1000"]);
+        r.cmd(&["ZADD", "rl:ip", &(2000 + i).to_string(), &format!("req{i}")]);
+        r.cmd(&["ZCARD", "rl:ip"]);
+        r.cmd(&["PEXPIRE", "rl:ip", "60000"]);
+        assert_eq!(r.cmd(&["EXEC"]), ints(&[0, 1, want, 1]));
+    }
+    assert!(matches!(r.cmd(&["TTL", "rl:ip"]), R::I(t) if t > 50));
+    assert_eq!(r.cmd(&["EVAL", "return redis.call('ZSCORE', KEYS[1], 'req2')", "1", "rl:ip"]), b("2002"));
+
+    // RESP3: scores are doubles, members of a set a set, WITHSCORES pairs.
+    assert!(matches!(r.cmd(&["HELLO", "3"]), R::M(_)));
+    r.cmd(&["SADD", "s3", "x"]);
+    assert_eq!(r.cmd(&["SMEMBERS", "s3"]), R::Set(vec![b("x")]));
+    assert_eq!(r.cmd(&["ZSCORE", "rl:ip", "req1"]), R::D("2001".into()));
+    assert_eq!(
+        r.cmd(&["ZRANGE", "rl:ip", "0", "1", "WITHSCORES"]),
+        R::A(Some(vec![
+            R::A(Some(vec![b("req1"), R::D("2001".into())])),
+            R::A(Some(vec![b("req2"), R::D("2002".into())])),
+        ]))
+    );
+    assert_eq!(r.cmd(&["ZPOPMAX", "rl:ip"]), R::A(Some(vec![b("req3"), R::D("2003".into())])));
+    r.cmd(&["ZADD", "inf", "+inf", "top"]);
+    assert_eq!(r.cmd(&["ZSCORE", "inf", "top"]), R::D("inf".into()));
+}
+
+#[test]
+fn redis_sorted_sets_survive_a_restart() {
+    let dir = TempDir::new("resp_zsets_restart");
+    let run = |inst: &std::sync::Arc<kivadb::instance::Instance>, args: &[&str]| {
+        let mut c = resp::Conn::new(Session::new(inst.clone(), true, None));
+        let mut out = Vec::new();
+        c.handle(&args.iter().map(|a| a.as_bytes().to_vec()).collect::<Vec<_>>()).encode(&mut out, false);
+        String::from_utf8(out).unwrap()
+    };
+    {
+        let inst = instance(&dir);
+        run(&inst, &["ZADD", "scores", "3", "c", "1", "a", "-inf", "low"]);
+        run(&inst, &["SADD", "seen", "x", "y"]);
+        run(&inst, &["EXPIRE", "seen", "3600"]);
+    }
+    let inst = instance(&dir);
+    assert_eq!(
+        run(&inst, &["ZRANGE", "scores", "0", "-1", "WITHSCORES"]),
+        "*6\r\n$3\r\nlow\r\n$4\r\n-inf\r\n$1\r\na\r\n$1\r\n1\r\n$1\r\nc\r\n$1\r\n3\r\n"
+    );
+    assert_eq!(run(&inst, &["SCARD", "seen"]), ":2\r\n");
+    let ttl: i64 = run(&inst, &["TTL", "seen"]).trim_start_matches(':').trim().parse().unwrap();
+    assert!(ttl > 3500, "{ttl}");
 }
 
 #[test]
