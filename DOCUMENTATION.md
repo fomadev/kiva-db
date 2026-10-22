@@ -657,7 +657,7 @@ OK: classe:1 saved.
 * A document that is never closed is refused **before anything runs**: `data.kva:7: this command opens a { or [ that is never closed`.
 * The file is read on the machine where you type the command, and runs where the shell is connected: `kivadb --connect 31.25.236.110:2911 --tls -u kiva run data.kva` fills a remote server.
 * In the shell, `source "data.kva"` runs a file the same way.
-* `set` only creates keys, so a file that creates keys fails the second time it runs (`Key 'nameA' already exists`). To make a file you can run again, start it with `del` commands, or use `update` for keys that exist.
+* `set` only creates keys, so a file that creates keys fails the second time it runs (`Key 'nameA' already exists`). To make a file you can run again, write `set ... if not exists` (the keys already there are kept) or start it with `del ... if exists` (they are created again with the file's values).
 * Kiva Studio runs `.kva` files from its Console ([24.7](#247-kiva-studio-the-graphical-client)).
 
 To run several commands **all or nothing**, put them between `begin` and `commit` in the file ([Chapter 13](#chapter-13--transactions)).
@@ -883,7 +883,7 @@ When you really want to change the type, say so explicitly with `change` ([secti
 ### 6.1 `set` — create a key
 
 ```text
-set [type] <key> <value> [ttl <seconds>]
+set [type] <key> <value> [ttl <seconds>] [if not exists]
 ```
 
 Creates a new key. Fails if the key already exists.
@@ -898,6 +898,17 @@ OK: session saved.
 ```
 
 `ttl` makes the key disappear by itself after that many seconds ([Chapter 7](#chapter-7--expiring-keys-ttl)).
+
+`if not exists` (in any case, at the end of the command) creates the key only when it is absent. When it exists, the command leaves it untouched and succeeds:
+
+```text
+kiva> set login_retry 0 if not exists
+OK: login_retry skipped (already exists)
+kiva> set counter 0 ttl 60 if not exists
+OK: counter saved.
+```
+
+It applies to each part of an `and` chain separately: `set a 1 if not exists and b 2` skips `a` if it exists but still fails on `b`. Inside a transaction, the check sees the transaction's own changes.
 
 ### 6.2 `get` — read
 
@@ -948,7 +959,7 @@ kiva> typeof motto and ghost
 ### 6.5 `del` — delete
 
 ```text
-del [type] <key>
+del [type] <key> [if exists]
 del all keys
 ```
 
@@ -957,6 +968,15 @@ kiva> del motto and ghost
 Deleted: motto
 Not found: ghost
 ```
+
+Deleting a missing key is never an error. `if exists` (in any case, at the end) says so in a neutral line, which reads better in scripts that are run again:
+
+```text
+kiva> del motto if exists
+OK: motto skipped (does not exist)
+```
+
+A type given with `del` is still checked: `del string age if exists` fails when `age` is a number.
 
 `del all keys` empties the current workspace completely. It needs the admin role and cannot be undone:
 
@@ -3866,10 +3886,10 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 | Command | Effect |
 | :--- | :--- |
-| `set [type] <key> <value> [ttl <sec>]` | Create |
+| `set [type] <key> <value> [ttl <sec>] [if not exists]` | Create (`if not exists`: skip if present) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |
-| `del [type] <key>` | Delete |
+| `del [type] <key> [if exists]` | Delete |
 | `del all keys` | Empty the workspace (admin) |
 | `has [type] <key>` | Does it exist? |
 | `typeof <key>` | Its type |
