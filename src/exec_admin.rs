@@ -743,6 +743,7 @@ impl Session {
         } else if c.eat("of") {
             if c.eat("none") {
                 inst.repl.promote();
+                inst.repl.set_epoch(&inst, inst.repl.epoch() + 1);
                 inst.cfg_mut().set("replication", "role", "master")?;
                 out.say("This node is now a master.");
                 return Ok(());
@@ -764,6 +765,8 @@ impl Session {
             Ok(())
         } else if c.eat("promote") {
             inst.repl.promote();
+            // A new epoch: a former master that comes back steps down.
+            inst.repl.set_epoch(&inst, inst.repl.epoch() + 1);
             inst.cfg_mut().set("replication", "role", "master")?;
             out.say("This node is now a master.");
             Ok(())
@@ -788,8 +791,14 @@ impl Session {
     }
 
     fn cmd_failover(&mut self, a: &[Token], out: &mut Out) -> R {
+        if a.len() == 1 && a[0].is_kw("status") {
+            for line in crate::failover::status(&self.inst) {
+                out.say(line);
+            }
+            return Ok(());
+        }
         let [to, target] = a else {
-            return Err("Usage: failover to <replica id or address>".into());
+            return Err("Usage: failover to <replica id or address> | failover status".into());
         };
         if !to.is_kw("to") {
             return Err("Usage: failover to <replica id or address>".into());

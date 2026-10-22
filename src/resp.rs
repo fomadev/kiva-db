@@ -1578,6 +1578,14 @@ impl Conn {
         t.push_str(&format!("\r\n# Clients\r\nconnected_clients:{}\r\n", inst.clients.load(Ordering::SeqCst)));
         t.push_str(&format!("\r\n# Memory\r\nused_memory:{}\r\n", s.memory_bytes + s.cache_bytes));
         t.push_str(&format!("\r\n# Replication\r\nrole:{role}\r\nconnected_slaves:{}\r\n", inst.repl.replicas().len()));
+        if inst.repl.is_replica() {
+            // Clients that follow a failover read the master here, as with Redis.
+            let master = inst.repl.link().master;
+            if let Some((host, port)) = master.rsplit_once(':') {
+                t.push_str(&format!("master_host:{host}\r\nmaster_port:{port}\r\n"));
+            }
+        }
+        t.push_str(&format!("failover_epoch:{}\r\n", inst.repl.epoch()));
         t.push_str(&format!("\r\n# Keyspace\r\ndb0:keys={},expires={},avg_ttl=0\r\n", s.keys, s.ttl_keys));
         t.into_bytes()
     }

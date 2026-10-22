@@ -261,6 +261,8 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     if inst.opts.skip_auth {
         eprintln!("[WARN] Authentication disabled - unsafe for production");
     }
+    // Heartbeats, failure detection and elections (idle unless failover.auto).
+    kivadb::failover::start(&inst);
     let (role, host, mport) = {
         let c = inst.cfg();
         (

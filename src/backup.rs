@@ -421,7 +421,7 @@ pub fn check(archive: &Path, near: &Path) -> Result<Checked> {
 fn lock_home(home: &Path) -> Result<File> {
     fs::create_dir_all(home)?;
     let lock = fs::OpenOptions::new().create(true).write(true).truncate(false).open(home.join("instance.lock"))?;
-    if lock.try_lock().is_err() {
+    if !crate::util::lock_exclusive(&lock) {
         return Err(KivaError::Locked(format!(
             "KivaDB is running on {}: stop it first (kivadb stop), then restore",
             home.display()

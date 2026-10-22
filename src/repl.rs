@@ -7,6 +7,10 @@
 //! A replica connects to the master's TCP port, receives a full snapshot and
 //! then the live stream of operations, acknowledging each one. Operations are
 //! absolute (`set key = value`, `del key`), so replaying one twice is harmless.
+//!
+//! While the stream is idle, the master sends a heartbeat every
+//! `failover.heartbeat_ms` listing the nodes of the group; the automatic
+//! failover ([`crate::failover`]) builds on it.
 
 use crate::engine::Op;
 use crate::error::{KivaError, Result};
@@ -14,6 +18,7 @@ use crate::instance::Instance;
 use crate::proto::*;
 use crate::util::now_secs;
 use crate::value::Type;
+use serde_json::{json, Value as Json};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +35,8 @@ struct ReplicaConn {
     id: u64,
     addr: String,
     listen: String,
+    /// The replica's node id, to tell it apart in the group.
+    node: String,
     tx: Sender<ReplMsg>,
     acked: Arc<AtomicU64>,
     connected_at: i64,
@@ -64,6 +71,24 @@ pub struct ReplState {
     replica_mode: AtomicBool,
     link: Mutex<Link>,
     generation: AtomicU64,
+    group: Mutex<Group>,
+}
+
+/// What this node knows of its replication group, for the failover.
+#[derive(Clone, Debug, Default)]
+struct Group {
+    /// Random id of this node, kept in `failover.node_id`.
+    node: String,
+    /// This node's address as the others reach it (told by the master).
+    advertised: String,
+    epoch: u64,
+    voted: u64,
+    /// The other replicas of the current master.
+    peers: Vec<String>,
+    /// Every node ever seen in the group, kept in `failover.nodes`.
+    known: Vec<String>,
+    last_contact: Option<Instant>,
+    event: Option<String>,
 }
 
 impl Default for ReplState {
@@ -82,7 +107,140 @@ impl ReplState {
             replica_mode: AtomicBool::new(false),
             link: Mutex::new(Link::default()),
             generation: AtomicU64::new(0),
+            group: Mutex::new(Group::default()),
         }
+    }
+
+    fn group(&self) -> std::sync::MutexGuard<'_, Group> {
+        self.group.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reads (or creates) this node's identity and group state from the configuration.
+    pub fn load_identity(&self, inst: &Instance) {
+        let mut cfg = inst.cfg_mut();
+        let mut node = cfg.get("failover", "node_id");
+        if node.is_empty() {
+            node = format!("{:016x}", crate::util::random_u64());
+            let _ = cfg.set("failover", "node_id", &node);
+        }
+        let mut g = self.group();
+        g.node = node;
+        g.epoch = g.epoch.max(cfg.get_u64("failover", "epoch"));
+        g.voted = g.voted.max(cfg.get_u64("failover", "voted"));
+        g.known = cfg.get("failover", "nodes").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    }
+
+    pub fn node_id(&self) -> String {
+        self.group().node.clone()
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.group().epoch
+    }
+
+    /// Moves to a newer epoch (never back), and remembers it.
+    pub fn set_epoch(&self, inst: &Instance, epoch: u64) {
+        let changed = {
+            let mut g = self.group();
+            let changed = epoch > g.epoch;
+            g.epoch = g.epoch.max(epoch);
+            changed
+        };
+        if changed {
+            let _ = inst.cfg_mut().set("failover", "epoch", &epoch.to_string());
+        }
+    }
+
+    pub fn voted(&self) -> u64 {
+        self.group().voted
+    }
+
+    pub fn set_voted(&self, inst: &Instance, epoch: u64) {
+        self.group().voted = epoch;
+        let _ = inst.cfg_mut().set("failover", "voted", &epoch.to_string());
+    }
+
+    /// When this replica last heard from its master.
+    pub fn last_contact(&self) -> Option<Instant> {
+        self.group().last_contact
+    }
+
+    fn touch(&self) {
+        self.group().last_contact = Some(Instant::now());
+    }
+
+    /// This node's address as the group knows it (`bind:port` until told).
+    pub fn advertised(&self) -> String {
+        self.group().advertised.clone()
+    }
+
+    /// The other replicas of the current master.
+    pub fn peers(&self) -> Vec<String> {
+        self.group().peers.clone()
+    }
+
+    /// Every other node seen in the group.
+    pub fn known_nodes(&self) -> Vec<String> {
+        let g = self.group();
+        g.known.iter().filter(|n| **n != g.advertised).cloned().collect()
+    }
+
+    pub fn event(&self) -> Option<String> {
+        self.group().event.clone()
+    }
+
+    pub fn set_event(&self, event: impl Into<String>) {
+        self.group().event = Some(format!("{} ({})", event.into(), crate::util::fmt_time(now_secs())));
+    }
+
+    /// Adds nodes to the ones remembered in `failover.nodes`.
+    fn remember(&self, inst: &Instance, nodes: &[String]) {
+        let known = {
+            let mut g = self.group();
+            let before = g.known.len();
+            for n in nodes {
+                if !n.is_empty() && !g.known.contains(n) {
+                    g.known.push(n.clone());
+                }
+            }
+            (g.known.len() != before).then(|| g.known.join(","))
+        };
+        if let Some(list) = known {
+            let _ = inst.cfg_mut().set("failover", "nodes", &list);
+        }
+    }
+
+    /// The heartbeat a master sends: its epoch and the replicas of the group.
+    fn heartbeat(&self, inst: &Instance) -> Vec<u8> {
+        let replicas = self.replicas.lock().unwrap_or_else(|e| e.into_inner());
+        let nodes: Vec<Json> = replicas
+            .iter()
+            .map(|r| json!({ "addr": r.listen, "node": r.node, "acked": r.acked.load(Ordering::SeqCst) }))
+            .collect();
+        let addrs: Vec<String> = replicas.iter().map(|r| r.listen.clone()).collect();
+        drop(replicas);
+        self.remember(inst, &addrs);
+        json!({ "epoch": self.epoch(), "seq": self.seq(), "nodes": nodes }).to_string().into_bytes()
+    }
+
+    /// A replica learns the group from its master's heartbeat.
+    fn learn(&self, inst: &Instance, master: &str, payload: &[u8]) {
+        let Ok(j) = serde_json::from_slice::<Json>(payload) else { return };
+        self.set_epoch(inst, j["epoch"].as_u64().unwrap_or(0));
+        let me = self.node_id();
+        let mut peers = Vec::new();
+        for n in j["nodes"].as_array().into_iter().flatten() {
+            let addr = n["addr"].as_str().unwrap_or("").to_string();
+            if n["node"].as_str() == Some(me.as_str()) {
+                self.group().advertised = addr;
+            } else if !addr.is_empty() {
+                peers.push(addr);
+            }
+        }
+        let mut all = peers.clone();
+        all.push(master.to_string());
+        self.group().peers = peers;
+        self.remember(inst, &all);
     }
 
     pub fn is_replica(&self) -> bool {
@@ -210,8 +368,25 @@ fn set_payload(seq: u64, key: &str, ty: Type, msgpack: bool, timestamp: i64, exp
     p
 }
 
-/// Master side: feeds one replica until it disconnects.
-pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, listen: String) {
+/// An address others can reach: a wildcard host (`0.0.0.0`) is replaced by
+/// the address the connection came from.
+fn reachable(listen: &str, peer: &str) -> String {
+    match (listen.rsplit_once(':'), peer.rsplit_once(':')) {
+        (Some(("" | "0.0.0.0" | "::" | "[::]", port)), Some((peer_host, _))) => {
+            format!("{peer_host}:{port}")
+        }
+        _ => listen.to_string(),
+    }
+}
+
+/// Master side: feeds one replica until it disconnects. `hello` is what the
+/// replica sent: `<listen address> node=<id>`.
+pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, hello: String) {
+    let (listen, node) = match hello.split_once(" node=") {
+        Some((l, n)) => (l.to_string(), n.trim().to_string()),
+        None => (hello.clone(), String::new()),
+    };
+    let listen = reachable(&listen, &peer);
     let Ok(engine) = inst.engine("default") else { return };
     let (tx, rx) = mpsc::channel();
     let acked = Arc::new(AtomicU64::new(0));
@@ -222,6 +397,7 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
         id,
         addr: peer,
         listen,
+        node,
         tx,
         acked: acked.clone(),
         connected_at: now_secs(),
@@ -255,8 +431,14 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
             }
         }
         write_frame(stream, R_SNAP_END, &inst.repl.seq().to_be_bytes())?;
+        let mut last_beat = Instant::now() - Duration::from_secs(3600);
         loop {
-            match rx.recv_timeout(Duration::from_secs(1)) {
+            let beat = crate::failover::Settings::of(inst).heartbeat;
+            if last_beat.elapsed() >= beat {
+                write_frame(stream, R_PING, &inst.repl.heartbeat(inst))?;
+                last_beat = Instant::now();
+            }
+            match rx.recv_timeout(beat.min(Duration::from_secs(1))) {
                 Ok(ReplMsg::Op(seq, op)) => match op {
                     Op::Set { key, ty, raw, msgpack, timestamp, expires_at, .. } => {
                         let p = set_payload(seq, &key, ty, msgpack, timestamp, expires_at, &raw);
@@ -316,10 +498,23 @@ pub fn start_replica(inst: &Arc<Instance>, host: &str, port: u16) {
     });
 }
 
-fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result<()> {
-    let (master_tls, fingerprint) = {
+/// Connects to another node of the group and logs in with the replication
+/// account (`replication.master_user` / `master_password`), over TLS when
+/// `replication.master_tls` is on.
+pub fn connect_node(
+    inst: &Arc<Instance>,
+    addr: &str,
+    timeout: Duration,
+    active: &dyn Fn() -> bool,
+) -> Result<TcpStream> {
+    let (master_tls, fingerprint, user, password) = {
         let c = inst.cfg();
-        (c.get_bool("replication", "master_tls"), c.get("replication", "master_fingerprint"))
+        (
+            c.get_bool("replication", "master_tls"),
+            c.get("replication", "master_fingerprint"),
+            c.get("replication", "master_user"),
+            c.get("replication", "master_password"),
+        )
     };
     let mut stream = if master_tls {
         if fingerprint.trim().is_empty() {
@@ -327,23 +522,14 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
                 "replication.master_tls is on: set replication.master_fingerprint to the master's (kivadb tls)".into(),
             ));
         }
-        crate::tls::connect(addr, Some(&fingerprint), Duration::from_secs(5))?.stream
+        crate::tls::connect(addr, Some(&fingerprint), timeout)?.stream
     } else {
         let sock =
             addr.to_socket_addrs()?.next().ok_or_else(|| KivaError::Invalid(format!("cannot resolve '{addr}'")))?;
-        TcpStream::connect_timeout(&sock, Duration::from_secs(5))?
+        TcpStream::connect_timeout(&sock, timeout)?
     };
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(200).min(timeout)))?;
     let _ = stream.set_nodelay(true);
-
-    let (user, password, listen) = {
-        let c = inst.cfg();
-        (
-            c.get("replication", "master_user"),
-            c.get("replication", "master_password"),
-            format!("{}:{}", c.get("network", "bind"), inst.tcp_port.load(Ordering::SeqCst)),
-        )
-    };
     write_frame(&mut stream, CMD_HELLO, &[])?;
     let (_, hello) = read_frame_with(&mut stream, active)?;
     if String::from_utf8_lossy(&hello).contains("auth=required") {
@@ -353,10 +539,25 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
         write_frame(&mut stream, CMD_AUTH, &p)?;
         let (st, msg) = read_frame_with(&mut stream, active)?;
         if st != ST_OK {
-            return Err(KivaError::Denied(format!("master refused login: {}", String::from_utf8_lossy(&msg))));
+            return Err(KivaError::Denied(format!("{addr} refused login: {}", String::from_utf8_lossy(&msg))));
         }
     }
-    write_frame(&mut stream, CMD_REPL_SYNC, listen.as_bytes())?;
+    Ok(stream)
+}
+
+fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result<()> {
+    let mut stream = connect_node(inst, addr, Duration::from_secs(5), active)?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let listen = {
+        let c = inst.cfg();
+        format!("{}:{}", c.get("network", "bind"), inst.tcp_port.load(Ordering::SeqCst))
+    };
+    if inst.repl.advertised().is_empty() {
+        inst.repl.group().advertised = listen.clone();
+    }
+    let hello = format!("{listen} node={}", inst.repl.node_id());
+    write_frame(&mut stream, CMD_REPL_SYNC, hello.as_bytes())?;
+    inst.repl.touch();
 
     let engine = inst.engine("default")?;
     let applied = |seq: u64, stream: &mut TcpStream| -> std::io::Result<()> {
@@ -375,6 +576,7 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
         if !active() {
             return Ok(());
         }
+        inst.repl.touch();
         let mut r = Reader::new(&payload);
         match code {
             R_SNAP_BEGIN => {
@@ -412,8 +614,12 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
                 }
                 write_frame(&mut stream, CMD_REPL_ACK, &seq.to_be_bytes())?;
             }
+            R_PING => inst.repl.learn(inst, addr, &payload),
             R_PROMOTE => {
                 inst.repl.promote();
+                // A planned handover opens a new epoch too: the old master
+                // learns it from the new master's heartbeats.
+                inst.repl.set_epoch(inst, inst.repl.epoch() + 1);
                 let _ = inst.cfg_mut().set("replication", "role", "master");
                 inst.audit.log("system", "promoted to master by failover", true);
                 let _ = stream.flush();

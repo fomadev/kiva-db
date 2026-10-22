@@ -217,6 +217,17 @@ fn binary_loop(
                     Err(e) => reply(ST_ERR, e.to_string().as_bytes()),
                 }
             }
+            CMD_FAILOVER => {
+                // Only the nodes of the group (logged in as administrators) take part.
+                if let Err(e) = sess.check(Need::Admin) {
+                    reply(ST_ERR, e.to_string().as_bytes())
+                } else {
+                    match serde_json::from_slice::<serde_json::Value>(&payload) {
+                        Ok(req) => reply(ST_OK, crate::failover::handle(inst, &req).to_string().as_bytes()),
+                        Err(e) => reply(ST_ERR, e.to_string().as_bytes()),
+                    }
+                }
+            }
             CMD_REPL_SYNC => {
                 if let Err(e) = sess.check(Need::Admin) {
                     let _ = reply(ST_ERR, e.to_string().as_bytes());

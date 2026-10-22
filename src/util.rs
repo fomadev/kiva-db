@@ -156,6 +156,22 @@ pub fn random_bytes(n: usize) -> Vec<u8> {
     v
 }
 
+/// Takes an exclusive lock on `file`, waiting up to half a second: a lock
+/// just released can still look held for an instant (on Linux, a process
+/// being started inherits open files until it runs its program).
+pub fn lock_exclusive(file: &std::fs::File) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if file.try_lock().is_ok() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 pub fn random_u64() -> u64 {
     let b = random_bytes(8);
     u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])

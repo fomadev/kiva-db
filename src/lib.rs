@@ -21,6 +21,7 @@ pub mod error;
 pub mod exec;
 mod exec_admin;
 pub mod expr;
+pub mod failover;
 pub mod format;
 pub mod hint;
 pub mod hnsw;

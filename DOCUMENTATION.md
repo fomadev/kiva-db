@@ -1863,6 +1863,11 @@ network.port = 2911
 | `encryption.old_key_file` | empty | Previous key, read during a key rotation | next start |
 | `encryption.required` | `false` | Refuse to start without a key, and refuse unencrypted records | next start |
 | `replication.*` | | See [Chapter 25](#chapter-25--replication) | |
+| `failover.auto` | `false` | Replace a dead master automatically ([25.8](#258-automatic-failover)) | immediately |
+| `failover.heartbeat_ms` | `1000` | Milliseconds between the master's heartbeats | immediately |
+| `failover.down_after_ms` | `5000` | Silence after which a replica considers the master down | immediately |
+| `failover.quorum` | `0` | Nodes that must see the master down; `0` = a majority of the group | immediately |
+| `failover.priority` | `100` | Preference to become master; `0` = never by itself | immediately |
 | `scripting.timeout_ms` | `5000` | Longest a Lua script may run | immediately |
 | `scripting.memory_limit_mb` | `64` | Most memory a Lua script may use | immediately |
 
@@ -3376,6 +3381,7 @@ OK: 1 replica(s) acknowledged.
 | `replica status` | both | Show the state |
 | `wait <N> [timeout_ms]` | master | Wait for N replicas to be up to date |
 | `failover to <replica>` | master | Hand over the master role |
+| `failover status` | both | Automatic failover: settings, epoch, known nodes, last event |
 
 ### 25.7 Failover
 
@@ -3389,14 +3395,63 @@ Other replicas must be pointed at the new master with: replica of <host> <port>
 
 The master waits for the replica to be up to date, tells it to become master, and becomes its replica.
 
-**Unplanned** - the master is dead. On the replica you choose as the new master:
+**Unplanned** - the master is dead. With automatic failover on, the replicas elect a new master by themselves ([25.8](#258-automatic-failover)). Otherwise, on the replica you choose as the new master:
 
 ```text
 kiva> replica promote
 This node is now a master.
 ```
 
-Then point your applications, and the other replicas, to it. This step is manual: KivaDB 1.4.0 does not elect a new master by itself.
+Then point your applications, and the other replicas, to it (`replica of <host> <port>`).
+
+### 25.8 Automatic failover
+
+With **`failover.auto`** on, the replicas watch the master and, when it dies, choose one of them as the new master, without anybody at the keyboard.
+
+**Setting it up.** Three nodes at least: one master and two replicas (see why below). On **every** node:
+
+```text
+kiva> config set failover.auto true
+```
+
+Every node logs in to the others with the replication account (`config set master_user ...` and `master_password ...`, [25.2](#252-setting-it-up)): use the same administrator account and password on all of them. The replicas must all name the master with the same address (the same IP, or the same host name).
+
+```text
+kiva> failover status
+Automatic failover: on (heartbeat 1000 ms, master down after 5000 ms of silence, 2 of 3 nodes must agree)
+Epoch: 0
+This node (10.0.0.12:2911): replica of 10.0.0.11:2911 (applied sequence 18342, last heard 0.4 s ago)
+Known nodes: 10.0.0.13:2911, 10.0.0.11:2911
+```
+
+**How it works.**
+
+1. **Heartbeats.** Every `failover.heartbeat_ms`, the master sends each replica a heartbeat with the list of the group's nodes: every replica knows the others.
+2. **Suspicion.** A replica that hears nothing for `failover.down_after_ms` tries to reach the master itself, then asks the other replicas whether they lost it too.
+3. **Agreement.** Only when a **majority** of the group (the master counted) sees the master down does anything happen. This is what prevents two masters: a replica cut off from the master by a network problem, while the others still see it, is alone and changes nothing.
+4. **Election.** The replica that received the most of the master's changes is chosen (then the highest `failover.priority`, then the smallest address), so that as little as possible is lost. It asks the others for their vote in a new **epoch**; each node votes once per epoch, and only for a candidate at least as up to date as itself. With a majority of votes, it becomes the master.
+5. **Resynchronisation.** The new master tells the other replicas, which follow it and resynchronise.
+6. **The old master comes back.** It finds that the group moved to a newer epoch, becomes a replica of the new master and resynchronises from it.
+
+With the defaults, a new master is in place a few seconds after the old one stopped answering (`down_after_ms`, plus the time to ask the others). `failover status` shows the last event, for example `promoted to master in epoch 1 (2 of 3 nodes agreed that 10.0.0.11:2911 was down)`; the audit log keeps every promotion.
+
+**Why three nodes.** With a master and one replica, the replica alone is not a majority of two: if it promoted itself every time it lost sight of the master, a simple network cut would leave two masters accepting different writes. So it does not, and `failover status` says why (`only 1 of the 2 nodes needed see it down`). `config set failover.quorum 1` allows it anyway, if you accept that risk.
+
+**Clients.** A replica refuses writes and names the master: `READONLY: this node is a replica of 10.0.0.12:2911`. Redis clients find it in `INFO replication` (`master_host`, `master_port`). Give your application the addresses of all the nodes and let it move to the master named in the error, or reconnect to the next address when a node does not answer.
+
+**What can be lost.** Replication is asynchronous by default: writes the old master accepted in its last instants, before they reached any replica, are not on the new master. Writes a cut-off old master accepted before it learned that it was replaced are also lost when it resynchronises. Synchronous replication ([25.5](#255-asynchronous-or-synchronous)) narrows the first window.
+
+**Choosing who may become master.** `failover.priority 0` on a node (a small machine, a backup site) means it never takes over by itself; between equally up-to-date replicas, a higher priority wins.
+
+| Setting | Default | |
+| :--- | :--- | :--- |
+| `failover.auto` | `false` | Turn it on, on every node |
+| `failover.heartbeat_ms` | `1000` | Interval of the master's heartbeats |
+| `failover.down_after_ms` | `5000` | Silence before a replica suspects the master. Shorter reacts faster but risks a failover during a short network hiccup |
+| `failover.quorum` | `0` | Nodes that must agree; `0` = a majority of the group |
+| `failover.priority` | `100` | `0` = never become master by itself |
+
+KivaDB keeps its group state in `[failover]` too (`node_id`, `epoch`, `voted`, `nodes`): leave those alone.
 
 ---
 
@@ -4230,7 +4285,7 @@ KivaDB 1.4.0 is a single-node database with replicas. Knowing what it does not d
 
 **Not included in 1.4.0**
 
-* **Automatic failover.** When a master dies, a person (or your own tooling) promotes a replica.
+* **Distributed consensus beyond failover.** Automatic failover elects a new master by majority ([25.8](#258-automatic-failover)), but replication stays asynchronous by default and every node holds the whole database.
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).

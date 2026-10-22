@@ -924,7 +924,7 @@ impl Engine {
             }
         }
         let lock_file = OpenOptions::new().create(true).write(true).truncate(false).open(sidecar(&path, "lock"))?;
-        if lock_file.try_lock().is_err() {
+        if !crate::util::lock_exclusive(&lock_file) {
             return Err(KivaError::Locked(path.display().to_string()));
         }
 
