@@ -17,6 +17,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 * **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged (RESP2 and RESP3): strings, counters, expiry, hashes, lists, sets, sorted sets, transactions, Lua scripts (`EVAL`), publish/subscribe and numbered databases. Checked with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.
 * **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
 * **Scripts in files**: commands can span several lines, and `.kva` files hold commands to run with `kivadb run data.kva`, from the shell or from Kiva Studio.
+* **Replicates and fails over**: replicas follow the master live; with `failover.auto`, they elect a new master by majority when it dies, and the old one steps down when it returns.
 * **Backs up in one command**: `kivadb backup -o all.tar.gz` while it runs, `kivadb restore all.tar.gz` after checking every SHA-256.
 * **Encrypts its data at rest** (AES-256-GCM): records, index snapshots and vector graphs, with a key kept outside the data folder, key rotation, and `kivadb keygen`.
 * **Encrypts its connections**: TLS on every port (shell, Kiva Studio, drivers, HTTPS, `rediss://`), with a certificate it creates itself and checks by fingerprint like SSH, or your own.

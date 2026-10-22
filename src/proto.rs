@@ -24,6 +24,8 @@ pub const CMD_DEL: u16 = 7;
 pub const CMD_API: u16 = 8;
 pub const CMD_REPL_SYNC: u16 = 20;
 pub const CMD_REPL_ACK: u16 = 21;
+/// Node-to-node request of the automatic failover (JSON in, JSON out).
+pub const CMD_FAILOVER: u16 = 22;
 
 // Responses
 pub const ST_OK: u16 = 0;
@@ -41,6 +43,8 @@ pub const R_DEL: u16 = 32;
 pub const R_RESET: u16 = 33;
 pub const R_SNAP_END: u16 = 34;
 pub const R_PROMOTE: u16 = 35;
+/// Heartbeat with the group's nodes (JSON), sent while the stream is idle.
+pub const R_PING: u16 = 36;
 
 pub const MAX_FRAME: usize = 300 * 1024 * 1024;
 

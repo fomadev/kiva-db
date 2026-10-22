@@ -212,9 +212,11 @@ impl Session {
     pub fn writable(&self) -> Result<()> {
         self.check(Need::Write)?;
         if self.ws == "default" && self.inst.repl.is_replica() {
-            return Err(KivaError::ReadOnly(
-                "this node is a replica; write to the master or run 'replica promote'".into(),
-            ));
+            // Name the master, so that clients know where to go.
+            let master = self.inst.repl.link().master;
+            return Err(KivaError::ReadOnly(format!(
+                "this node is a replica of {master}; write to the master or run 'replica promote'"
+            )));
         }
         Ok(())
     }
