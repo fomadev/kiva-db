@@ -1396,6 +1396,10 @@ impl Engine {
 
     /// Wipes every key. The data file is recreated from scratch.
     pub fn reset(&self) -> Result<()> {
+        // Truncating the file under a running backup would cut its copy short.
+        if self.compacting.load(Ordering::SeqCst) {
+            return Err(KivaError::Other("a compaction or a backup is running: try again when it ends".into()));
+        }
         let mut inner = self.lock();
         if inner.closed {
             return Err(KivaError::Other("database is closed".into()));
@@ -1478,7 +1482,7 @@ impl Engine {
     /// every value is re-encoded with the given algorithm.
     pub fn compact_with(&self, recompress: Option<Compression>) -> Result<CompactReport> {
         if self.compacting.swap(true, Ordering::SeqCst) {
-            return Err(KivaError::Other("a compaction is already running".into()));
+            return Err(KivaError::Other("a compaction or a backup is already running".into()));
         }
         struct Clear<'a>(&'a AtomicBool);
         impl Drop for Clear<'_> {
@@ -1878,6 +1882,33 @@ impl Engine {
         report.hint_encrypted =
             hint::read_hint(&hint::hint_path(&self.path), inner.keys.as_deref()).map(|h| h.encrypted).unwrap_or(false);
         Ok(report)
+    }
+
+    /// The data file as it is now, for a backup: a handle on it, the length
+    /// that holds whole records up to this instant, and the index definitions.
+    /// The log only grows, so that prefix stays valid while writes go on; until
+    /// the snapshot is dropped, compactions and resets wait.
+    pub fn backup_snapshot(&self) -> Result<BackupSnapshot<'_>> {
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while self.compacting.swap(true, Ordering::SeqCst) {
+            if Instant::now() > deadline {
+                return Err(KivaError::Other(
+                    "a compaction has been running for 10 minutes: try the backup later".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // From here on, dropping the snapshot (or an error) releases the guard.
+        let guard = BackupGuard(&self.compacting);
+        let inner = self.lock();
+        if inner.closed {
+            return Err(KivaError::Other("database is closed".into()));
+        }
+        inner.file.sync_data()?;
+        let len = inner.file_len;
+        let file = File::open(&self.path)?;
+        let meta = fs::read(sidecar(&self.path, "meta")).ok();
+        Ok(BackupSnapshot { file, len, meta, _guard: guard })
     }
 
     // -- secondary indexes --------------------------------------------------
@@ -2307,6 +2338,24 @@ fn kind_from_json(def: &Json) -> VectorIndexKind {
         p.ef_construction = ef as usize;
     }
     VectorIndexKind::Hnsw(p)
+}
+
+/// See [`Engine::backup_snapshot`].
+pub struct BackupSnapshot<'a> {
+    pub file: File,
+    /// Bytes of `file` to copy.
+    pub len: u64,
+    /// The index definitions (`.meta`), if any.
+    pub meta: Option<Vec<u8>>,
+    _guard: BackupGuard<'a>,
+}
+
+struct BackupGuard<'a>(&'a AtomicBool);
+
+impl Drop for BackupGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// See [`Engine::encryption_report`].
