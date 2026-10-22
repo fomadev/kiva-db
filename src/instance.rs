@@ -219,6 +219,8 @@ pub struct Instance {
     pub tcp_port: AtomicU64,
     /// State shared by the Redis-compatible connections.
     pub resp: crate::resp::Shared,
+    /// Answers cached by meaning (`semantic` commands, `get similar`).
+    pub semantic: crate::semantic_cache::SemanticCache,
     /// The TLS certificate, loaded on first use (None when TLS is off or broken).
     tls_state: std::sync::OnceLock<Option<Arc<crate::tls::ServerTls>>>,
     weak: Weak<Instance>,
@@ -272,6 +274,7 @@ impl Instance {
             stop_requested: AtomicBool::new(false),
             tcp_port: AtomicU64::new(0),
             resp: Default::default(),
+            semantic: Default::default(),
             tls_state: std::sync::OnceLock::new(),
             weak: weak.clone(),
             _lock: lock,
@@ -421,6 +424,13 @@ impl Instance {
 
     fn on_op(&self, workspace: &str, op: &Op) {
         self.pubsub.publish(workspace, op);
+        // Cached answers built from data that just changed are stale.
+        match op {
+            Op::Set { key, .. } | Op::Del { key } => self.semantic.invalidate(workspace, key),
+            Op::Reset => {
+                self.semantic.clear(workspace, None);
+            }
+        }
         if workspace == "default" {
             self.repl.broadcast(op);
         }

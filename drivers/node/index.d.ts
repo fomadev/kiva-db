@@ -82,6 +82,17 @@ export class KivaClient extends EventEmitter {
   del(key: string): Promise<boolean>;
   scan(pattern?: string, limit?: number): Promise<KeyInfo[]>;
   similar<T = unknown>(target: string, vector: number[], options?: SimilarOptions): Promise<SimilarResult<T>[]>;
+  /** Semantic cache: the answer stored for this question or a near-identical one, or null. */
+  semanticLookup<T = unknown>(
+    cache: string,
+    question: { text?: string; vector?: number[]; threshold?: number },
+  ): Promise<{ answer: T; similarity: number; id: string } | null>;
+  /** Semantic cache: remembers an answer; returns its id. */
+  semanticStore(
+    cache: string,
+    answer: unknown,
+    question: { text?: string; vector?: number[]; ttl?: number; depends?: string[] },
+  ): Promise<string>;
   stats(): Promise<Record<string, unknown>>;
   /** After this, "change" events are emitted for matching keys. */
   subscribe(pattern?: string): Promise<void>;

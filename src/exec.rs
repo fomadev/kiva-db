@@ -1182,13 +1182,21 @@ impl Session {
         let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, tail.limit);
         q.ef = ef;
         q.exact = exact;
-        let r = self.engine.similar(&q)?;
+        let (r, cached) = self.similar_cached(&q)?;
         for (key, score, doc) in &r.rows {
             let shown = match &tail.fields {
                 Some(f) => project(doc, f),
                 None => doc.clone(),
             };
             out.say(format!("{key}: {score:.4} {shown}"));
+        }
+        if let Some(similarity) = cached {
+            out.say(format!(
+                "({} results, {} metric, semantic cache: a query at similarity {similarity:.4} was answered earlier)",
+                r.rows.len(),
+                metric.name()
+            ));
+            return Ok(());
         }
         out.say(format!(
             "({} results, {} metric, {} vectors compared, {})",
@@ -1488,6 +1496,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "json" if !sub("get") => Need::Write,
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,
+        "semantic" if sub("store") || sub("clear") => Need::Write,
         // Compacting only rewrites one's own file: allowed at home.
         "compact" => Need::Owner,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"

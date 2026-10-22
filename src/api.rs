@@ -195,7 +195,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, limit);
             q.ef = req["ef"].as_u64().unwrap_or(0).min(100_000) as usize;
             q.exact = req["exact"].as_bool().unwrap_or(false);
-            let r = sess.engine.similar(&q)?;
+            let (r, cached) = sess.similar_cached(&q)?;
             let rows: Vec<Json> =
                 r.rows.iter().map(|(k, score, doc)| json!({ "key": k, "score": score, "value": doc })).collect();
             Ok(json!({
@@ -203,8 +203,41 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "metric": metric.name(),
                 "compared": r.compared,
                 "indexed": r.indexed,
-                "approximate": r.approximate
+                "approximate": r.approximate,
+                "cached": cached
             }))
+        }
+        "semantic" => {
+            use crate::semantic_cache::{lookup_json, Question, Settings};
+            let s = Settings::of(&sess.inst.cfg());
+            let cache = str_field(req, "cache")?;
+            let vector = match &req["vector"] {
+                Json::Null => None,
+                v => {
+                    Some(crate::vector::from_json(v).ok_or_else(|| invalid("\"vector\" must be an array of numbers"))?)
+                }
+            };
+            let q = Question { text: req["text"].as_str().map(String::from), vector };
+            let ws = sess.ws.clone();
+            match req["action"].as_str().unwrap_or("lookup") {
+                "lookup" => {
+                    sess.check(Need::Read)?;
+                    let threshold = req["threshold"].as_f64().map(|t| t as f32).unwrap_or(s.threshold);
+                    Ok(lookup_json(&sess.inst.semantic.lookup(&ws, cache, &q, threshold)?))
+                }
+                "store" => {
+                    sess.check(Need::Write)?;
+                    let ttl = req["ttl"].as_i64().unwrap_or(s.ttl);
+                    let depends = req["depends"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    let id =
+                        sess.inst.semantic.store(&ws, cache, &q, req["answer"].clone(), ttl, depends, s.max_entries)?;
+                    Ok(json!({ "id": id }))
+                }
+                other => Err(invalid(format!("unknown semantic action '{other}' (lookup or store)"))),
+            }
         }
         "stats" => {
             sess.check(Need::Read)?;

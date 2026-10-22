@@ -208,6 +208,50 @@ impl Session {
         }
     }
 
+    /// `get similar`, answered from the semantic cache when
+    /// `semantic.cache.enabled` is on and a near-identical query was run
+    /// recently on the same data. Returns the similarity of that query on a hit.
+    pub fn similar_cached(
+        &mut self,
+        q: &crate::engine::VectorQuery,
+    ) -> Result<(crate::engine::VectorResult, Option<f32>)> {
+        use crate::semantic_cache::{Lookup, Question, Settings};
+        let s = Settings::of(&self.inst.cfg());
+        if !s.enabled || q.exact {
+            return Ok((self.engine.similar(q)?, None));
+        }
+        let name = format!("similar {}.{} {} {} {}", q.pattern, q.field, q.metric.name(), q.limit, q.ef);
+        let question = Question { text: None, vector: Some(q.vector.clone()) };
+        if let Lookup::Hit { similarity, answer, .. } =
+            self.inst.semantic.lookup(&self.ws, &name, &question, s.threshold)?
+        {
+            let rows = answer["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|r| {
+                    let key = r["key"].as_str().unwrap_or("").to_string();
+                    (key, r["score"].as_f64().unwrap_or(0.0) as f32, r["doc"].clone())
+                })
+                .collect();
+            let r = crate::engine::VectorResult {
+                rows,
+                indexed: answer["indexed"].as_bool().unwrap_or(false),
+                approximate: answer["approximate"].as_bool().unwrap_or(false),
+                examined: 0,
+                compared: 0,
+            };
+            return Ok((r, Some(similarity)));
+        }
+        let r = self.engine.similar(q)?;
+        let rows: Vec<serde_json::Value> =
+            r.rows.iter().map(|(k, score, doc)| serde_json::json!({ "key": k, "score": score, "doc": doc })).collect();
+        let answer = serde_json::json!({ "rows": rows, "indexed": r.indexed, "approximate": r.approximate });
+        // Any write under the searched pattern makes the answer stale.
+        self.inst.semantic.store(&self.ws, &name, &question, answer, s.ttl, vec![q.pattern.clone()], s.max_entries)?;
+        Ok((r, None))
+    }
+
     /// Checks that this session may modify data right now.
     pub fn writable(&self) -> Result<()> {
         self.check(Need::Write)?;

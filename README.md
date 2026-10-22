@@ -13,7 +13,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 * **Stores typed data**: strings, numbers, booleans, null, arrays, objects (JSON documents) and raw bytes.
 * **Keeps it safe**: every record is checksummed, a crash or a killed process loses nothing, and transactions are atomic.
 * **Finds it fast**: keys are kept sorted (range queries, pagination), documents can be filtered, counted, summed and indexed.
-* **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes: exact, or HNSW for large collections.
+* **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes: exact, or HNSW for large collections. A **semantic cache** gives back the answer of a question already asked in other words, so that a language model is not called twice.
 * **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged (RESP2 and RESP3): strings, counters, expiry, hashes, lists, sets, sorted sets, transactions, Lua scripts (`EVAL`), publish/subscribe and numbered databases. Checked with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.
 * **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
 * **Scripts in files**: commands can span several lines, and `.kva` files hold commands to run with `kivadb run data.kva`, from the shell or from Kiva Studio.
