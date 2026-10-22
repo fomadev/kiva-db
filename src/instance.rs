@@ -231,7 +231,7 @@ impl Instance {
     pub fn open(home: &Path, opts: Options) -> Result<Arc<Instance>> {
         fs::create_dir_all(home)?;
         let lock = OpenOptions::new().create(true).write(true).truncate(false).open(home.join("instance.lock"))?;
-        if lock.try_lock().is_err() {
+        if !crate::util::lock_exclusive(&lock) {
             return Err(KivaError::Locked(home.display().to_string()));
         }
         let _ = fs::remove_file(home.join("instance.port"));
