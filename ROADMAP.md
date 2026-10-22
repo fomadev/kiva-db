@@ -22,6 +22,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 * **1.3.0** Redis compatibility complete enough to replace Redis as short-lived memory: Lua scripts (`EVAL`), RESP3, numbered databases, `EXPIRE` options, atomic counters across connections
 * **1.4.0** **TLS** on every port with certificates checked by fingerprint, commands over several lines, `.kva` command files, `install.ps1` for Windows
 * **1.5.0** **Encryption at rest**, **automatic failover**, **HNSW** vector index, **semantic cache**, Redis **sets, sorted sets and publish/subscribe**, `kivadb backup` / `restore`, `if not exists` / `if exists`
+* **1.5.1** `config set` tells correctly whether a setting applies at once or at the next start; `help` lists the semantic cache, HNSW and failover commands
 
 ## Next, in order of value
 

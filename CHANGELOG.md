@@ -2,7 +2,9 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased
+## 1.5.1 - 2026-10-22
+
+A fix release: `config set` now says correctly when a setting applies, and `help` lists every command.
 
 ### Fixed
 
