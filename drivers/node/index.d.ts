@@ -46,6 +46,10 @@ export interface SimilarOptions {
   limit?: number;
   /** Default "cosine". */
   metric?: "cosine" | "dot" | "l2";
+  /** HNSW index: candidates kept by the search (default 100); higher is more accurate and slower. */
+  ef?: number;
+  /** Compare every vector even when an HNSW index exists. */
+  exact?: boolean;
 }
 
 export interface SimilarResult<T = unknown> {

@@ -10,9 +10,11 @@ use crate::compress::{self, Compression};
 use crate::error::{KivaError, Result};
 use crate::format::*;
 use crate::hint;
+use crate::hnsw::{self, Hnsw};
 use crate::jsonpath;
 use crate::util::{glob_match, glob_prefix, now_secs, random_u64};
 use crate::value::{Type, Value};
+pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -401,6 +403,8 @@ struct Inner {
     dirty_ops: u64,
     unsynced: bool,
     last_hint: Instant,
+    /// When the HNSW graphs were last written to their file.
+    last_graph_save: Instant,
     ticks: u64,
     load: LoadInfo,
     corrupted_detected: u64,
@@ -613,6 +617,84 @@ impl Inner {
                 self.vecs[i].update(&k, Some(&doc));
             }
         }
+    }
+
+    /// Brings a graph read from disk up to date: it reflected the data up to
+    /// byte `since` of the log, so only the keys written after that, and the
+    /// keys deleted since, need looking at.
+    fn catch_up_vec(&mut self, i: usize, since: u64) {
+        let now = now_secs();
+        let gone: Vec<String> = self.vecs[i]
+            .keys()
+            .into_iter()
+            .filter(|k| self.index.get(k).is_none_or(|e| e.is_expired(now) || !e.ty.is_doc()))
+            .collect();
+        for k in &gone {
+            self.vecs[i].remove(k);
+        }
+        let pattern = self.vecs[i].pattern.clone();
+        let prefix = glob_prefix(&pattern).to_string();
+        let written: Vec<(String, Entry)> = self
+            .index
+            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .take_while(|(k, _)| k.starts_with(&prefix))
+            .filter(|(k, e)| e.offset >= since && !e.is_expired(now) && glob_match(&pattern, k))
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
+        for (k, e) in written {
+            match self.read_value(&k, &e) {
+                Ok(Value::Doc(doc)) => self.vecs[i].update(&k, Some(&doc)),
+                _ => self.vecs[i].update(&k, None),
+            }
+        }
+    }
+
+    /// Writes the HNSW graphs to `<data>.graphs`, so that a restart does not
+    /// build them again. Written to a temporary file first, then renamed.
+    fn save_graphs(&mut self, path: &Path) {
+        let file = sidecar(path, "graphs");
+        if !self.vecs.iter().any(|v| v.graph().is_some()) {
+            let _ = fs::remove_file(&file);
+            return;
+        }
+        let _ = self.file.sync_data();
+        self.unsynced = false;
+        let mut out = Vec::new();
+        out.extend_from_slice(GRAPHS_MAGIC);
+        out.extend_from_slice(&self.file_id.to_le_bytes());
+        out.extend_from_slice(&self.file_len.to_le_bytes());
+        let graphs: Vec<&VecIndex> = self.vecs.iter().filter(|v| v.graph().is_some()).collect();
+        out.extend_from_slice(&(graphs.len() as u32).to_le_bytes());
+        for v in graphs {
+            hnsw::write_str(&mut out, &v.pattern);
+            hnsw::write_str(&mut out, &v.field);
+            out.extend_from_slice(&(v.dims.unwrap_or(0) as u32).to_le_bytes());
+            out.extend_from_slice(&(v.rejected as u64).to_le_bytes());
+            if let Some(g) = v.graph() {
+                g.write(&mut out);
+            }
+        }
+        let crc = crc32fast::hash(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        let tmp = sidecar(path, "graphs.tmp");
+        let written = File::create(&tmp).and_then(|mut f| {
+            f.write_all(&out)?;
+            f.sync_all()
+        });
+        if written.is_ok() && fs::rename(&tmp, &file).is_ok() {
+            for v in &mut self.vecs {
+                if let Some(g) = v.graph_mut() {
+                    g.changes = 0;
+                }
+            }
+            self.last_graph_save = Instant::now();
+        } else {
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+
+    fn graph_changes(&self) -> u64 {
+        self.vecs.iter().filter_map(|v| v.graph()).map(|g| g.changes).sum()
     }
 
     fn append(&mut self, buf: &[u8], sync: bool) -> Result<u64> {
@@ -868,6 +950,7 @@ impl Engine {
             dirty_ops: 0,
             unsynced: false,
             last_hint: Instant::now(),
+            last_graph_save: Instant::now(),
             ticks: 0,
             load: LoadInfo { mode, ms: 0.0, recovered_bytes, recovered_compaction },
             corrupted_detected: corrupted,
@@ -882,12 +965,26 @@ impl Engine {
         // Secondary index definitions live in a small sidecar file.
         if let Ok(text) = fs::read_to_string(sidecar(&path, "meta")) {
             if let Ok(meta) = serde_json::from_str::<Json>(&text) {
+                let mut saved = read_graphs(&sidecar(&path, "graphs"), inner.file_id, inner.file_len);
                 for def in meta["vector_indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
                         if let Ok(segs) = jsonpath::parse_path(f) {
-                            inner.vecs.push(VecIndex::new(p, f, segs));
+                            let kind = kind_from_json(&def);
+                            inner.vecs.push(VecIndex::with_kind(p, f, segs, kind));
                             let i = inner.vecs.len() - 1;
-                            inner.rebuild_vec(i);
+                            let restored = saved.as_mut().and_then(|(since, list)| {
+                                let at = list.iter().position(|s| {
+                                    s.pattern == p && s.field == f && VectorIndexKind::Hnsw(s.graph.params) == kind
+                                })?;
+                                Some((*since, list.swap_remove(at)))
+                            });
+                            match restored {
+                                Some((since, s)) => {
+                                    inner.vecs[i].restore(s.graph, s.dims, s.rejected);
+                                    inner.catch_up_vec(i, since);
+                                }
+                                None => inner.rebuild_vec(i),
+                            }
                         }
                     }
                 }
@@ -1245,6 +1342,7 @@ impl Engine {
         inner.tomb_versions.clear();
         inner.dirty_ops = 0;
         let _ = fs::remove_file(hint::hint_path(&self.path));
+        inner.save_graphs(&self.path);
         self.emit(&Op::Reset);
         Ok(())
     }
@@ -1444,6 +1542,9 @@ impl Engine {
         inner.last_compact = Some(now_secs());
         inner.corrupted_detected += dropped as u64;
         inner.write_hint(&self.path);
+        if inner.vecs.iter().any(|v| v.graph().is_some()) {
+            inner.save_graphs(&self.path);
+        }
         Ok(CompactReport { before_bytes, after_bytes: pos, records, dropped_corrupted: dropped, aborted: false })
     }
 
@@ -1598,6 +1699,9 @@ impl Engine {
         }
         inner.purge_expired(now_secs());
         inner.write_hint(&self.path);
+        if inner.graph_changes() > 0 {
+            inner.save_graphs(&self.path);
+        }
         inner.closed = true;
     }
 
@@ -1621,6 +1725,20 @@ impl Engine {
             if snapshot_due {
                 inner.write_hint(&self.path);
             }
+            for v in &mut inner.vecs {
+                if let Some(g) = v.graph_mut().filter(|g| g.needs_rebuild()) {
+                    g.rebuild();
+                }
+            }
+            // Writing a large graph costs more than replaying the few writes it
+            // misses at the next start: save it after many changes, not often.
+            let changes = inner.graph_changes();
+            let size: usize = inner.vecs.iter().filter_map(|v| v.graph()).map(|g| g.len()).sum();
+            if changes >= (size as u64 / 10).max(1000)
+                && inner.last_graph_save.elapsed() >= Duration::from_secs(self.opts.snapshot_interval_secs)
+            {
+                inner.save_graphs(&self.path);
+            }
             inner.auto_compact
                 && inner.file_len >= self.opts.auto_compact_min_bytes
                 && inner.fragmentation() * 100.0 >= inner.threshold as f64
@@ -1639,8 +1757,20 @@ impl Engine {
     fn save_meta(&self, inner: &Inner) -> Result<()> {
         let defs: Vec<Json> =
             inner.sec.iter().map(|s| serde_json::json!({ "pattern": s.pattern, "field": s.field })).collect();
-        let vecs: Vec<Json> =
-            inner.vecs.iter().map(|v| serde_json::json!({ "pattern": v.pattern, "field": v.field })).collect();
+        let vecs: Vec<Json> = inner
+            .vecs
+            .iter()
+            .map(|v| {
+                let mut def = serde_json::json!({ "pattern": v.pattern, "field": v.field });
+                if let VectorIndexKind::Hnsw(p) = v.kind() {
+                    def["kind"] = "hnsw".into();
+                    def["metric"] = p.metric.name().into();
+                    def["m"] = p.m.into();
+                    def["ef_construction"] = p.ef_construction.into();
+                }
+                def
+            })
+            .collect();
         let text = serde_json::to_string_pretty(&serde_json::json!({ "indexes": defs, "vector_indexes": vecs }))?;
         fs::write(sidecar(&self.path, "meta"), text)?;
         Ok(())
@@ -1699,6 +1829,11 @@ impl Engine {
     /// Keeps in memory the vectors stored in `field` of the documents whose
     /// key matches `pattern`. Returns the number of vectors indexed.
     pub fn create_vector_index(&self, pattern: &str, field: &str) -> Result<usize> {
+        self.create_vector_index_with(pattern, field, VectorIndexKind::Exact)
+    }
+
+    /// Like [`Engine::create_vector_index`], exact or HNSW.
+    pub fn create_vector_index_with(&self, pattern: &str, field: &str, kind: VectorIndexKind) -> Result<usize> {
         let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
         if path.is_empty() {
             return Err(KivaError::Invalid("a vector index needs a field name".into()));
@@ -1707,28 +1842,48 @@ impl Engine {
         if inner.vecs.iter().any(|v| v.pattern == pattern && v.field == field) {
             return Err(KivaError::Exists(format!("vector index on {pattern} ({field}) already exists")));
         }
-        inner.vecs.push(VecIndex::new(pattern, field, path));
+        inner.vecs.push(VecIndex::with_kind(pattern, field, path, kind));
         let i = inner.vecs.len() - 1;
         inner.rebuild_vec(i);
         let n = inner.vecs[i].len();
         self.save_meta(&inner)?;
+        if kind != VectorIndexKind::Exact {
+            // Building the graph took a while: keep it for the next start.
+            inner.save_graphs(&self.path);
+        }
         Ok(n)
     }
 
     pub fn drop_vector_index(&self, pattern: &str, field: &str) -> Result<bool> {
         let mut inner = self.lock();
         let before = inner.vecs.len();
+        let had_graph = inner.vecs.iter().any(|v| v.graph().is_some());
         inner.vecs.retain(|v| !(v.pattern == pattern && v.field == field));
         let removed = inner.vecs.len() != before;
         if removed {
             self.save_meta(&inner)?;
+            if had_graph {
+                inner.save_graphs(&self.path);
+            }
         }
         Ok(removed)
     }
 
-    /// `(pattern, field, vectors, dimensions, rejected)` for every vector index.
-    pub fn list_vector_indexes(&self) -> Vec<(String, String, usize, Option<usize>, usize)> {
-        self.lock().vecs.iter().map(|v| (v.pattern.clone(), v.field.clone(), v.len(), v.dims, v.rejected)).collect()
+    /// Every vector index, with its size.
+    pub fn list_vector_indexes(&self) -> Vec<VectorIndexInfo> {
+        self.lock()
+            .vecs
+            .iter()
+            .map(|v| VectorIndexInfo {
+                pattern: v.pattern.clone(),
+                field: v.field.clone(),
+                kind: v.kind(),
+                vectors: v.len(),
+                dims: v.dims,
+                rejected: v.rejected,
+                tombstones: v.graph().map_or(0, |g| g.tombstones()),
+            })
+            .collect()
     }
 
     /// The `limit` documents whose vector in `field` is closest to `vector`.
@@ -1746,7 +1901,7 @@ impl Engine {
         let limit = if q.limit == 0 { 10 } else { q.limit };
 
         let index = inner.vecs.iter().position(|v| v.field == q.field && pattern_covers(&v.pattern, &q.pattern));
-        let (scored, examined, indexed) = match index {
+        let (scored, examined, indexed, approximate) = match index {
             Some(i) => {
                 if let Some(d) = inner.vecs[i].dims {
                     if d != query.dims() {
@@ -1758,9 +1913,28 @@ impl Engine {
                 }
                 let index_ref = &inner.vecs[i];
                 let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
-                let scored = index_ref.scores(&q.pattern, &query, live);
-                let n = scored.len();
-                (scored, n, true)
+                // The graph answers searches over its whole pattern, with the
+                // metric it was built for. Anything else compares every vector.
+                let graph = index_ref
+                    .graph()
+                    .filter(|g| !q.exact && g.params.metric == q.metric && q.pattern == index_ref.pattern);
+                match graph {
+                    Some(g) => {
+                        let ef = if q.ef == 0 { hnsw::DEFAULT_EF_SEARCH } else { q.ef };
+                        let found = g.search(&query.vector, limit, ef, live);
+                        let scored: Vec<(String, f32)> = found
+                            .keys
+                            .into_iter()
+                            .filter_map(|k| index_ref.get(&k).map(|(v, n)| (k.clone(), query.score(v, n))))
+                            .collect();
+                        (scored, found.compared, true, true)
+                    }
+                    None => {
+                        let scored = index_ref.scores(&q.pattern, &query, live);
+                        let n = scored.len();
+                        (scored, n, true, false)
+                    }
+                }
             }
             None => {
                 let prefix = glob_prefix(&q.pattern).to_string();
@@ -1780,10 +1954,10 @@ impl Engine {
                         }
                     }
                 }
-                (scored, examined, false)
+                (scored, examined, false, false)
             }
         };
-        let compared = scored.len();
+        let compared = if approximate { examined } else { scored.len() };
         let mut rows = Vec::new();
         for (key, score) in vector::top_k(scored, limit, &query) {
             let Some(e) = inner.live(&key, now) else { continue };
@@ -1791,7 +1965,7 @@ impl Engine {
                 rows.push((key, score, doc));
             }
         }
-        Ok(VectorResult { rows, indexed, examined, compared })
+        Ok(VectorResult { rows, indexed, approximate, examined, compared })
     }
 
     fn find_index(inner: &Inner, cond: &Cond) -> Option<usize> {
@@ -1939,6 +2113,68 @@ fn maintenance(weak: Weak<Engine>, signal: Arc<Signal>) {
     }
 }
 
+const GRAPHS_MAGIC: &[u8; 8] = b"KVGRAPH1";
+
+/// An HNSW graph read back from the graphs file.
+struct SavedGraph {
+    pattern: String,
+    field: String,
+    dims: Option<usize>,
+    rejected: usize,
+    graph: Hnsw,
+}
+
+/// Reads the graphs file when it belongs to this data file: the same log
+/// identity, and written at a point the log still reaches. Returns that
+/// point and the graphs; `None` when the graphs must be built again.
+fn read_graphs(file: &Path, file_id: u64, file_len: u64) -> Option<(u64, Vec<SavedGraph>)> {
+    let buf = fs::read(file).ok()?;
+    let (body, crc) = buf.split_at(buf.len().checked_sub(4)?);
+    if crc32fast::hash(body).to_le_bytes() != crc {
+        return None;
+    }
+    let mut r = hnsw::Reader::new(body);
+    if r.take(8)? != GRAPHS_MAGIC || r.u64()? != file_id {
+        return None;
+    }
+    let since = r.u64()?;
+    if since > file_len {
+        return None;
+    }
+    let count = r.u32()?;
+    let mut list = Vec::new();
+    for _ in 0..count {
+        let pattern = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+        let field = String::from_utf8(r.bytes()?.to_vec()).ok()?;
+        let dims = match r.u32()? {
+            0 => None,
+            d => Some(d as usize),
+        };
+        let rejected = r.u64()? as usize;
+        let graph = Hnsw::read(&mut r)?;
+        list.push(SavedGraph { pattern, field, dims, rejected, graph });
+    }
+    Some((since, list))
+}
+
+/// The kind of a vector index from its saved definition.
+fn kind_from_json(def: &Json) -> VectorIndexKind {
+    if def["kind"].as_str() != Some("hnsw") {
+        return VectorIndexKind::Exact;
+    }
+    let mut p = hnsw::Params::default();
+    if let Some(m) = def["metric"].as_str().and_then(Metric::parse) {
+        p.metric = m;
+    }
+    if let Some(m) = def["m"].as_u64() {
+        p.m = m as usize;
+    }
+    if let Some(ef) = def["ef_construction"].as_u64() {
+        p.ef_construction = ef as usize;
+    }
+    VectorIndexKind::Hnsw(p)
+}
+
 /// A similarity search: `<pattern>.<field>` closest to `vector`.
 #[derive(Clone, Debug)]
 pub struct VectorQuery {
@@ -1948,6 +2184,30 @@ pub struct VectorQuery {
     pub metric: Metric,
     /// Number of results wanted; 0 means 10.
     pub limit: usize,
+    /// Candidates an HNSW search keeps; 0 means the default (100).
+    pub ef: usize,
+    /// Compare every vector even when an HNSW index exists.
+    pub exact: bool,
+}
+
+impl VectorQuery {
+    pub fn new(pattern: &str, field: &str, vector: Vec<f32>, metric: Metric, limit: usize) -> VectorQuery {
+        VectorQuery { pattern: pattern.into(), field: field.into(), vector, metric, limit, ef: 0, exact: false }
+    }
+}
+
+/// A vector index as `indexes` shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VectorIndexInfo {
+    pub pattern: String,
+    pub field: String,
+    pub kind: VectorIndexKind,
+    pub vectors: usize,
+    pub dims: Option<usize>,
+    /// Documents skipped because their vector had another length.
+    pub rejected: usize,
+    /// HNSW: deleted or replaced vectors waiting for the graph to be rebuilt.
+    pub tombstones: usize,
 }
 
 #[derive(Debug)]
@@ -1956,6 +2216,8 @@ pub struct VectorResult {
     pub rows: Vec<(String, f32, Json)>,
     /// Whether an in-memory vector index was used.
     pub indexed: bool,
+    /// Whether an HNSW graph answered: fast, very rarely missing a match.
+    pub approximate: bool,
     /// Keys matching the pattern that were looked at.
     pub examined: usize,
     /// Vectors actually compared (right field, right number of dimensions).

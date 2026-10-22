@@ -1464,7 +1464,7 @@ Real embeddings come from a model (OpenAI, Mistral, a local model...) and have 3
 ### 12.2 Searching
 
 ```text
-get similar <pattern>.<field> to <vector> [limit N] [metric cosine|dot|l2] [return f1, f2]
+get similar <pattern>.<field> to <vector> [limit N] [metric cosine|dot|l2] [ef N] [exact] [return f1, f2]
 ```
 
 ```text
@@ -1511,15 +1511,61 @@ doc:* (embedding) - vector index, 3 vectors, 3 dimensions
 * Memory needed: about 4 bytes per number, so 100 000 vectors of 768 dimensions take about 300 MB.
 * The definition is saved; the index is rebuilt when KivaDB starts. `drop vector index on doc: (embedding)` removes it.
 
-### 12.5 How fast, and the limits
+This index is **exact**: every vector is compared, so the results are always the true closest ones.
 
-The search is **exact**: every candidate vector is compared, so the results are always the true closest ones. On an ordinary computer, with an index, a search over 3 000 vectors of 384 dimensions takes a few milliseconds; over 100 000 vectors, expect tens of milliseconds. That covers the memory of an assistant, a documentation search or a product catalogue.
+### 12.5 Approximate index (HNSW) for large collections
 
-For millions of vectors an **approximate** index (HNSW) is the usual answer: it gives up a little accuracy for much more speed. KivaDB 1.4.0 does not have one yet; see the [roadmap](ROADMAP.md).
+Comparing every vector costs time in proportion to their number. Beyond about a hundred thousand vectors, an **HNSW index** (*Hierarchical Navigable Small World*) answers much faster by comparing only a small part of them:
 
-### 12.6 From programs
+```text
+kiva> create vector index on doc: (embedding) using hnsw
+HNSW vector index created on doc:* (embedding): 250000 vectors in a graph (cosine, m 16, ef 200).
+kiva> get similar doc:*.embedding to [0.12, -0.4, ...] limit 5 return title
+...
+(5 results, cosine metric, 676 vectors compared, HNSW index, approximate)
+```
 
-The structured request `similar` returns the same results as JSON (`{"op": "similar", "target": "doc:*.embedding", "vector": [...], "limit": 5, "metric": "cosine"}`), on port 2911 or with `POST /v1/api`. The Node.js driver has `db.similar(target, vector, {limit, metric})`, and Kiva Studio has a Similarity tab in its Query screen.
+**How it works.** Each vector becomes a point of a graph, linked to a few of its closest neighbours. The graph has layers, like the express lines of a metro: the top layer holds a few points far apart, each lower layer more of them, the bottom one all. A search starts at the top, jumps towards the query on each layer, then explores the neighbourhood it reached on the bottom layer, keeping the `ef` best candidates. It looks at a few thousand vectors instead of all of them.
+
+**The price: approximate results.** Now and then, one of the true closest vectors is missed and the next one is returned instead. How often depends on the data. Embeddings gather around topics, and on such vectors the defaults found 100 % of the true 10 closest in our measurements (12.6). On vectors spread evenly at random, the hardest case, they found 28 %; `ef 800` brought it to 87 %, at the cost of slower searches. Check on your own data: compare a few searches with and without `exact`, and raise `ef` if too much is missed.
+
+| Option | Where | Default | Effect |
+| :--- | :--- | :--- | :--- |
+| `metric cosine|dot|l2` | `create` | `cosine` | The metric the graph is built for. Searches with another metric compare every vector |
+| `m N` | `create` | 16 (2 to 100) | Links per point. More: better results and more memory |
+| `ef N` | `create` | 200 (10 to 2000) | Candidates while building. More: a better graph, built more slowly |
+| `ef N` | `get similar` | 100 | Candidates while searching. More: fewer misses, slower |
+| `exact` | `get similar` | | Compare every vector this time, for example to check the results |
+
+```text
+kiva> create vector index on img: (features) using hnsw metric l2 m 32 ef 400
+kiva> get similar img:*.features to [...] limit 10 ef 300
+kiva> get similar img:*.features to [...] limit 10 exact
+```
+
+* **Writes.** A new or changed vector is added to the graph at once; a deleted or replaced one stays in it as a mark, still used to find the way but never returned. When those marks reach a third of the graph, the maintenance task rebuilds it from the live vectors; on a large graph this takes a while, and the commands of that workspace wait meanwhile. Changing another field of a document does not touch the graph.
+* **Restarts.** The graph is saved next to the data (`<file>.graphs`) when the index is created, when KivaDB stops, after a compaction, and from time to time after many changes. At start, KivaDB reads it back and replays only the writes made after it was saved, instead of building the graph again. A missing or damaged file is not an error: the graph is built again from the documents.
+* **When it is used.** A search uses the graph when its pattern is the index's own (`doc:*` for an index on `doc:`) and its metric is the graph's. A narrower pattern (`doc:2026*`) or another metric compares every vector of the index, exactly, as in 12.4.
+* **Building.** Creating the index builds the graph at once, on one processor core, and the workspace waits meanwhile: about 0.6 ms per vector of 128 dimensions with the defaults, more with longer vectors or a higher `ef`. Create it before loading millions of documents, or at a quiet time. Afterwards, each write adds its vector to the graph in about the same time.
+* **Memory.** The vectors (4 bytes per number) plus the links (about `m` × 8 bytes per vector): 1 million vectors of 768 dimensions take about 3.2 GB.
+* `indexes` shows the kind of each index and its settings.
+
+### 12.6 How fast
+
+Measured on an ordinary laptop (release build, one search at a time, 10 results), 100 000 vectors of 128 dimensions, HNSW with the defaults:
+
+| Vectors | Index | Vectors compared | Time per search | True 10 closest found |
+| :--- | :--- | :--- | :--- | :--- |
+| Grouped around topics, like embeddings | Exact | 100 000 | 105 ms | all |
+| | HNSW | 676 | 0.5 ms | 100 % |
+| Spread evenly at random (hardest case) | Exact | 100 000 | 105 ms | all |
+| | HNSW | 2 983 | 1.1 ms | 28 % (87 % with `ef 800`) |
+
+Building the graph took 57 s (155 s for the evenly spread vectors); stopping and restarting KivaDB with the saved graph took 0.5 s, instead of building it again. The exact search grows with the number of vectors; the HNSW search barely does. Rule of thumb: up to about 100 000 vectors, the exact index is fast enough and never misses; beyond, use HNSW. The test `hnsw_speed` in `tests/power.rs` repeats the measurement on your machine (`cargo test --release --test power hnsw_speed -- --ignored --nocapture`; `HNSW_N` and `HNSW_DIMS` set the sizes, `HNSW_DATA=uniform` the evenly spread vectors).
+
+### 12.7 From programs
+
+The structured request `similar` returns the same results as JSON (`{"op": "similar", "target": "doc:*.embedding", "vector": [...], "limit": 5, "metric": "cosine"}`, plus `"ef"` and `"exact"`; the answer says `"approximate": true` when an HNSW index answered), on port 2911 or with `POST /v1/api`. The Node.js driver has `db.similar(target, vector, {limit, metric, ef, exact})`, and Kiva Studio has a Similarity tab in its Query screen.
 
 ---
 
@@ -3943,8 +3989,9 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `drop index on <pat> (<field>)` | Remove it (admin) |
 | `indexes` | List indexes |
 | `explain <query>` | Show the execution plan |
-| `get similar <pat>.<field> to <vector> [limit N] [metric m] [return f1, f2]` | Vector similarity search |
-| `create vector index on <pat> (<field>)` | Keep vectors in memory (admin) |
+| `get similar <pat>.<field> to <vector> [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search |
+| `create vector index on <pat> (<field>)` | Keep vectors in memory, exact search (admin) |
+| `create vector index on <pat> (<field>) using hnsw [metric m] [m N] [ef N]` | Approximate index for large collections (admin) |
 | `drop vector index on <pat> (<field>)` | Remove it (admin) |
 | `convert <key> to msgpack\|json` | Change a document's encoding |
 
@@ -4043,7 +4090,7 @@ KivaDB 1.4.0 is a single-node database with replicas. Knowing what it does not d
 * **Automatic failover.** When a master dies, a person (or your own tooling) promotes a replica.
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no Raft consensus, no distributed queries. Every node holds the whole database.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
-* **Approximate vector indexes (HNSW)** for many millions of vectors ([12.5](#125-how-fast-and-the-limits)).
+* **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).
 * **The full Redis command set**: sets, sorted sets, streams, sharded publish/subscribe and `WATCH` are missing, and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).

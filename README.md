@@ -13,7 +13,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 * **Stores typed data**: strings, numbers, booleans, null, arrays, objects (JSON documents) and raw bytes.
 * **Keeps it safe**: every record is checksummed, a crash or a killed process loses nothing, and transactions are atomic.
 * **Finds it fast**: keys are kept sorted (range queries, pagination), documents can be filtered, counted, summed and indexed.
-* **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes.
+* **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes: exact, or HNSW for large collections.
 * **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged (RESP2 and RESP3): strings, counters, expiry, hashes, lists, transactions, Lua scripts (`EVAL`), publish/subscribe and numbered databases. Checked with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.
 * **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
 * **Scripts in files**: commands can span several lines, and `.kva` files hold commands to run with `kivadb run data.kva`, from the shell or from Kiva Studio.
@@ -106,7 +106,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 
 ## Scope of this release
 
-KivaDB 1.4.0 is a single-node database with replicas. Automatic leader election, clustering, SQL / the PostgreSQL protocol and approximate vector indexes are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
+KivaDB 1.4.0 is a single-node database with replicas. Automatic leader election, clustering and SQL / the PostgreSQL protocol are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
 
 ## License
 

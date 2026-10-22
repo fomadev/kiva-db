@@ -203,10 +203,14 @@ class KivaClient extends EventEmitter {
    * Vector similarity search.
    * @param {string} target "<pattern>.<field>", e.g. "doc:*.embedding"
    * @param {number[]} vector the query vector
-   * @param {object} [options] limit (10), metric ("cosine" | "dot" | "l2")
+   * @param {object} [options] limit (10), metric ("cosine" | "dot" | "l2"),
+   *   ef (candidates of an HNSW search, default 100), exact (compare every vector)
    */
   async similar(target, vector, options = {}) {
-    const r = await this.api({ op: "similar", target, vector, limit: options.limit || 10, metric: options.metric || "cosine" });
+    const req = { op: "similar", target, vector, limit: options.limit || 10, metric: options.metric || "cosine" };
+    if (options.ef) req.ef = options.ef;
+    if (options.exact) req.exact = true;
+    const r = await this.api(req);
     return r.results;
   }
 

@@ -27,7 +27,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 | Item | What it brings | What it takes |
 | :--- | :--- | :--- |
 | **Python driver** (PyPI) | Python is the language of AI work, where vector search matters most | A port of the Node.js driver (~300 lines) and a test environment with Python, which was not available when 1.0.0 was built. Meanwhile, Python's `redis` package works through the Redis protocol, and the REST API works with `requests` |
-| **Approximate vector index (HNSW)** | Similarity search over millions of vectors in milliseconds | A graph index kept in memory and updated on every write, plus its persistence. A Rust implementation (or the `hnsw_rs` crate) fits the current design |
+| **Vector indexes larger than memory** | Collections of vectors that do not fit in RAM | Quantisation (8-bit or product quantisation) to shrink vectors, or a disk-based graph (DiskANN). The HNSW index keeps everything in memory |
 | **Go and Java drivers** | Reach backend teams in those languages | Same protocol work as the Node.js driver, per language |
 | **More Redis commands** | Sets, sorted sets (leaderboards), streams | New value types or mappings, and their tests |
 | **Kiva Studio on mobile** | Check alerts and act from a phone | Flutter already targets Android and iOS; the work is a phone-sized layout and store publishing. Push notifications when the app is closed need a server and Apple/Google accounts |
