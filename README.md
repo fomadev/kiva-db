@@ -6,6 +6,8 @@
 
 KivaDB is a multi-model database you can start in one command: typed key-value data, JSON documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
 
+📖 **Learn KivaDB:** Discover the official book and join the community announcement on [LinkedIn](https://www.linkedin.com/feed/update/urn:li:activity:7519407067930157056).
+
 **Current release: 1.5.1** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
 
 ## What it does
