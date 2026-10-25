@@ -230,12 +230,29 @@ class KivaClient extends EventEmitter {
   }
 
   /**
-   * Semantic cache: remembers the answer to a question.
-   * @param {object} question text, vector, ttl (seconds), depends (key patterns)
+   * Semantic cache: remembers the answer to a question. Returns its id, or
+   * null when `since` was given and data it depends on changed after it.
+   * @param {object} question text, vector, ttl (seconds), depends (key patterns), since
    */
   async semanticStore(cache, answer, question = {}) {
     const r = await this.api({ op: "semantic", action: "store", cache, answer, ...question });
     return r.id;
+  }
+
+  /**
+   * Semantic cache in one call: the cached answer, or `compute()`'s, which
+   * is then stored, unless data it depends on changed while it was computed.
+   * @param {object} question text, vector, threshold, ttl, depends
+   * @param {() => Promise<unknown>} compute calls the model
+   */
+  async semanticCached(cache, question, compute) {
+    const { ttl, depends, ...ask } = question;
+    const r = await this.api({ op: "semantic", action: "lookup", cache, ...ask });
+    if (r.hit) return r.answer;
+    const answer = await compute();
+    const { threshold, ...q } = ask;
+    await this.api({ op: "semantic", action: "store", cache, answer, ...q, ttl, depends, since: r.since });
+    return answer;
   }
 
   /** Receives "change" events for keys matching the pattern. */

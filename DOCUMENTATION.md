@@ -1675,9 +1675,9 @@ KivaDB does not compute embeddings: your application already does (it needs them
 
 ```text
 kiva> semantic lookup faq vector [0.12, -0.40, ...]
-Miss (closest similarity 0.6000, threshold 0.98)
+Miss (closest similarity 0.6000, threshold 0.98; since 1792966517756800)
                        ...the application calls its model, then:
-kiva> semantic store faq text "What is the capital of the DRC?" vector [0.12, -0.40, ...] answer "Kinshasa" depends "geo:*"
+kiva> semantic store faq text "What is the capital of the DRC?" vector [0.12, -0.40, ...] answer "Kinshasa" depends "geo:*" since 1792966517756800
 Stored as faq:1 (expires in 300 s).
 kiva> semantic lookup faq vector [0.12, -0.39, ...]
 Hit (similarity 0.9950, faq:1): "Kinshasa"
@@ -1688,14 +1688,16 @@ Hit (similarity 1.0000, faq:1): "Kinshasa"
 | Command | Effect |
 | :--- | :--- |
 | `semantic lookup <cache> [text "<q>"] [vector [...]] [threshold <0-1>]` | The stored answer of this question or a near-identical one (`Hit`), or `Miss` with the closest similarity seen |
-| `semantic store <cache> [text "<q>"] [vector [...]] answer <value> [ttl <sec>] [depends "<pattern>", ...]` | Remember an answer (any value: text, number, JSON document) |
-| `semantic stats` | Entries, hits, misses and hit rate of each cache |
+| `semantic store <cache> [text "<q>"] [vector [...]] answer <value> [ttl <sec>] [depends "<pattern>", ...] [since <token>]` | Remember an answer (any value: text, number, JSON document); with `since`, only if the data it depends on did not change after the lookup |
+| `semantic stats` | Entries, hits, misses and hit rate of each cache, answers dropped by writes, distinct dependencies |
 | `semantic clear [<cache>]` | Forget one cache, or every cache of the workspace |
 
 * **Several caches**, by name (`faq`, `support`, `llm`...), per workspace. A cache holds vectors of one length: those of one model.
 * **Similarity**: cosine, through an HNSW graph ([12.5](#125-approximate-index-hnsw-for-large-collections)). `semantic.cache.threshold` (0.98) decides what counts as the same question; lower it and different questions start to share answers. The right value depends on your embedding model: look at the similarities `semantic lookup` reports for a few rewordings and a few different questions, and set the threshold between the two.
-* **Freshness**: an answer lives `semantic.cache.ttl` seconds (300; `ttl` per entry, `ttl 0` = until invalidated). An answer built from your data names it with `depends`: as soon as a key matching one of those patterns is written or deleted, the answer is dropped. Storing the same question again replaces its answer. Beyond `semantic.cache.max_entries` (10 000 per cache), the oldest answers go first.
-* **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) (and the same filter) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
+* **Freshness**: an answer lives `semantic.cache.ttl` seconds (300; `ttl` per entry, `ttl 0` = until invalidated). Storing the same question again replaces its answer. Beyond `semantic.cache.max_entries` (10 000 per cache), the oldest answers go first.
+* **Dependencies**: an answer built from your data names it with `depends`, as keys (`"kb:42"`) or patterns (`"kb:*"`, `"user:?"`). As soon as a matching key is written, deleted, or expires with its TTL (at the latest a second after its deadline), the answer is dropped, by any client: shell, structured requests, Redis commands, transactions, triggers. `del all keys` (`FLUSHDB`) drops every answer of the workspace. A write costs the cache one comparison per distinct pattern, and one hash lookup for all the plain keys together, whatever the number of answers: 3 µs per write with 10 000 answers depending on 10 100 keys and patterns, against 14.7 ms when every answer was compared (test `invalidation_speed`, release build).
+* **Data that changes while the model thinks**: between the lookup that missed and the store, the model works, often for seconds. If a document the answer depends on is written meanwhile, the answer was built from its old version, and storing it would keep a wrong answer until its TTL. Give the store the `since` token the miss printed: if a key matching `depends` changed after it, the answer is not kept (`Not stored: kb:42 changed after the lookup...`), and the next question goes to the model with the new data. Without `since`, the answer is kept as before. A token older than the last 10 000 writes of the workspace, or from before a restart or a `del all keys`, can no longer be checked: the store is refused rather than guessed. `get similar` with `semantic.cache.enabled` does this by itself.
+* **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) (and the same filter) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale, also one made during the search, whose results are then not kept. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
 * The cache lives in memory: it is not saved, replicated or backed up, and fills again after a restart.
 
 **How much it saves.** Measured (release build) on 2 000 cached questions of 128 dimensions: a lookup takes about 0.13 ms. Of 500 questions (400 rewordings of known ones, 100 new), the 400 rewordings were all recognised with the right answer and the 100 new ones all went to the model: 80 % fewer model calls. The test `a_cache_in_front_of_a_slow_model_saves_most_of_its_calls` in `tests/semantic_cache.rs` repeats it.
@@ -1756,12 +1758,11 @@ KivaDB's vector search is that of a database that also holds the documents, not 
 
 As a rule of thumb, up to a few million vectors of a few hundred dimensions, on one machine, with filters on a few fields, KivaDB covers the need without a second system. Beyond, or for hybrid search, a dedicated vector engine is the right tool, and KivaDB can keep the documents.
 
-**From programs.** The structured request `{"op": "semantic", "action": "lookup" | "store", "cache": "faq", "text": "...", "vector": [...], "threshold": 0.98, "answer": ..., "ttl": 300, "depends": ["geo:*"]}` answers `{"hit": true, "answer": ..., "similarity": 0.995, "id": "faq:1"}` or `{"hit": false, "best": 0.6}`. In Node.js:
+**From programs.** The structured request `{"op": "semantic", "action": "lookup" | "store", "cache": "faq", "text": "...", "vector": [...], "threshold": 0.98, "answer": ..., "ttl": 300, "depends": ["geo:*"], "since": 1792966517756800}`. A lookup answers `{"hit": true, "answer": ..., "similarity": 0.995, "id": "faq:1"}` or `{"hit": false, "best": 0.6, "since": 1792966517756800}`; a store answers `{"id": "faq:1", "stored": true}`, or `{"id": null, "stored": false, "stale": "kb:42 changed"}` when its data changed after `since`. In Node.js, `semanticCached` does the three steps:
 
 ```js
-const cached = await db.semanticLookup("faq", { vector: embedding });
-const answer = cached ? cached.answer : await askTheModel(question);
-if (!cached) await db.semanticStore("faq", answer, { text: question, vector: embedding, depends: ["kb:*"] });
+const answer = await db.semanticCached("faq", { text: question, vector: embedding, depends: ["kb:*"] },
+  () => askTheModel(question));
 ```
 ---
 

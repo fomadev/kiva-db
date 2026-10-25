@@ -584,6 +584,8 @@ struct Inner {
     /// Keys with a TTL, by deadline: the expired ones are found without
     /// looking at the others.
     expiry: BTreeSet<(i64, String)>,
+    /// Told the key of each document dropped because its TTL elapsed.
+    on_expire: Vec<ExpiryListener>,
     seq: u64,
     compression: Compression,
     auto_compact: bool,
@@ -623,6 +625,7 @@ struct Signal {
 }
 
 type Listener = Box<dyn Fn(&Op) + Send + Sync>;
+type ExpiryListener = Box<dyn Fn(&str) + Send + Sync>;
 
 pub struct Engine {
     path: PathBuf,
@@ -1038,6 +1041,7 @@ impl Inner {
         let e = self.index.get(key)?;
         if e.is_expired(now) {
             self.idx_remove(key);
+            self.expired(key);
             return None;
         }
         Some(e.clone())
@@ -1158,8 +1162,15 @@ impl Inner {
             self.expiry.iter().take_while(|(t, _)| *t <= now).take(PURGE_BATCH).map(|(_, k)| k.clone()).collect();
         for k in &dead {
             self.idx_remove(k);
+            self.expired(k);
         }
         dead.len()
+    }
+
+    fn expired(&self, key: &str) {
+        for l in &self.on_expire {
+            l(key);
+        }
     }
 
     fn purge_all_expired(&mut self, now: i64) {
@@ -1339,6 +1350,7 @@ impl Engine {
             index,
             live_bytes: 0,
             expiry: BTreeSet::new(),
+            on_expire: Vec::new(),
             seq,
             compression: opts.compression,
             auto_compact: opts.auto_compact,
@@ -1451,6 +1463,13 @@ impl Engine {
     /// not call back into the engine.
     pub fn add_listener(&self, f: impl Fn(&Op) + Send + Sync + 'static) {
         self.listeners.write().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
+    }
+
+    /// Registers a callback told the key of every document dropped because
+    /// its TTL elapsed (no `Op` is emitted for those: replicas and the log
+    /// expire them by themselves). Same rules as [`Engine::add_listener`].
+    pub fn add_expiry_listener(&self, f: impl Fn(&str) + Send + Sync + 'static) {
+        self.lock().on_expire.push(Box::new(f));
     }
 
     fn emit(&self, op: &Op) {

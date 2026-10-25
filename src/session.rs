@@ -226,34 +226,46 @@ impl Session {
             name.push_str(&format!(" where {} {} {}", c.field, c.op.symbol(), c.value));
         }
         let question = Question { text: None, vector: Some(q.vector.clone()) };
-        if let Lookup::Hit { similarity, answer, .. } =
-            self.inst.semantic.lookup(&self.ws, &name, &question, s.threshold)?
-        {
-            let rows = answer["rows"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|r| {
-                    let key = r["key"].as_str().unwrap_or("").to_string();
-                    (key, r["score"].as_f64().unwrap_or(0.0) as f32, r["doc"].clone())
-                })
-                .collect();
-            let r = crate::engine::VectorResult {
-                rows,
-                indexed: answer["indexed"].as_bool().unwrap_or(false),
-                approximate: answer["approximate"].as_bool().unwrap_or(false),
-                examined: 0,
-                compared: 0,
-                filter: None,
-            };
-            return Ok((r, Some(similarity)));
-        }
+        let since = match self.inst.semantic.lookup(&self.ws, &name, &question, s.threshold)? {
+            Lookup::Miss { since, .. } => since,
+            Lookup::Hit { similarity, answer, .. } => {
+                let rows = answer["rows"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        let key = r["key"].as_str().unwrap_or("").to_string();
+                        (key, r["score"].as_f64().unwrap_or(0.0) as f32, r["doc"].clone())
+                    })
+                    .collect();
+                let r = crate::engine::VectorResult {
+                    rows,
+                    indexed: answer["indexed"].as_bool().unwrap_or(false),
+                    approximate: answer["approximate"].as_bool().unwrap_or(false),
+                    examined: 0,
+                    compared: 0,
+                    filter: None,
+                };
+                return Ok((r, Some(similarity)));
+            }
+        };
         let r = self.engine.similar(q)?;
         let rows: Vec<serde_json::Value> =
             r.rows.iter().map(|(k, score, doc)| serde_json::json!({ "key": k, "score": score, "doc": doc })).collect();
         let answer = serde_json::json!({ "rows": rows, "indexed": r.indexed, "approximate": r.approximate });
-        // Any write under the searched pattern makes the answer stale.
-        self.inst.semantic.store(&self.ws, &name, &question, answer, s.ttl, vec![q.pattern.clone()], s.max_entries)?;
+        // Any write under the searched pattern makes the answer stale, also
+        // one made during the search: then it is not kept at all.
+        let depends = vec![q.pattern.clone()];
+        self.inst.semantic.store_since(
+            &self.ws,
+            &name,
+            &question,
+            answer,
+            s.ttl,
+            depends,
+            s.max_entries,
+            Some(since),
+        )?;
         Ok((r, None))
     }
 

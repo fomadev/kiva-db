@@ -95,6 +95,16 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     assert.deepEqual(hit.answer, { text: "Capital?" });
     assert.ok(hit.similarity > 0.99);
     assert.equal(await db.semanticLookup("faq", { vector: [0, 1, 0] }), null);
+    // One call: computed once, then cached; not kept if its data changed meanwhile.
+    let calls = 0;
+    const model = async () => (calls += 1, "cat");
+    const ask = { text: "First doc?", depends: ["doc:*"] };
+    assert.equal(await db.semanticCached("rag", ask, model), "cat");
+    assert.equal(await db.semanticCached("rag", ask, model), "cat");
+    assert.equal(calls, 1);
+    const changing = async () => (await db.set("doc:3", { t: "new" }), "stale");
+    assert.equal(await db.semanticCached("rag", { text: "Newest doc?", depends: ["doc:*"] }, changing), "stale");
+    assert.equal(await db.semanticLookup("rag", { text: "Newest doc?" }), null);
     assert.equal(best.key, "doc:1");
     assert.equal(best.value.t, "cat");
   });

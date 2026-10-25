@@ -54,7 +54,8 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | `scan(pattern, limit)` | Keys with type, size, modification time and TTL |
 | `similar(target, vector, {limit, metric, ef, exact})` | Vector search: `similar("doc:*.embedding", [0.1, ...], {limit: 5})` returns `{key, score, value}` best first. Metrics: `cosine` (default), `dot`, `l2`. With an HNSW index, `ef` trades speed for accuracy and `exact: true` compares every vector |
 | `exec(command)` | Any command of the KivaDB shell language; resolves to the output lines, rejects with `KivaError` on an error |
-| `semanticLookup(cache, {text, vector, threshold})` / `semanticStore(cache, answer, {text, vector, ttl, depends})` | Semantic cache: reuse the answer of a question already asked, or of a near-identical one (DOCUMENTATION 12.8) |
+| `semanticLookup(cache, {text, vector, threshold})` / `semanticStore(cache, answer, {text, vector, ttl, depends, since})` | Semantic cache: reuse the answer of a question already asked, or of a near-identical one (DOCUMENTATION 12.8) |
+| `semanticCached(cache, {text, vector, threshold, ttl, depends}, compute)` | The cached answer, or `compute()`'s, stored unless the data it depends on changed while it was computed |
 | `api({op, ...})` | Structured request (`whoami`, `workspaces`, `scan`, `get`, `put`, `del`, `similar`, `stats`, `users`) |
 | `subscribe(pattern)` | Then `db.on("change", e => ...)` receives `{event, key, type}` for every set, update and delete |
 | `stats()`, `ping()`, `close()` | |
