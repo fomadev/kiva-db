@@ -14,9 +14,12 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * `storage.max_memory_mb` bounds a workspace's memory: past it, the value cache gives its memory back, then new keys are refused with an `OOM:` error; changing, reading and deleting keys still work ([18.6](DOCUMENTATION.md#186-a-memory-bound)).
 * Redis clients reach vector search and the semantic cache: `KIVA.SIMILAR <pattern>.<field> <vector> [LIMIT n] [METRIC m] [EF n] [EXACT]` answers `[key, score, document]` triples, and `KIVA.API <json>` runs any structured request (`similar`, `semantic`, `query`...) ([23.10](DOCUMENTATION.md#2310-vector-search-and-the-semantic-cache-from-a-redis-client)).
 * Queries say plainly what the language leaves out: several conditions (`and`, `or`), joins (two patterns, or a value taken from other documents), pipelines (`group by`, `order by`...), other operators (`in`, `like`...) and distributed queries are refused with what to do instead, in the shell and in the structured `query` request ([11.6](DOCUMENTATION.md#116-what-a-query-does-not-do)).
+* Redis clients: unsupported commands are refused by an explicit list of the commands KivaDB runs, with the error Redis gives for an unknown command. For blocking commands (`BLPOP`, `BZPOPMIN`...), streams (`XADD`...), `WATCH`, cluster, functions, replication and module commands, the message also says why and what to use instead. `COMMAND COUNT` and `COMMAND LIST` answer that list ([23.3](DOCUMENTATION.md#233-supported-commands)).
+* `resp.max_collection_members` (100 000 by default) bounds the members of a Redis set, sorted set or list: a command that would go past it changes nothing and answers an error; a key above a lowered limit can still shrink ([23.8](DOCUMENTATION.md#238-sets-and-sorted-sets)).
 
 ### Fixed
 
+* Redis clients: a refused command inside `MULTI` was queued and failed only at `EXEC`, while the rest of the transaction was applied. It is now refused at once, and `EXEC` answers `EXECABORT` and applies nothing, as in Redis.
 * Two clients changing different fields of the same document at the same moment (`json set`, `json delete`) could lose one of the two changes. Each field change is now one step on the server.
 
 ### Changed

@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+#[path = "resp_commands.rs"]
+mod commands;
 #[path = "resp_sets.rs"]
 mod sets;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -403,6 +405,8 @@ pub struct Conn {
     pub sess: Session,
     /// Commands collected between MULTI and EXEC.
     queued: Option<Vec<Vec<Vec<u8>>>>,
+    /// A command was refused while queuing: EXEC will discard the transaction.
+    aborted: bool,
     /// The workspace of database 0: where the user arrived. Known once SELECT is used.
     home: Option<String>,
     /// Whether the client switched to RESP3 with `HELLO 3`.
@@ -494,7 +498,7 @@ fn arity(args: &[Vec<u8>], min: usize) -> std::result::Result<(), Reply> {
 
 impl Conn {
     pub fn new(sess: Session) -> Conn {
-        Conn { sess, queued: None, home: None, resp3: false, outbox: None, subs: 0, held: None }
+        Conn { sess, queued: None, aborted: false, home: None, resp3: false, outbox: None, subs: 0, held: None }
     }
 
     pub fn handle(&mut self, args: &[Vec<u8>]) -> Reply {
@@ -506,15 +510,23 @@ impl Conn {
                 name.to_ascii_lowercase()
             ));
         }
+        if self.sess.user.is_none() && !matches!(name.as_str(), "AUTH" | "HELLO" | "PING" | "QUIT" | "ECHO") {
+            return Reply::Error("NOAUTH Authentication required.".into());
+        }
+        // Commands KivaDB does not run are refused here, before they are
+        // queued, so that a MULTI fails as a whole (EXECABORT), as in Redis.
+        if let Some(refused) = commands::refuse(&name, args) {
+            if self.queued.is_some() {
+                self.aborted = true;
+            }
+            return refused;
+        }
         // Inside MULTI, commands are queued until EXEC.
         if let Some(queue) = self.queued.as_mut() {
             if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT") {
                 queue.push(args.to_vec());
                 return Reply::Simple("QUEUED".into());
             }
-        }
-        if self.sess.user.is_none() && !matches!(name.as_str(), "AUTH" | "HELLO" | "PING" | "QUIT" | "ECHO") {
-            return Reply::Error("NOAUTH Authentication required.".into());
         }
         let inst = self.sess.inst.clone();
         let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
@@ -538,6 +550,34 @@ impl Conn {
             }
             Some(_) => Err(Reply::wrong_type()),
         }
+    }
+
+    /// Refuses to let the set, sorted set or list at `k` grow to `len`
+    /// members beyond `resp.max_collection_members`. Each command reads and
+    /// rewrites the whole value, so a huge one would make every command on it
+    /// slow and costly. A collection already above the limit (the limit was
+    /// lowered) may still shrink.
+    fn check_size(&mut self, k: &str, kind: &str, len: usize) -> std::result::Result<(), Reply> {
+        let limit = self.sess.inst.cfg().get_u64("resp", "max_collection_members") as usize;
+        if limit == 0 || len <= limit {
+            return Ok(());
+        }
+        let now = match self.get(k)? {
+            Some((Value::Doc(Json::Array(a)), _)) => a.len(),
+            Some((Value::Doc(j), _)) => match &j["members"] {
+                Json::Array(a) => a.len(),
+                Json::Object(o) => o.len(),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        if len <= now {
+            return Ok(());
+        }
+        Err(Reply::err(format!(
+            "the {kind} '{k}' would hold {len} members, more than resp.max_collection_members ({limit}). \
+             Every command reads and rewrites the whole value: split it over several keys, or raise the limit"
+        )))
     }
 
     /// The Redis type of a key: `hash` and `list` from the KivaDB type,
@@ -705,7 +745,10 @@ impl Conn {
                 }
             }
             "COMMAND" => Ok(match args.get(1).map(|a| String::from_utf8_lossy(a).to_ascii_uppercase()) {
-                Some(s) if s == "COUNT" => Reply::Int(0),
+                Some(s) if s == "COUNT" => Reply::Int(commands::SUPPORTED.len() as i64),
+                Some(s) if s == "LIST" => {
+                    Reply::array(commands::SUPPORTED.iter().map(|c| Reply::bulk(c.to_ascii_lowercase())).collect())
+                }
                 _ => Reply::array(Vec::new()),
             }),
             "INFO" => Ok(Reply::bulk(self.info())),
@@ -724,6 +767,7 @@ impl Conn {
                     return Err(Reply::err("MULTI calls can not be nested"));
                 }
                 self.queued = Some(Vec::new());
+                self.aborted = false;
                 Ok(Reply::ok())
             }
             "DISCARD" => match self.queued.take() {
@@ -731,7 +775,7 @@ impl Conn {
                 None => Err(Reply::err("DISCARD without MULTI")),
             },
             "EXEC" => self.exec(),
-            "WATCH" => Err(Reply::err("WATCH is not supported: KivaDB checks conflicts at EXEC time instead")),
+            // WATCH itself is refused by the filter: there is nothing to undo.
             "UNWATCH" => Ok(Reply::ok()),
             "SUBSCRIBE" | "PSUBSCRIBE" => {
                 arity(args, 2)?;
@@ -1216,6 +1260,7 @@ impl Conn {
                     }
                 }
                 let len = list.len();
+                self.check_size(&k, "list", len)?;
                 self.put(&k, Value::Doc(Json::Array(list)), exp)?;
                 Ok(Reply::Int(len as i64))
             }
@@ -1284,11 +1329,7 @@ impl Conn {
                 if let Some(r) = self.run_sets(name, args) {
                     return r;
                 }
-                let first = args.get(1).map(|a| format!("'{}' ", String::from_utf8_lossy(a))).unwrap_or_default();
-                Err(Reply::err(format!(
-                    "unknown command '{}', with args beginning with: {first}",
-                    String::from_utf8_lossy(&args[0])
-                )))
+                Err(commands::unknown(args))
             }
         }
     }
@@ -1419,6 +1460,8 @@ impl Conn {
                     let name = String::from_utf8_lossy(first).to_ascii_uppercase();
                     let reply = if NOT_IN_SCRIPTS.contains(&name.as_str()) {
                         Reply::err("This Redis command is not allowed from script")
+                    } else if let Some(refused) = commands::refuse(&name, &args) {
+                        refused
                     } else {
                         cell.borrow_mut().run(&name, &args).unwrap_or_else(|e| e)
                     };
@@ -1567,6 +1610,9 @@ impl Conn {
         let Some(queued) = self.queued.take() else {
             return Err(Reply::err("EXEC without MULTI"));
         };
+        if std::mem::take(&mut self.aborted) {
+            return Err(Reply::Error("EXECABORT Transaction discarded because of previous errors.".into()));
+        }
         if self.sess.txn.is_some() {
             return Err(Reply::err("a transaction is already open on this session"));
         }

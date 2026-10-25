@@ -241,6 +241,7 @@ impl Conn {
             self.sess.kv_del(k)?;
             return Ok(());
         }
+        self.check_size(k, if kind == "set" { "set" } else { "sorted set" }, members.len())?;
         let body = if kind == "set" {
             Json::Array(members.into_iter().map(|(m, _)| Json::String(m)).collect())
         } else {
