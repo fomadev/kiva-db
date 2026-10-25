@@ -604,3 +604,53 @@ fn reset_empties_the_database() {
     assert_eq!(e.len(), 1);
     assert_eq!(get_str(&e, "fresh").as_deref(), Some("start"));
 }
+
+#[test]
+fn synchronous_writes_share_their_disk_syncs() {
+    let dir = TempDir::new("group-commit");
+    let path = dir.path().join("store.kiva");
+    let opts = EngineOptions { sync_writes: true, auto_compact: false, ..Default::default() };
+    {
+        let e = Engine::open(&path, opts.clone()).unwrap();
+        let writers: Vec<_> = (0..8)
+            .map(|t| {
+                let e = e.clone();
+                std::thread::spawn(move || {
+                    for i in 0..100 {
+                        e.put(&format!("w{t}:{i:03}"), &s("v"), 0, false).unwrap();
+                        if i % 10 == 0 {
+                            e.delete(&format!("w{t}:{i:03}")).unwrap();
+                        }
+                    }
+                })
+            })
+            .collect();
+        // A compaction in the middle must neither block the writers nor lose a write.
+        let compactor = {
+            let e = e.clone();
+            std::thread::spawn(move || {
+                for _ in 0..3 {
+                    e.compact().unwrap();
+                }
+            })
+        };
+        for w in writers {
+            w.join().unwrap();
+        }
+        compactor.join().unwrap();
+        e.apply_batch(vec![BatchOp::Put { key: "batch".into(), value: s("b"), expires_at: 0, msgpack: false }], None)
+            .unwrap();
+        let st = e.stats();
+        assert!(st.sync_writes);
+        assert_eq!(st.durable_writes, 8 * 100 + 8 * 10 + 1);
+        assert!(st.disk_syncs >= 1 && st.disk_syncs <= st.durable_writes, "{} syncs", st.disk_syncs);
+
+        // Off again: writes no longer wait for the disk.
+        e.set_sync_writes(false);
+        e.put("async", &s("a"), 0, false).unwrap();
+        assert_eq!(e.stats().durable_writes, st.durable_writes);
+    }
+    let e = Engine::open(&path, opts).unwrap();
+    assert_eq!(e.len(), 8 * 90 + 2);
+    assert!(e.get("w7:099").unwrap().is_some() && e.get("w7:090").unwrap().is_none());
+}

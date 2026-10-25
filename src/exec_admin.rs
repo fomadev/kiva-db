@@ -518,7 +518,7 @@ impl Session {
                 (
                     "storage",
                     "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb"
-                    | "max_memory_mb",
+                    | "max_memory_mb" | "sync_writes",
                 ) => self.inst.apply_storage_config(),
                 // Read again at every use: nothing to restart.
                 ("security", _)

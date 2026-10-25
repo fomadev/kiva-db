@@ -421,6 +421,7 @@ impl Instance {
             e.set_compression(o.compression);
             e.set_cache_limit(o.cache_bytes);
             e.set_memory_limit(o.max_memory_bytes);
+            e.set_sync_writes(o.sync_writes);
         }
     }
 
