@@ -1517,6 +1517,27 @@ Query Plan
 
 `explain` also works with `count where`, `sum where`, `range` and `get <key>`. An index is used for `=`, `>`, `>=`, `<` and `<=`; the `!=` operator always scans.
 
+### 11.6 What a query does not do
+
+A query reads **one key pattern** and tests **one condition** on one field, against one value. That is a choice: every query is then a single pass over one index or one range of keys, in memory, and `explain` can say in advance what it will cost. KivaDB refuses the rest at once, and says what to do instead:
+
+| Refused | Example | Instead |
+| :--- | :--- | :--- |
+| Several conditions | `... = "dev" and user:*.age > 20`, `or`, `not` | One query per condition, combined in your application; or a field holding the combined value |
+| Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
+| Pipelines | `group by`, `order by`, `distinct`, `having`, `min`, `max` | `count where`, `sum where`; `range` and `keys` return keys in order |
+| Other operators | `in [...]`, `like`, `between`, a list of values | The six comparisons, one value |
+| Distributed queries | `@node2`, `across`, `shard`, `explain distributed` | Nothing to do: one server holds all of a workspace's data |
+
+```text
+kiva> get where user:*.role = "dev" and user:*.age > 20
+Error: 'and': a query tests one condition: 'and' / 'or' are not supported. Run one query per condition and combine the keys in your application, or store the combined value in a field of its own and query that field.
+kiva> get where user:*.name = order:*.user
+Error: 'order:*.user' names a field of other documents: joins are not supported: a query reads one key pattern and compares with a literal value. Keep related data in the same document, or read the related keys by name (get a and b).
+```
+
+Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` request follows the same rules: a request with a field such as `join`, `and`, `order_by` or `group_by`, or with an array or object as `value`, is refused.
+
 ---
 
 ## Chapter 12 — Vector search for AI
@@ -1866,6 +1887,7 @@ snapshot_interval = 300
 snapshot_every = 1000
 cache_values = false
 cache_size_mb = 256
+max_memory_mb = 0
 
 [workspaces]
 shop = C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop
@@ -1958,6 +1980,7 @@ network.port = 2911
 | `storage.snapshot_every` | `1000` | ...or after this many modifications | next start |
 | `storage.cache_values` | `false` | Keep recently read values in memory ([Chapter 18](#chapter-18--keeping-values-in-memory-value-cache)) | immediately |
 | `storage.cache_size_mb` | `256` | Memory budget of that cache, per workspace | immediately |
+| `storage.max_memory_mb` | `0` | Memory bound per workspace: beyond it, new keys are refused ([18.6](#186-a-memory-bound)); `0` = none | immediately |
 | `network.port` | `2911` | KivaDB protocol port | next start |
 | `network.bind` | `127.0.0.1` | Address to listen on | next start |
 | `security.auth_required` | `false` | Ask for a user name and password | immediately |
@@ -2546,6 +2569,62 @@ It takes effect immediately and can be turned off at any time (`config set cache
 
 A high hit rate means the cache is useful; a low one on a large database means the reads are spread over too many keys for the budget. Raise `cache_size_mb` if the machine has memory to spare, or leave the cache off: KivaDB is fast without it.
 
+### 18.5 Pinning keys in memory
+
+Some keys must always answer from memory: configuration, feature flags, sessions, a price list. **Pin** them:
+
+```text
+kiva> set conf:a {"currency": "CDF", "vat": 16} and conf:b "on"
+OK: conf:a saved.
+OK: conf:b saved.
+kiva> memory pin "conf:*"
+Pinned 'conf:*': 2 values (233 bytes) kept in memory, now and after every write.
+```
+
+* The values of the keys matching the pattern are read into memory at once, and kept there: a write stores the new value in memory too, a delete removes it, and new keys matching the pattern are added.
+* Pinned values are never pushed out, whether the value cache is on or off, and do not count against `cache_size_mb`.
+* Pinned patterns are saved with the workspace; at start, their values are read into memory again.
+* `memory unpin "conf:*"` lets them go back to being read from disk. Pinning and unpinning need the admin role.
+
+Pin small, hot sets of keys. Everything pinned stays in RAM, so a pattern matching millions of large documents would fill it.
+
+### 18.6 A memory bound
+
+`memory` shows where a workspace's memory goes (estimates):
+
+```text
+kiva> memory
+Memory of workspace 'default' (estimates)
+  Keys              : 379 bytes (3 keys)
+  Secondary indexes : 0 bytes
+  Vector indexes    : 0 bytes
+  Pinned values     : 131 bytes (1 values)
+  Value cache       : 0 bytes (given back first)
+  Total             : 510 bytes
+  Bound             : 1.00 MB (0.0% used)
+  Pinned patterns   : order:*
+```
+
+Every key always lives in memory ([18.1](#181-memory-and-disk-in-kivadb)), with the indexes and the pinned values. To make sure a workspace never takes more than the machine can give, set a bound:
+
+```text
+kiva> config set max_memory_mb 512
+OK: storage.max_memory_mb = 512
+```
+
+When the keys, indexes and pinned values reach it:
+
+* the value cache gives its memory back first;
+* then **new keys are refused**, with an error starting with `OOM:`. Changing a key that exists, reading and deleting still work, so you can make room;
+* pinning a pattern whose values would not fit is refused too.
+
+```text
+kiva> set brand:new 1
+Error: OOM: this workspace reached its memory bound (1023.99 KB of 1.00 MB used), so new keys are refused. Delete keys or expired data, drop an index, or raise storage.max_memory_mb.
+```
+
+The bound applies to each workspace and takes effect immediately; `0` (the default) means no bound. A replica always applies what its master sends, whatever its own bound: give replicas the same bound as the master, or none.
+
 ---
 
 ## Chapter 19 — How data is stored
@@ -2783,7 +2862,7 @@ The command language answers with text written for people. A program that needs 
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
 | `users` | - | `users`: name, role, grants, created, home workspace, whether the password is empty (admin only) |
-| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=`), `value`, `limit` | `rows`: key and document; `plan` |
+| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=`), `value`, `limit` | `rows`: key and document; `plan`. One pattern, one condition ([11.6](#116-what-a-query-does-not-do)) |
 | `explain` | the same as `query` | `plan`: strategy, index, candidates, total keys; `suggestion`: the index to create, if any |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
 
@@ -4331,6 +4410,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `stats` | Dashboard |
+| `memory` | Where the workspace's memory goes, and its bound |
+| `memory pin "<pattern>"` / `memory unpin "<pattern>"` | Keep the values of matching keys in memory (admin) |
 | `compact` | Reclaim disk space (admin, or an editor in their personal workspace) |
 | `autocompact on\|off\|status\|threshold <N>` | Automatic compaction |
 | `check` / `check repair` | Verify / repair |

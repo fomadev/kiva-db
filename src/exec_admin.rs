@@ -40,6 +40,7 @@ impl Session {
             "hint" => self.cmd_hint(a, out),
             "encryption" => self.cmd_encryption(a, out),
             "semantic" => self.cmd_semantic(a, out),
+            "memory" => self.cmd_memory(a, out),
             "backup" => self.cmd_backup(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
@@ -516,7 +517,8 @@ impl Session {
             match (s.as_str(), k.as_str()) {
                 (
                     "storage",
-                    "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb",
+                    "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb"
+                    | "max_memory_mb",
                 ) => self.inst.apply_storage_config(),
                 // Read again at every use: nothing to restart.
                 ("security", _)
@@ -1029,6 +1031,52 @@ impl Session {
         let report = crate::backup::backup(&self.inst, &scope, std::path::Path::new(&file))?;
         for line in report.lines() {
             out.say(line);
+        }
+        Ok(())
+    }
+
+    /// `memory [status] | memory pin <pattern> | memory unpin <pattern>`.
+    fn cmd_memory(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "Usage: memory [status] | memory pin \"<pattern>\" | memory unpin \"<pattern>\"";
+        let mut c = Cur::new(a);
+        if c.eat("pin") {
+            let pattern = word(c.next(), "a key pattern")?;
+            c.finish(USAGE)?;
+            let (n, bytes) = self.engine.pin(&pattern)?;
+            out.say(format!(
+                "Pinned '{pattern}': {n} values ({}) kept in memory, now and after every write.",
+                human_size(bytes as u64)
+            ));
+            return Ok(());
+        }
+        if c.eat("unpin") {
+            let pattern = word(c.next(), "a key pattern")?;
+            c.finish(USAGE)?;
+            if !self.engine.unpin(&pattern)? {
+                return Err(format!("'{pattern}' is not pinned."));
+            }
+            out.say(format!("Unpinned '{pattern}': its values are read from disk again."));
+            return Ok(());
+        }
+        c.eat("status");
+        c.finish(USAGE)?;
+        let m = self.engine.memory();
+        let size = |n: usize| human_size(n as u64);
+        out.say(format!("Memory of workspace '{}' (estimates)", self.ws));
+        out.say(format!("  Keys              : {} ({} keys)", size(m.keys), m.key_count));
+        out.say(format!("  Secondary indexes : {}", size(m.secondary)));
+        out.say(format!("  Vector indexes    : {}", size(m.vectors)));
+        out.say(format!("  Pinned values     : {} ({} values)", size(m.pinned), m.pinned_values));
+        out.say(format!("  Value cache       : {} (given back first)", size(m.cache)));
+        out.say(format!("  Total             : {}", size(m.total())));
+        if m.limit == 0 {
+            out.say("  Bound             : none (storage.max_memory_mb = 0)");
+        } else {
+            let pct = m.resident() as f64 * 100.0 / m.limit as f64;
+            out.say(format!("  Bound             : {} ({pct:.1}% used)", size(m.limit)));
+        }
+        if !m.pinned_patterns.is_empty() {
+            out.say(format!("  Pinned patterns   : {}", m.pinned_patterns.join(", ")));
         }
         Ok(())
     }

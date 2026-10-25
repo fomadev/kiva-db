@@ -264,6 +264,107 @@ fn queries_ranges_and_indexes() {
 }
 
 #[test]
+fn queries_refuse_joins_combinations_and_pipelines_with_an_explanation() {
+    let dir = TempDir::new("query-rules");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set user:1 {"name": "Alice", "role": "dev", "age": 30}"#);
+    ok(&mut s, r#"set order:1 {"user": "user:1", "total": 10}"#);
+    let cases = [
+        (r#"get where user:*.role = "dev" and user:*.age > 20"#, "one condition"),
+        (r#"count where user:*.role = "dev" or user:*.age > 20"#, "one condition"),
+        ("get where user:* join order:* on user", "joins are not supported"),
+        ("get where user:*.name = order:*.user", "names a field of other documents"),
+        (r#"get where user:*, order:*.role = "dev""#, "joins are not supported"),
+        (r#"get where user:*.role = "dev" group by role"#, "aggregation pipelines"),
+        (r#"get where user:*.role = "dev" limit 5 order by age"#, "aggregation pipelines"),
+        (r#"get where user:*.role in ["dev", "admin"]"#, "comparison operators"),
+        (r#"get where user:*.role = "dev", "admin""#, "comparison operators"),
+        (r#"sum where user:*.age > 20 @node2"#, "distributed queries"),
+        (r#"explain get where user:*.role = "dev" and user:*.age > 1"#, "one condition"),
+        (r#"explain distributed get where user:*.role = "dev""#, "distributed queries"),
+    ];
+    for (q, why) in cases {
+        let err = fails(&mut s, q);
+        assert!(err.contains(why), "`{q}`: {err}");
+    }
+    // What the language does offer still works.
+    assert_eq!(
+        ok(&mut s, r#"get where user:*.role = "dev" limit 1 return name"#),
+        "user:1: {\"name\":\"Alice\"}\n(1 matches)"
+    );
+    assert!(ok(&mut s, r#"explain get where user:*.age > 20 limit 5"#).contains("PREFIX SCAN"));
+
+    let q = |extra: serde_json::Value| {
+        let mut r = serde_json::json!({"op": "query", "target": "user:*.role", "cmp": "=", "value": "dev"});
+        for (k, v) in extra.as_object().unwrap() {
+            r[k] = v.clone();
+        }
+        r
+    };
+    assert!(kivadb::api::handle(&mut s, &q(serde_json::json!({}))).is_ok());
+    for (extra, why) in [
+        (serde_json::json!({"join": "order:*"}), "joins"),
+        (serde_json::json!({"order_by": "age"}), "aggregation"),
+        (serde_json::json!({"and": [{"target": "user:*.age"}]}), "one condition"),
+        (serde_json::json!({"value": ["dev", "admin"]}), "not with an array"),
+        (serde_json::json!({"target": "user:*.ro*"}), "wildcard"),
+    ] {
+        let err = kivadb::api::handle(&mut s, &q(extra)).unwrap_err().to_string();
+        assert!(err.contains(why), "{err}");
+    }
+}
+
+#[test]
+fn pinned_values_stay_in_memory_and_the_memory_bound_refuses_new_keys() {
+    let dir = TempDir::new("memory");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set conf:a {"x": 1} and conf:b "on" and other 1"#);
+    assert!(ok(&mut s, r#"memory pin "conf:*""#).starts_with("Pinned 'conf:*': 2 values"));
+    assert!(fails(&mut s, r#"memory pin "conf:*""#).contains("already pinned"));
+    let status = ok(&mut s, "memory");
+    assert!(status.contains("Pinned values     :") && status.contains("(2 values)"), "{status}");
+    assert!(status.contains("Pinned patterns   : conf:*"), "{status}");
+    // New and changed keys under the pattern are kept in memory too.
+    ok(&mut s, r#"set conf:c 3"#);
+    ok(&mut s, r#"json set conf:a .x 2"#);
+    assert!(ok(&mut s, "memory").contains("(3 values)"));
+    ok(&mut s, "del conf:c");
+    assert!(ok(&mut s, "memory").contains("(2 values)"));
+    assert_eq!(ok(&mut s, "get conf:a.x"), "conf:a.x: 2 [number]");
+
+    // Pinned patterns are saved with the workspace.
+    drop(s);
+    let mut s = kiva(&dir);
+    let status = ok(&mut s, "memory");
+    assert!(status.contains("(2 values)") && status.contains("conf:*"), "{status}");
+    assert!(ok(&mut s, r#"memory unpin "conf:*""#).starts_with("Unpinned"));
+    assert!(fails(&mut s, r#"memory unpin "conf:*""#).contains("not pinned"));
+    assert!(ok(&mut s, "memory").contains("(0 values)"));
+
+    // The bound refuses new keys only; existing keys can change and be deleted.
+    ok(&mut s, "config set max_memory_mb 1");
+    let mut refused = None;
+    for batch in 0..100 {
+        let cmd: Vec<String> = (0..100).map(|i| format!("set key:{batch:03}:{i:03} {i}")).collect();
+        let out = s.execute(&cmd.join(" and "));
+        if out.has_err() {
+            refused = Some(out.text());
+            break;
+        }
+    }
+    let refused = refused.expect("1 MB should not hold 10 000 keys");
+    assert!(refused.contains("OOM:") && refused.contains("new keys are refused"), "{refused}");
+    assert!(ok(&mut s, "memory").contains("Bound             : 1.00 MB"));
+    assert!(fails(&mut s, "set brand:new 1").contains("OOM:"));
+    assert!(fails(&mut s, r#"memory pin "key:*""#).contains("OOM:"));
+    assert_eq!(ok(&mut s, "update key:000:000 7"), "OK: key:000:000 updated.");
+    ok(&mut s, r#"del key:000:000 and key:000:001 and key:000:002 and key:000:003 and key:000:004"#);
+    assert_eq!(ok(&mut s, "set brand:new 1"), "OK: brand:new saved.");
+    ok(&mut s, "config set max_memory_mb 0");
+    ok(&mut s, "set another:one 1");
+}
+
+#[test]
 fn json_changes_arrays_numbers_and_awkward_paths_in_place() {
     let dir = TempDir::new("json-ops");
     let mut s = kiva(&dir);
