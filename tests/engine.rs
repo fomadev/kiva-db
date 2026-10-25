@@ -398,21 +398,28 @@ fn the_background_sweep_removes_expired_keys_in_batches() {
     let dir = TempDir::new("ttl-sweep");
     let opts = EngineOptions { auto_compact: false, ..Default::default() };
     let e = Engine::open(dir.path().join("store.kiva"), opts).unwrap();
-    // More than two batches of the sweep, plus keys that must stay.
-    let soon = now_secs() + 1;
-    let ops: Vec<BatchOp> = (0..25_000)
-        .map(|i| BatchOp::Put { key: format!("session:{i:05}"), value: s("x"), expires_at: soon, msgpack: false })
-        .collect();
-    e.apply_batch(ops, None).unwrap();
+    // More than two batches of the sweep, plus keys that must stay. The
+    // deadlines are far first, so that a slow machine cannot see them pass
+    // before the counts are checked.
+    let sessions = |expires_at: i64| -> Vec<BatchOp> {
+        (0..25_000)
+            .map(|i| BatchOp::Put { key: format!("session:{i:05}"), value: s("x"), expires_at, msgpack: false })
+            .collect()
+    };
+    e.apply_batch(sessions(now_secs() + 3600), None).unwrap();
     e.put("kept", &s("z"), now_secs() + 3600, false).unwrap();
     e.put("plain", &s("p"), 0, false).unwrap();
     assert_eq!(e.stats().ttl_keys, 25_001);
 
     // Changing or removing a TTL moves the key's deadline, or drops it.
     e.put("session:00000", &s("x"), 0, false).unwrap();
-    e.put("session:00001", &s("x"), now_secs() + 3600, false).unwrap();
+    e.put("session:00001", &s("x"), now_secs() + 7200, false).unwrap();
     e.delete("session:00002").unwrap();
     assert_eq!(e.stats().ttl_keys, 24_999);
+
+    // Now the other sessions' time is up.
+    let gone: Vec<BatchOp> = sessions(now_secs() - 1).into_iter().skip(3).collect();
+    e.apply_batch(gone, None).unwrap();
 
     // Removed by the maintenance thread, not only hidden from reads.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
