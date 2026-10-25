@@ -38,7 +38,7 @@ use crate::session::{Meta, Need, Session};
 use crate::util::{glob_match, now_secs};
 use crate::value::{fmt_f64, Type, Value};
 use mlua::{Lua, MultiValue, Table, Value as LVal};
-use serde_json::{Map, Value as Json};
+use serde_json::{json, Map, Value as Json};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
@@ -553,6 +553,45 @@ impl Conn {
         })
     }
 
+    /// `KIVA.SIMILAR <pattern>.<field> <vector as JSON> [LIMIT n] [METRIC cosine|dot|l2] [EF n] [EXACT]`:
+    /// the closest documents, as `[key, score, document as JSON]` triples.
+    fn kiva_similar(&mut self, args: &[Vec<u8>]) -> Res {
+        arity(args, 3)?;
+        let text = |a: &Vec<u8>| String::from_utf8_lossy(a).to_string();
+        let vector: Json = serde_json::from_slice(&args[2])
+            .map_err(|_| Reply::err("the vector must be a JSON array of numbers, such as [0.1,0.2]"))?;
+        let mut req = json!({ "op": "similar", "target": text(&args[1]), "vector": vector });
+        let mut rest = args[3..].iter();
+        while let Some(opt) = rest.next() {
+            let opt = text(opt).to_ascii_uppercase();
+            let mut value = || rest.next().map(text).ok_or_else(|| Reply::err(format!("{opt} needs a value")));
+            match opt.as_str() {
+                "LIMIT" | "EF" => {
+                    let n =
+                        value()?.parse::<u64>().map_err(|_| Reply::err("value is not an integer or out of range"))?;
+                    req[opt.to_ascii_lowercase()] = n.into();
+                }
+                "METRIC" => req["metric"] = value()?.to_ascii_lowercase().into(),
+                "EXACT" => req["exact"] = true.into(),
+                _ => return Err(Reply::err("syntax error")),
+            }
+        }
+        let answer = crate::api::handle(&mut self.sess, &req)?;
+        let rows = answer["results"].as_array().cloned().unwrap_or_default();
+        Ok(Reply::array(
+            rows.iter()
+                .map(|r| {
+                    Reply::array(vec![
+                        Reply::bulk(r["key"].as_str().unwrap_or_default()),
+                        // Scores are f32: send their shortest form, not 16 digits of noise.
+                        Reply::Double((r["score"].as_f64().unwrap_or(0.0) as f32).to_string().parse().unwrap_or(0.0)),
+                        Reply::bulk(r["value"].to_string()),
+                    ])
+                })
+                .collect(),
+        ))
+    }
+
     fn run(&mut self, name: &str, args: &[Vec<u8>]) -> Res {
         match name {
             "PING" if self.subs > 0 && !self.resp3 => {
@@ -565,6 +604,15 @@ impl Conn {
             "ECHO" => {
                 arity(args, 2)?;
                 Ok(Reply::bulk(args[1].clone()))
+            }
+            "KIVA.SIMILAR" => self.kiva_similar(args),
+            "KIVA.API" => {
+                if args.len() != 2 {
+                    return Err(Reply::err("wrong number of arguments for 'kiva.api' command"));
+                }
+                let req: Json = serde_json::from_slice(&args[1])
+                    .map_err(|e| Reply::err(format!("the request must be a JSON object: {e}")))?;
+                Ok(Reply::bulk(crate::api::handle(&mut self.sess, &req)?.to_string()))
             }
             "QUIT" => Ok(Reply::ok()),
             "AUTH" => {

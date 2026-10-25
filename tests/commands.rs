@@ -365,6 +365,52 @@ fn pinned_values_stay_in_memory_and_the_memory_bound_refuses_new_keys() {
 }
 
 #[test]
+fn redis_clients_reach_vector_search_and_the_semantic_cache() {
+    use kivadb::resp::{Conn, Reply};
+    let dir = TempDir::new("resp-vectors");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, r#"set doc:1 {"title": "Kinshasa guide", "embedding": [0.9, 0.1, 0.0]}"#);
+    ok(&mut s, r#"set doc:2 {"title": "Goma guide", "embedding": [0.1, 0.9, 0.0]}"#);
+    ok(&mut s, r#"set doc:3 {"title": "Recipes", "embedding": [0.0, 0.1, 0.9]}"#);
+    let mut c = Conn::new(Session::new(inst, true, None));
+    let call = |c: &mut Conn, args: &[&str]| c.handle(&args.iter().map(|a| a.as_bytes().to_vec()).collect::<Vec<_>>());
+
+    let Reply::Array(Some(rows)) = call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1, 0, 0]", "LIMIT", "2"]) else {
+        panic!("not an array");
+    };
+    assert_eq!(rows.len(), 2);
+    let Reply::Array(Some(first)) = &rows[0] else { panic!() };
+    assert_eq!(first[0], Reply::Bulk(Some(b"doc:1".to_vec())));
+    assert_eq!(first[1], Reply::Double(0.9938837));
+    let Reply::Array(Some(second)) = &rows[1] else { panic!() };
+    assert_eq!(second[1], Reply::Double(0.11043153));
+    let Reply::Bulk(Some(doc)) = &first[2] else { panic!() };
+    assert!(String::from_utf8_lossy(doc).contains("Kinshasa guide"));
+    assert!(
+        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1, 0, 0]", "METRIC", "l2", "EXACT"]), Reply::Array(Some(r)) if r.len() == 3)
+    );
+    assert!(
+        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "oops"]), Reply::Error(e) if e.contains("JSON array"))
+    );
+    assert!(
+        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1,0,0]", "LIMIT"]), Reply::Error(e) if e.contains("needs a value"))
+    );
+
+    // Any structured request: here the semantic cache of an LLM application.
+    let store =
+        r#"{"op": "semantic", "action": "store", "cache": "llm", "text": "What is KivaDB?", "answer": "A database."}"#;
+    assert!(
+        matches!(call(&mut c, &["KIVA.API", store]), Reply::Bulk(Some(b)) if String::from_utf8_lossy(&b).contains("\"id\""))
+    );
+    let lookup = r#"{"op": "semantic", "cache": "llm", "text": "What is KivaDB?"}"#;
+    let Reply::Bulk(Some(hit)) = call(&mut c, &["KIVA.API", lookup]) else { panic!() };
+    assert!(String::from_utf8_lossy(&hit).contains("A database."), "{}", String::from_utf8_lossy(&hit));
+    assert!(matches!(call(&mut c, &["KIVA.API", "not json"]), Reply::Error(e) if e.contains("JSON object")));
+    assert!(matches!(call(&mut c, &["KIVA.API", r#"{"op": "nope"}"#]), Reply::Error(_)));
+}
+
+#[test]
 fn json_changes_arrays_numbers_and_awkward_paths_in_place() {
     let dir = TempDir::new("json-ops");
     let mut s = kiva(&dir);

@@ -394,6 +394,37 @@ fn expired_keys_disappear() {
 }
 
 #[test]
+fn the_background_sweep_removes_expired_keys_in_batches() {
+    let dir = TempDir::new("ttl-sweep");
+    let opts = EngineOptions { auto_compact: false, ..Default::default() };
+    let e = Engine::open(dir.path().join("store.kiva"), opts).unwrap();
+    // More than two batches of the sweep, plus keys that must stay.
+    let soon = now_secs() + 1;
+    let ops: Vec<BatchOp> = (0..25_000)
+        .map(|i| BatchOp::Put { key: format!("session:{i:05}"), value: s("x"), expires_at: soon, msgpack: false })
+        .collect();
+    e.apply_batch(ops, None).unwrap();
+    e.put("kept", &s("z"), now_secs() + 3600, false).unwrap();
+    e.put("plain", &s("p"), 0, false).unwrap();
+    assert_eq!(e.stats().ttl_keys, 25_001);
+
+    // Changing or removing a TTL moves the key's deadline, or drops it.
+    e.put("session:00000", &s("x"), 0, false).unwrap();
+    e.put("session:00001", &s("x"), now_secs() + 3600, false).unwrap();
+    e.delete("session:00002").unwrap();
+    assert_eq!(e.stats().ttl_keys, 24_999);
+
+    // Removed by the maintenance thread, not only hidden from reads.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while e.len() > 4 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(e.len(), 4, "keys left: {}", e.len());
+    assert_eq!(e.stats().ttl_keys, 2);
+    assert!(e.get("session:00000").unwrap().is_some() && e.get("session:00001").unwrap().is_some());
+}
+
+#[test]
 fn compression_is_transparent() {
     let dir = TempDir::new("comp");
     let path = dir.path().join("store.kiva");
