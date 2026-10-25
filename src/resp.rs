@@ -51,6 +51,8 @@ use std::sync::{Arc, Mutex};
 mod classic;
 #[path = "resp_commands.rs"]
 mod commands;
+#[path = "resp_json.rs"]
+mod json;
 #[path = "resp_sets.rs"]
 mod sets;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1332,6 +1334,9 @@ impl Conn {
                     return r;
                 }
                 if let Some(r) = self.run_classic(name, args) {
+                    return r;
+                }
+                if let Some(r) = self.run_json(name, args) {
                     return r;
                 }
                 Err(commands::unknown(args))

@@ -1978,7 +1978,7 @@ network.port = 2911
 | `storage.auto_compact` | `true` | Compact automatically ([17.3](#173-compaction)) | immediately |
 | `storage.compact_threshold` | `30` | Fragmentation percentage that triggers it | immediately |
 | `storage.compression` | `none` | `none`, `lz4` or `zlib` for new writes ([17.5](#175-compression)) | immediately |
-| `storage.sync_writes` | `false` | Force every write to the physical disk ([17.2](#172-what-survives-what)) | next start |
+| `storage.sync_writes` | `false` | Every write on the physical disk before it is acknowledged, with group commit ([17.2](#172-what-survives-what)) | immediately |
 | `storage.snapshot_interval` | `300` | Seconds between index snapshots | next start |
 | `storage.snapshot_every` | `1000` | ...or after this many modifications | next start |
 | `storage.cache_values` | `false` | Keep recently read values in memory ([Chapter 18](#chapter-18--keeping-values-in-memory-value-cache)) | immediately |
@@ -2379,7 +2379,15 @@ kiva> stats
 | A transaction was open | It is as if it never started |
 | A compaction was running | The original file is intact; the unfinished copy is thrown away |
 
-`sync_writes = true` asks the disk to confirm every single write. It is the safest setting and makes writes noticeably slower; the default (confirm once per second) is the usual compromise.
+`sync_writes = true` asks the disk to confirm every write before KivaDB answers it: an acknowledged write survives a power failure. It applies immediately (`config set sync_writes true`). The default (confirm once per second) is the usual compromise.
+
+**Group commit.** A disk confirmation (fsync) takes about a millisecond on an SSD, often more on Windows or on a hard disk. With `sync_writes`, KivaDB does not make each client wait for its own: the writes that arrive while one fsync is under way are confirmed together by the next one. A single client writes at the speed of the disk, but many clients writing at once share the confirmations, so the total number of writes per second grows with the number of clients instead of staying at one fsync each. Every write is still on disk before it is acknowledged. `stats` shows how well it works:
+
+```text
+ > Durability           : on disk before each answer (12000 writes, 2210 disk syncs, 5.4 writes per sync)
+```
+
+Other clients can read a write a few milliseconds before its fsync ends; only its own client is answered after it.
 
 After an unclean stop, the shell tells you what it did:
 
@@ -3135,7 +3143,7 @@ user:1.name: Alice [string]
 visits: 1 [number]
 ```
 
-Unlike a default Redis, every write is on disk before the answer: keys, counters and their expiry times survive a restart of the server.
+Unlike a default Redis, every write is in the data file before the answer: keys, counters and their expiry times survive a crash or a restart of the server. With `sync_writes = true`, they also survive a power failure, at a cost kept low by group commit ([17.2](#172-what-survives-what)). A failing Lua script leaves nothing behind ([23.5](#235-lua-scripts-eval)), and the same data is reachable as documents and vectors ([23.11](#2311-json-documents-redisjson-commands)).
 
 ### 23.2 How types match
 
@@ -3163,6 +3171,7 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
+| JSON | `JSON.SET` (`NX`, `XX`), `JSON.GET`, `JSON.MGET`, `JSON.DEL`, `JSON.FORGET`, `JSON.TYPE`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.STRLEN`, `JSON.ARRLEN`, `JSON.OBJLEN`, `JSON.OBJKEYS`, `JSON.ARRAPPEND`, `JSON.ARRINSERT` ([23.11](#2311-json-documents-redisjson-commands)) |
 | KivaDB | `KIVA.SIMILAR` (vector search), `KIVA.API` (any structured request) ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)) |
 
 **Lists as queues.** `LMOVE` takes a job from a queue and puts it in a processing list in one step, so a worker that crashes never loses it; `LTRIM` keeps a list to its last entries:
@@ -3346,10 +3355,10 @@ KIVA.API <request as JSON>
 127.0.0.1:6379> KIVA.SIMILAR doc:*.embedding "[1, 0, 0]" LIMIT 2
 1) 1) "doc:1"
    2) "0.9938837"
-   3) "{\\"title\\":\\"Kinshasa guide\\",\\"embedding\\":[0.9,0.1,0.0]}"
+   3) "{\"title\":\"Kinshasa guide\",\"embedding\":[0.9,0.1,0.0]}"
 2) 1) "doc:2"
    2) "0.11043153"
-   3) "{\\"title\\":\\"Goma guide\\",\\"embedding\\":[0.1,0.9,0.0]}"
+   3) "{\"title\":\"Goma guide\",\"embedding\":[0.1,0.9,0.0]}"
 ```
 
 * `KIVA.SIMILAR` answers one `[key, score, document]` triple per result, closest first. The score is a double in RESP3 and text in RESP2. It uses the vector index (exact or HNSW) when there is one, as `get similar` does.
@@ -3372,6 +3381,40 @@ def ask(question, embedding):
 ```
 
 Both commands are checked against the user's role like any other.
+
+### 23.11 JSON documents (RedisJSON commands)
+
+A Redis client can write and change KivaDB documents with the commands of RedisJSON, the JSON module of Redis. Libraries that support it work unchanged: `client.json.set(...)` in node-redis, `r.json().set(...)` in redis-py, `call("JSON.SET", ...)` in ioredis.
+
+```text
+127.0.0.1:6379> JSON.SET user:1 $ '{"name":"Amani","age":30,"embedding":[0.9,0.1,0]}'
+OK
+127.0.0.1:6379> JSON.NUMINCRBY user:1 $.age 1
+"[31]"
+127.0.0.1:6379> JSON.GET user:1 $.name
+"[\"Amani\"]"
+```
+
+What is written this way is an ordinary KivaDB document, so **the same data is reachable through every model**:
+
+```text
+127.0.0.1:6379> HGET user:1 name
+"Amani"
+127.0.0.1:6379> KIVA.SIMILAR user:*.embedding "[1,0,0]" LIMIT 1
+1) 1) "user:1"
+   ...
+
+kiva> get where user:*.age > 30
+user:1: {"name":"Amani","age":31,"embedding":[0.9,0.1,0]}
+```
+
+Secondary indexes ([11.4](#114-indexes--making-queries-fast)) and vector indexes ([Chapter 12](#chapter-12--vector-search-for-ai)) cover these documents like any other, and a document written from the shell, the REST API or a driver can be read with `JSON.GET`.
+
+* **Paths** name one value: `$` or `.` for the whole document, `$.address.city`, `.tags[0]`, `$.tags[-1]`. A path starting with `$` answers a list of matches, as RedisJSON 2 does (`"[31]"`); the older form (`.age`) answers the value itself (`"31"`). Wildcards (`$.items[*]`), `..`, slices and filters, which name several values, are refused with an error.
+* `JSON.SET` at a path creates the missing objects on the way (RedisJSON requires them to exist); a new key must be created at the root. An existing key keeps its expiry.
+* In RESP3, `JSON.NUMINCRBY` answers numbers and `JSON.TYPE` one more level of array, as RedisJSON does; node-redis is checked in both.
+* Inside `MULTI` or a script, `JSON.*` commands are all or nothing with the rest: a script that fails after `JSON.SET` leaves the document as it was.
+* A Redis string read with `JSON.GET` is a JSON string. `JSON.GET` options `INDENT`, `NEWLINE` and `SPACE` are accepted; the answer stays compact.
 
 ---
 

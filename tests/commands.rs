@@ -910,3 +910,92 @@ fn the_instance_is_exclusive() {
     assert!(matches!(Instance::open(dir.path(), Options::default()), Err(kivadb::KivaError::Locked(_))));
     let _ = run(&mut Session::new(inst.clone(), true, None), "set a 1");
 }
+
+#[test]
+fn json_documents_from_redis_clients_are_kivadb_documents() {
+    use kivadb::resp::{Conn, Reply};
+    let dir = TempDir::new("resp-json");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "create index on user:*.age");
+    let mut c = Conn::new(Session::new(inst, true, None));
+    let call = |c: &mut Conn, args: &[&str]| c.handle(&args.iter().map(|a| a.as_bytes().to_vec()).collect::<Vec<_>>());
+    let bulk = |t: &str| Reply::Bulk(Some(t.as_bytes().to_vec()));
+    let ok_reply = Reply::Simple("OK".into());
+
+    let user = r#"{"name":"Amani","age":30,"tags":["a"],"embedding":[1,0,0]}"#;
+    assert_eq!(call(&mut c, &["JSON.SET", "user:1", "$", user]), ok_reply);
+    assert_eq!(
+        call(&mut c, &["JSON.SET", "user:2", ".", r#"{"name":"Baraka","age":25,"embedding":[0,1,0]}"#]),
+        ok_reply
+    );
+    assert_eq!(call(&mut c, &["JSON.GET", "user:1", "$.name"]), bulk(r#"["Amani"]"#));
+    assert_eq!(call(&mut c, &["JSON.GET", "user:1", ".name"]), bulk(r#""Amani""#));
+    assert_eq!(call(&mut c, &["JSON.GET", "user:1", "$.nothing"]), bulk("[]"));
+    assert_eq!(call(&mut c, &["JSON.GET", "ghost"]), Reply::Bulk(None));
+    assert_eq!(
+        call(&mut c, &["JSON.GET", "user:2", "INDENT", "  ", ".name", ".age"]),
+        bulk(r#"{".name":"Baraka",".age":25}"#)
+    );
+
+    // Changes in place, at a path.
+    assert_eq!(call(&mut c, &["JSON.SET", "user:1", "$.address.city", r#""Goma""#]), ok_reply);
+    assert_eq!(call(&mut c, &["JSON.SET", "user:1", "$.name", r#""X""#, "NX"]), Reply::Bulk(None));
+    assert_eq!(call(&mut c, &["JSON.SET", "user:1", "$.zip", "1", "XX"]), Reply::Bulk(None));
+    assert_eq!(call(&mut c, &["JSON.NUMINCRBY", "user:1", "$.age", "1"]), bulk("[31]"));
+    assert_eq!(call(&mut c, &["JSON.NUMINCRBY", "user:1", ".age", "1"]), bulk("32"));
+    assert_eq!(call(&mut c, &["JSON.NUMMULTBY", "user:2", ".age", "2"]), bulk("50"));
+    assert!(
+        matches!(call(&mut c, &["JSON.NUMINCRBY", "user:1", ".nothing", "1"]), Reply::Error(e) if e.contains("does not exist"))
+    );
+    assert_eq!(
+        call(&mut c, &["JSON.ARRAPPEND", "user:1", "$.tags", r#""b""#, r#""c""#]),
+        Reply::Array(Some(vec![Reply::Int(3)]))
+    );
+    assert_eq!(call(&mut c, &["JSON.ARRINSERT", "user:1", ".tags", "0", r#""z""#]), Reply::Int(4));
+    assert_eq!(call(&mut c, &["JSON.ARRLEN", "user:1", ".tags"]), Reply::Int(4));
+    assert_eq!(call(&mut c, &["JSON.STRLEN", "user:1", ".name"]), Reply::Int(5));
+    assert_eq!(call(&mut c, &["JSON.TYPE", "user:1", ".tags"]), Reply::Simple("array".into()));
+    assert_eq!(
+        call(&mut c, &["JSON.TYPE", "user:1", "$.age"]),
+        Reply::Array(Some(vec![Reply::Simple("integer".into())]))
+    );
+    assert_eq!(call(&mut c, &["JSON.OBJLEN", "user:1", "$.address"]), Reply::Array(Some(vec![Reply::Int(1)])));
+    assert_eq!(call(&mut c, &["JSON.DEL", "user:1", "$.address.city"]), Reply::Int(1));
+    assert_eq!(call(&mut c, &["JSON.DEL", "user:1", "$.address.city"]), Reply::Int(0));
+    assert_eq!(
+        call(&mut c, &["JSON.MGET", "user:1", "ghost", "user:2", "$.name"]),
+        Reply::Array(Some(vec![bulk(r#"["Amani"]"#), Reply::Bulk(None), bulk(r#"["Baraka"]"#)]))
+    );
+    assert!(matches!(call(&mut c, &["JSON.GET", "user:1", "$..name"]), Reply::Error(e) if e.contains("wildcards")));
+    assert!(matches!(call(&mut c, &["JSON.SET", "new", "$.a", "1"]), Reply::Error(e) if e.contains("at the root")));
+    assert!(matches!(call(&mut c, &["JSON.SET", "user:1", "$", "{oops"]), Reply::Error(e) if e.contains("JSON")));
+
+    // The same data, through every model: hashes, queries, indexes, vectors.
+    assert_eq!(call(&mut c, &["HGET", "user:1", "name"]), bulk("Amani"));
+    assert_eq!(call(&mut c, &["TYPE", "user:1"]), Reply::Simple("hash".into()));
+    let found = ok(&mut s, "get where user:*.age < 40");
+    assert!(
+        found.contains("user:1") && found.contains(r#""tags":["z","a","b","c"]"#) && !found.contains("user:2"),
+        "{found}"
+    );
+    assert!(ok(&mut s, "explain get where user:*.age < 40").contains("INDEX SCAN"));
+    let Reply::Array(Some(rows)) = call(&mut c, &["KIVA.SIMILAR", "user:*.embedding", "[0.9, 0.1, 0]", "LIMIT", "1"])
+    else {
+        panic!("not an array");
+    };
+    let Reply::Array(Some(first)) = &rows[0] else { panic!() };
+    assert_eq!(first[0], bulk("user:1"));
+    // A failing script undoes its JSON changes with the rest.
+    let script = "redis.call('JSON.NUMINCRBY', KEYS[1], '.age', 100) redis.call('JSON.DEL', KEYS[1]) error('boom')";
+    assert!(matches!(call(&mut c, &["EVAL", script, "1", "user:1"]), Reply::Error(e) if e.contains("boom")));
+    assert_eq!(call(&mut c, &["JSON.GET", "user:1", ".age"]), bulk("32"));
+    // Written from the shell, read with JSON.GET.
+    ok(&mut s, r#"set conf:app {"theme": "dark", "limits": {"rpm": 600}}"#);
+    assert_eq!(call(&mut c, &["JSON.GET", "conf:app", "$.limits.rpm"]), bulk("[600]"));
+    // A Redis string reads as a JSON string.
+    assert_eq!(call(&mut c, &["SET", "greeting", "hi"]), ok_reply);
+    assert_eq!(call(&mut c, &["JSON.GET", "greeting"]), bulk(r#""hi""#));
+    assert_eq!(call(&mut c, &["JSON.DEL", "user:2"]), Reply::Int(1));
+    assert_eq!(call(&mut c, &["EXISTS", "user:2"]), Reply::Int(0));
+}

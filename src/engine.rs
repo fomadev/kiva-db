@@ -23,7 +23,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -168,6 +168,12 @@ pub struct EngineStats {
     /// (timestamp, ok, corrupted) of the last `check`.
     pub last_check: Option<(i64, usize, usize)>,
     pub compactions: u64,
+    /// Whether every write is on disk before it is acknowledged.
+    pub sync_writes: bool,
+    /// Writes that waited to be on disk, and the fsyncs that served them:
+    /// with many writers at once, one fsync serves several writes.
+    pub durable_writes: u64,
+    pub disk_syncs: u64,
     pub last_compact: Option<i64>,
     /// Why the last automatic compaction failed, if it did.
     pub compact_error: Option<String>,
@@ -610,7 +616,21 @@ pub struct Engine {
     signal: Arc<Signal>,
     compacting: AtomicBool,
     opts: EngineOptions,
+    /// `storage.sync_writes`: every write is on disk before it returns.
+    sync_writes: AtomicBool,
+    /// How far the data file is known to be on disk. Taken before `inner`
+    /// when both are needed.
+    durable: Mutex<Durable>,
+    durable_writes: AtomicU64,
+    disk_syncs: AtomicU64,
     _lock: File,
+}
+
+/// The part of the data file `file_id` that an fsync has put on disk.
+#[derive(Default)]
+struct Durable {
+    file_id: u64,
+    len: u64,
 }
 
 fn sidecar(path: &Path, ext: &str) -> PathBuf {
@@ -1327,6 +1347,10 @@ impl Engine {
             signal: signal.clone(),
             compacting: AtomicBool::new(false),
             opts: opts.clone(),
+            sync_writes: AtomicBool::new(opts.sync_writes),
+            durable: Mutex::new(Durable::default()),
+            durable_writes: AtomicU64::new(0),
+            disk_syncs: AtomicU64::new(0),
             _lock: lock_file,
         });
         if opts.background {
@@ -1365,6 +1389,49 @@ impl Engine {
         if frag_due || inner.dirty_ops >= self.opts.snapshot_every_ops {
             self.wake();
         }
+    }
+
+    /// Where the last write ended, when it must reach the disk before the
+    /// caller is answered. Taken while still holding the lock.
+    fn durable_mark(&self, inner: &Inner) -> Option<(u64, u64)> {
+        self.sync_writes.load(Ordering::Relaxed).then_some((inner.file_id, inner.file_len))
+    }
+
+    /// Group commit: waits until the data file is on disk up to `mark`.
+    ///
+    /// The fsync runs outside the engine lock, so other writers keep
+    /// appending meanwhile. Writers that arrive during an fsync wait for it to
+    /// end, then the first of them syncs everything written so far at once:
+    /// with many clients writing, one fsync serves many writes, and each
+    /// write is still on disk before it is acknowledged.
+    fn make_durable(&self, mark: Option<(u64, u64)>) -> Result<()> {
+        let Some((file_id, end)) = mark else { return Ok(()) };
+        self.durable_writes.fetch_add(1, Ordering::Relaxed);
+        let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
+        if d.file_id == file_id && d.len >= end {
+            return Ok(());
+        }
+        // Let the writes that queued during the last fsync finish appending,
+        // so that this one covers them too.
+        std::thread::yield_now();
+        let (file, len) = {
+            let inner = self.lock();
+            // A compaction copied the record into a new file and synced it, or
+            // a reset wiped it: nothing left to do.
+            if inner.file_id != file_id {
+                return Ok(());
+            }
+            (inner.file.try_clone()?, inner.file_len)
+        };
+        file.sync_data()?;
+        self.disk_syncs.fetch_add(1, Ordering::Relaxed);
+        *d = Durable { file_id, len };
+        Ok(())
+    }
+
+    /// Turns `storage.sync_writes` on or off; it applies to the next write.
+    pub fn set_sync_writes(&self, on: bool) {
+        self.sync_writes.store(on, Ordering::Relaxed);
     }
 
     fn wake(&self) {
@@ -1460,6 +1527,9 @@ impl Engine {
         let mut inner = self.lock();
         let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
         self.after_write(&inner);
+        let mark = self.durable_mark(&inner);
+        drop(inner);
+        self.make_durable(mark)?;
         Ok(created)
     }
 
@@ -1487,6 +1557,9 @@ impl Engine {
         };
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
         self.after_write(&inner);
+        let mark = self.durable_mark(&inner);
+        drop(inner);
+        self.make_durable(mark)?;
         Ok(Some((out, true)))
     }
 
@@ -1501,7 +1574,7 @@ impl Engine {
     ) -> Result<bool> {
         let (rec, mut entry, raw) = build_put(inner, key, value, expires_at, msgpack, timestamp, 0)?;
         let created = inner.live(key, now_secs()).is_none();
-        entry.offset = inner.append(&rec, self.opts.sync_writes)?;
+        entry.offset = inner.append(&rec, false)?;
         inner.seq += 1;
         entry.version = inner.seq;
         let msgpack = entry.is_msgpack();
@@ -1539,7 +1612,7 @@ impl Engine {
             return Ok(false);
         }
         let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
-        inner.append(&rec, self.opts.sync_writes)?;
+        inner.append(&rec, false)?;
         inner.seq += 1;
         inner.idx_remove(key);
         if inner.active_txns > 0 {
@@ -1549,6 +1622,9 @@ impl Engine {
         inner.dirty_ops += 1;
         self.emit(&Op::Del { key: key.to_string() });
         self.after_write(&inner);
+        let mark = self.durable_mark(&inner);
+        drop(inner);
+        self.make_durable(mark)?;
         Ok(true)
     }
 
@@ -1641,7 +1717,7 @@ impl Engine {
                 }
             }
         }
-        let base = inner.append(&buf, self.opts.sync_writes)?;
+        let base = inner.append(&buf, false)?;
 
         for s in staged {
             inner.seq += 1;
@@ -1670,7 +1746,9 @@ impl Engine {
             inner.dirty_ops += 1;
         }
         self.after_write(&inner);
-        Ok(())
+        let mark = self.durable_mark(&inner);
+        drop(inner);
+        self.make_durable(mark)
     }
 
     /// Wipes every key. The data file is recreated from scratch.
@@ -1852,6 +1930,8 @@ impl Engine {
         drop(reader);
 
         // Phase 3 (locked): bring over whatever was appended meanwhile, then swap.
+        // No fsync may hold a handle on the old file while it is replaced.
+        let _durable = self.durable.lock().unwrap_or_else(|e| e.into_inner());
         let mut inner = self.lock();
         let before_bytes = inner.file_len;
         if inner.file_id != old_id || inner.closed {
@@ -2023,6 +2103,9 @@ impl Engine {
             corrupted_detected: inner.corrupted_detected,
             last_check: inner.last_check,
             compactions: inner.compactions,
+            sync_writes: self.sync_writes.load(Ordering::Relaxed),
+            durable_writes: self.durable_writes.load(Ordering::Relaxed),
+            disk_syncs: self.disk_syncs.load(Ordering::Relaxed),
             last_compact: inner.last_compact,
             compact_error: inner.compact_error.clone(),
             auto_compact: inner.auto_compact,

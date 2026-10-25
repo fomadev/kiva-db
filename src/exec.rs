@@ -1549,6 +1549,17 @@ impl Session {
             if frag >= 20.0 { " [Action Needed: 'compact']" } else { "" }
         ));
         out.say(format!(" > Memory Usage (RAM)   : {}", human_size(s.memory_bytes)));
+        if s.sync_writes {
+            let per_sync = if s.disk_syncs > 0 { s.durable_writes as f64 / s.disk_syncs as f64 } else { 0.0 };
+            out.say(format!(
+                " > Durability           : on disk before each answer ({} writes, {} disk syncs, {per_sync:.1} writes per sync)",
+                s.durable_writes, s.disk_syncs
+            ));
+        } else {
+            out.say(
+                " > Durability           : on disk within 1 second ('config set sync_writes true': before each answer)",
+            );
+        }
         let saved = if s.raw_value_bytes > 0 {
             (1.0 - s.stored_value_bytes as f64 / s.raw_value_bytes as f64) * 100.0
         } else {

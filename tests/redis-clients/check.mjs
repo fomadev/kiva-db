@@ -194,6 +194,19 @@ await step("node-redis (RESP3): HINCRBYFLOAT, HSCAN, LMPOP, COPY", async () => {
   assert.equal(await pay.copy("pay:acc:1", "pay:acc:1:backup"), 1);
   assert.equal(await pay.hGet("pay:acc:1:backup", "currency"), "CDF");
 });
+await step("node-redis (RESP3): RedisJSON commands (client.json)", async () => {
+  await pay.json.set("pay:order:1", "$", { id: 1, total: 1500, items: [{ sku: "maize", qty: 2 }] });
+  assert.deepEqual(await pay.json.get("pay:order:1", { path: "$.items[0].sku" }), ["maize"]);
+  assert.deepEqual(await pay.json.numIncrBy("pay:order:1", "$.total", 250), [1750]);
+  assert.deepEqual(await pay.json.arrAppend("pay:order:1", "$.items", { sku: "beans", qty: 1 }), [2]);
+  assert.deepEqual(await pay.json.type("pay:order:1", { path: "$.items" }), ["array"]);
+  assert.equal((await pay.json.get("pay:order:1")).items[1].sku, "beans");
+});
+await step("ioredis: JSON.SET then read as a hash, the same document", async () => {
+  assert.equal(await io.call("JSON.SET", "doc:shop:1", "$", JSON.stringify({ name: "Kivu Shop", city: "Goma" })), "OK");
+  assert.equal(await io.hget("doc:shop:1", "city"), "Goma");
+  assert.equal(await io.call("JSON.GET", "doc:shop:1", ".name"), '"Kivu Shop"');
+});
 
 // --- Publish/subscribe: every instance hears that the texts changed ------------
 const nextMessage = (subscribe) =>
