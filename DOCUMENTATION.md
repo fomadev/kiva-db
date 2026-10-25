@@ -1915,6 +1915,7 @@ stream = true
 [resp]
 enabled = true
 port = 6379
+max_collection_members = 100000
 
 [tls]
 enabled = true
@@ -1995,6 +1996,7 @@ network.port = 2911
 | `http.stream` | `true` | Offer `/v1/stream` (Server-Sent Events) | immediately |
 | `resp.enabled` | `true` | Start the Redis-compatible listener ([Chapter 23](#chapter-23--redis-compatibility)) | next start |
 | `resp.port` | `6379` | Its port | next start |
+| `resp.max_collection_members` | `100000` | Members a Redis set, sorted set or list may hold ([23.8](#238-sets-and-sorted-sets)); `0` = no limit | immediately |
 | `tls.enabled` | `true` | Accept encrypted connections ([16.11](#1611-encrypted-connections-tls)) | next start |
 | `tls.required` | `false` | Refuse plain connections from other machines | immediately |
 | `tls.cert`, `tls.key` | empty | Your own certificate and key; empty: KivaDB's own | next start |
@@ -3151,7 +3153,7 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 
 | Group | Commands |
 | :--- | :--- |
-| Connection | `PING`, `ECHO`, `AUTH`, `HELLO` (protocol 2 or 3), `SELECT` (0 to 15, see [23.4](#234-logins-databases-roles)), `CLIENT`, `QUIT`, `COMMAND`, `INFO`, `TIME` |
+| Connection | `PING`, `ECHO`, `AUTH`, `HELLO` (protocol 2 or 3), `SELECT` (0 to 15, see [23.4](#234-logins-databases-roles)), `CLIENT`, `QUIT`, `COMMAND` (`COUNT`, `LIST`), `INFO`, `TIME` |
 | Strings | `GET`, `SET` (with `EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `APPEND`, `STRLEN`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT` |
 | Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `KEYS`, `SCAN`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HDEL`, `HINCRBY` |
@@ -3163,7 +3165,33 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
 | KivaDB | `KIVA.SIMILAR` (vector search), `KIVA.API` (any structured request) ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)) |
 
-Pipelining works, in RESP2 and RESP3. Not supported: streams, blocking commands (`BLPOP`, `BZPOPMIN`...), sharded publish/subscribe (`SPUBLISH`), `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
+Pipelining works, in RESP2 and RESP3. `COMMAND LIST` answers exactly the commands above, `COMMAND COUNT` how many there are.
+
+**Commands KivaDB refuses.** Any other command answers the error Redis gives for an unknown command, so client libraries recognize it and an application finds out at once:
+
+```text
+127.0.0.1:6379> GEOADD shops 15.3 -4.3 gombe
+(error) ERR unknown command 'GEOADD', with args beginning with: 'shops' '15.3' '-4.3' 'gombe'
+```
+
+For the families left out on purpose, the same message adds why, and what to use instead:
+
+| Family | Commands | Instead |
+| :--- | :--- | :--- |
+| Blocking | `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `BLMOVE`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX`, `BZMPOP`, `WAIT`, `WAITAOF` | The non-blocking command (`LPOP`, `ZPOPMIN`...) and a retry, or `SUBSCRIBE` to a channel the producer publishes to |
+| Streams | `XADD`, `XREAD`, `XREADGROUP`, `XRANGE`, `XLEN`, `XACK`, `XGROUP`... | A list as a queue (`RPUSH`, `LPOP`), or `PUBLISH` / `SUBSCRIBE` |
+| `WATCH` | `WATCH` (`UNWATCH` answers `OK`) | `MULTI ... EXEC` alone: it runs as a KivaDB transaction and `EXEC` answers nil if another client changed the same keys ([23.4](#234-logins-databases-roles)) |
+| Cluster | `CLUSTER`, `READONLY`, `READWRITE`, `ASKING`, `SPUBLISH`, `SSUBSCRIBE` | Connect as to a standalone Redis: one server holds a workspace's data |
+| Functions | `FUNCTION`, `FCALL`, `FCALL_RO` | `EVAL`, `EVALSHA` ([23.5](#235-lua-scripts-eval)) |
+| Replication | `REPLICAOF`, `SLAVEOF`, `SYNC`, `PSYNC`, `FAILOVER` | KivaDB's own replication: `replica start` ([Chapter 25](#chapter-25--replication)) |
+| Modules | `MODULE` | JSON documents and `KIVA.SIMILAR` are built in |
+
+```text
+127.0.0.1:6379> BLPOP jobs 0
+(error) ERR unknown command 'BLPOP', with args beginning with: 'jobs' '0' (KivaDB does not support blocking commands: a connection never waits for data. Use the non-blocking command (LPOP, RPOP, ZPOPMIN, ZPOPMAX) and retry, or SUBSCRIBE to a channel the producer PUBLISHes to.)
+```
+
+A refused command inside `MULTI` is not queued, and the whole transaction is then discarded: `EXEC` answers `EXECABORT`, as in Redis, and nothing of it is applied. Inside a script, `redis.call` raises the same error.
 
 **One command at a time.** Like Redis, KivaDB runs the Redis commands of all connections one after the other. `INCR` from many clients at once never loses a step, and a `MULTI ... EXEC` block or a script is never interleaved with another client's commands.
 
@@ -3271,6 +3299,13 @@ game:lb: {"redis":"zset","members":{"amani":120,"baraka":180,"chiku":200}} [obje
 * In RESP3 (`HELLO 3`, node-redis), scores come back as doubles, `SMEMBERS` as a set and `WITHSCORES` as pairs; in RESP2, as text and flat lists. Both were checked with ioredis and node-redis.
 * `SSCAN` and `ZSCAN` return every member in one answer (cursor `0`); `MATCH` follows Redis patterns.
 * **Size.** Each command reads and rewrites the whole value, and a sorted set is ordered when it is read: right for up to a few thousand members per key (a rate-limit window, the tags of a post, the leaderboard of a game or a shop). For millions of members in one key, a real Redis remains the better tool.
+* **A size limit.** A set, a sorted set or a list may not grow past `resp.max_collection_members` members (100 000 by default), so that one runaway key cannot make every command on it slow or fill the memory. A command that would pass it changes nothing and answers:
+
+  ```text
+  (error) ERR the set 'tags' would hold 100001 members, more than resp.max_collection_members (100000). Every command reads and rewrites the whole value: split it over several keys, or raise the limit
+  ```
+
+  The limit applies immediately (`config set max_collection_members 5000`); `0` removes it. A key already above a lowered limit can still shrink. Hashes are documents and are not counted.
 
 ### 23.9 Configuration
 
@@ -3278,6 +3313,7 @@ game:lb: {"redis":"zset","members":{"amani":120,"baraka":180,"chiku":200}} [obje
 | :--- | :--- | :--- |
 | `resp.enabled` | `true` | Start the Redis listener with `kivadb start` / `serve` |
 | `resp.port` | `6379` | Its port; also `--resp-port`, `KIVADB_RESP_PORT` |
+| `resp.max_collection_members` | `100000` | Members a set, sorted set or list may hold ([23.8](#238-sets-and-sorted-sets)); `0` = no limit |
 | `tls.*` | | Encrypted connections, see [16.11](#1611-encrypted-connections-tls) |
 
 `--no-resp` turns it off for one start. If a real Redis already uses port 6379 on the machine, KivaDB says so in its log and carries on without the listener; choose another port.
@@ -4536,7 +4572,7 @@ KivaDB 1.5.1 keeps the whole database on each node, with replicas and automatic 
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).
-* **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing, sets and sorted sets are meant for thousands of members per key, not millions, and expiry times are kept to the second ([23.3](#233-supported-commands)).
+* **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing (refused with a clear error), sets and sorted sets are meant for thousands of members per key, not millions (bounded by `resp.max_collection_members`), and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 

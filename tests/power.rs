@@ -1112,6 +1112,85 @@ fn redis_sorted_sets() {
 }
 
 #[test]
+fn redis_refuses_unsupported_commands_clearly() {
+    let dir = TempDir::new("resp_refused");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    let refused = |reply: R, needle: &str| match reply {
+        R::E(e) => assert!(e.starts_with("ERR unknown command") && e.contains(needle), "{e}"),
+        other => panic!("{other:?}"),
+    };
+
+    refused(r.cmd(&["BLPOP", "jobs", "0"]), "blocking commands");
+    refused(r.cmd(&["BZPOPMIN", "lb", "1"]), "blocking commands");
+    refused(r.cmd(&["XADD", "events", "*", "type", "login"]), "streams");
+    refused(r.cmd(&["XREADGROUP", "GROUP", "g", "c", "STREAMS", "events", ">"]), "streams");
+    refused(r.cmd(&["WATCH", "balance"]), "EXEC answers nil");
+    refused(r.cmd(&["CLUSTER", "INFO"]), "not a Redis Cluster");
+    refused(r.cmd(&["FCALL", "f", "0"]), "EVAL");
+    refused(r.cmd(&["REPLICAOF", "10.0.0.1", "6379"]), "replica start");
+    // Other unknown commands get the plain Redis message.
+    assert_eq!(
+        r.cmd(&["GEOADD", "m", "1", "2", "x"]),
+        R::E("ERR unknown command 'GEOADD', with args beginning with: 'm' '1' '2' 'x' ".into())
+    );
+    assert_eq!(r.cmd(&["UNWATCH"]), ok_reply());
+
+    // Refused while queuing: the whole transaction is discarded, as in Redis.
+    assert_eq!(r.cmd(&["MULTI"]), ok_reply());
+    assert_eq!(r.cmd(&["SET", "a", "1"]), R::S("QUEUED".into()));
+    refused(r.cmd(&["BRPOP", "q", "0"]), "blocking");
+    assert!(matches!(r.cmd(&["EXEC"]), R::E(e) if e.starts_with("EXECABORT")));
+    assert_eq!(r.cmd(&["EXISTS", "a"]), R::I(0));
+    assert_eq!(r.cmd(&["MULTI"]), ok_reply());
+    assert_eq!(r.cmd(&["SET", "a", "1"]), R::S("QUEUED".into()));
+    assert_eq!(r.cmd(&["EXEC"]), R::A(Some(vec![ok_reply()])));
+
+    // Scripts go through the same filter.
+    refused(r.cmd(&["EVAL", "return redis.pcall('XADD', KEYS[1], '*', 'f', 'v')", "1", "s"]), "streams");
+
+    // COMMAND tells clients what is there.
+    match (r.cmd(&["COMMAND", "COUNT"]), r.cmd(&["COMMAND", "LIST"])) {
+        (R::I(n), R::A(Some(names))) => {
+            assert_eq!(n as usize, names.len());
+            assert!(names.contains(&b("zadd")) && !names.contains(&b("blpop")));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn redis_collections_have_a_size_limit() {
+    let dir = TempDir::new("resp_collection_limit");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "config set max_collection_members 3");
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    let too_big = |reply: R, limit: &str| {
+        assert!(matches!(&reply, R::E(e) if e.contains(&format!("resp.max_collection_members ({limit})"))), "{reply:?}")
+    };
+
+    assert_eq!(r.cmd(&["SADD", "tags", "a", "b", "c"]), R::I(3));
+    too_big(r.cmd(&["SADD", "tags", "d"]), "3");
+    assert_eq!(r.cmd(&["SADD", "tags", "a"]), R::I(0));
+    assert_eq!(r.cmd(&["SCARD", "tags"]), R::I(3));
+    too_big(r.cmd(&["ZADD", "lb", "1", "a", "2", "b", "3", "c", "4", "d"]), "3");
+    assert_eq!(r.cmd(&["EXISTS", "lb"]), R::I(0));
+    too_big(r.cmd(&["RPUSH", "queue", "1", "2", "3", "4"]), "3");
+    assert_eq!(r.cmd(&["SADD", "more", "z"]), R::I(1));
+    too_big(r.cmd(&["SUNIONSTORE", "all", "tags", "more"]), "3");
+
+    // Lowered below the size of a set: it may still shrink, never grow.
+    ok(&mut admin, "config set max_collection_members 1");
+    assert_eq!(r.cmd(&["SREM", "tags", "a"]), R::I(1));
+    too_big(r.cmd(&["SADD", "tags", "x"]), "1");
+    ok(&mut admin, "config set max_collection_members 0");
+    assert_eq!(r.cmd(&["SADD", "tags", "x", "y", "z"]), R::I(3));
+}
+
+#[test]
 fn redis_sorted_sets_survive_a_restart() {
     let dir = TempDir::new("resp_zsets_restart");
     let run = |inst: &std::sync::Arc<kivadb::instance::Instance>, args: &[&str]| {

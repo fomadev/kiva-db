@@ -526,6 +526,7 @@ impl Session {
                 | ("scripting", _)
                 | ("tls", "required")
                 | ("server", "max_clients")
+                | ("resp", "max_collection_members")
                 | ("semantic", _)
                 | ("failover", _) => {}
                 ("replication", "sync_mode" | "min_slaves_ack" | "master_user" | "master_password") => {}
