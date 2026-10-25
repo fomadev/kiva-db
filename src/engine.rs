@@ -1379,6 +1379,7 @@ impl Engine {
                             let kind = kind_from_json(&def);
                             inner.vecs.push(VecIndex::with_kind(p, f, segs, kind));
                             let i = inner.vecs.len() - 1;
+                            inner.vecs[i].ef_search = def["ef_search"].as_u64().unwrap_or(0) as usize;
                             let restored = saved.as_mut().and_then(|(since, list)| {
                                 let at = list.iter().position(|s| {
                                     s.pattern == p && s.field == f && VectorIndexKind::Hnsw(s.graph.params) == kind
@@ -2392,6 +2393,9 @@ impl Engine {
                     def["metric"] = p.metric.name().into();
                     def["m"] = p.m.into();
                     def["ef_construction"] = p.ef_construction.into();
+                    if v.ef_search > 0 {
+                        def["ef_search"] = v.ef_search.into();
+                    }
                 }
                 def
             })
@@ -2601,6 +2605,138 @@ impl Engine {
         Ok(n)
     }
 
+    /// Sets the `ef_search` of an HNSW index; 0 goes back to the default.
+    pub fn set_vector_ef_search(&self, pattern: &str, field: &str, ef: usize) -> Result<()> {
+        let mut inner = self.lock();
+        let i = Self::graph_index(&inner, pattern, field)?;
+        inner.vecs[i].ef_search = ef;
+        self.save_meta(&inner)
+    }
+
+    fn graph_index(inner: &Inner, pattern: &str, field: &str) -> Result<usize> {
+        let i = inner
+            .vecs
+            .iter()
+            .position(|v| v.pattern == pattern && v.field == field)
+            .ok_or_else(|| KivaError::NotFound(format!("no vector index on {pattern} ({field})")))?;
+        if inner.vecs[i].graph().is_none() {
+            return Err(KivaError::Invalid(format!(
+                "the vector index on {pattern} ({field}) is exact: every search compares every vector and \
+                 always finds the true closest ones, so there is nothing to tune. An HNSW index \
+                 ('create vector index ... using hnsw') trades a little accuracy for speed."
+            )));
+        }
+        Ok(i)
+    }
+
+    /// Measures how many of the true `k` closest vectors the graph finds for
+    /// each `ef` of [`TUNE_LADDER`], using up to `sample` of the indexed
+    /// vectors as queries, and keeps the smallest `ef` that reaches
+    /// `recall` (the largest tried when none does) as the index's
+    /// `ef_search`. The workspace waits while it runs: each query is also
+    /// answered exactly, comparing every vector.
+    pub fn tune_vector_index(
+        &self,
+        pattern: &str,
+        field: &str,
+        recall: f64,
+        k: usize,
+        sample: usize,
+        queries_from: Option<&str>,
+    ) -> Result<TuneReport> {
+        let mut inner = self.lock();
+        let i = Self::graph_index(&inner, pattern, field)?;
+        let sample = sample.max(1);
+        // Real queries, when the application keeps some: documents holding
+        // a vector in the same field.
+        let mut given: Vec<Vec<f32>> = Vec::new();
+        if let Some(qp) = queries_from {
+            let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
+            let prefix = glob_prefix(qp).to_string();
+            let now = now_secs();
+            let keys: Vec<(String, Entry)> = inner
+                .index
+                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                .take_while(|(k, _)| k.starts_with(&prefix))
+                .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(qp, k))
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect();
+            let dims = inner.vecs[i].dims;
+            let step = (keys.len() / sample).max(1);
+            for (k, e) in keys.into_iter().step_by(step).take(sample) {
+                if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                    given.extend(vector::extract(&doc, &path).filter(|v| Some(v.len()) == dims));
+                }
+            }
+            if given.is_empty() {
+                return Err(KivaError::Invalid(format!(
+                    "no document matching {qp} holds a vector in '{field}' with the index's number of dimensions"
+                )));
+            }
+        }
+        let index = &inner.vecs[i];
+        let g = index.graph().expect("graph index");
+        let vectors = g.len();
+        if vectors <= k {
+            return Err(KivaError::Invalid(format!(
+                "tuning needs more than {k} vectors in the index (it has {vectors}): with so few, every search finds them all"
+            )));
+        }
+        let metric = g.params.metric;
+        let from_data = given.is_empty();
+        // Without real queries, indexed vectors stand for them, each searched
+        // as if its own node were not in the graph (leave-one-out): landing
+        // on that node would lead straight to its neighbours and make the
+        // graph look better than it is for a new query.
+        let queries: Vec<(Option<String>, vector::Query)> = if from_data {
+            let step = (vectors / sample).max(1);
+            g.iter()
+                .step_by(step)
+                .take(sample)
+                .map(|(key, v, _)| (Some(key.to_string()), vector::Query::new(v.to_vec(), metric)))
+                .collect()
+        } else {
+            given.into_iter().map(|v| (None, vector::Query::new(v, metric))).collect()
+        };
+        let started = Instant::now();
+        let truth: Vec<Vec<String>> = queries
+            .iter()
+            .map(|(own, q)| {
+                let scored = index.scores(&index.pattern, q, |key| Some(key) != own.as_deref());
+                vector::top_k(scored, k, q).into_iter().map(|(key, _)| key).collect()
+            })
+            .collect();
+        let exact_micros = started.elapsed().as_secs_f64() * 1e6 / queries.len().max(1) as f64;
+        let wanted: usize = truth.iter().map(|t| t.len()).sum();
+        let mut steps = Vec::new();
+        for &ef in TUNE_LADDER.iter().filter(|&&ef| ef >= k) {
+            let started = Instant::now();
+            let (mut hits, mut compared) = (0, 0);
+            for ((own, q), truth) in queries.iter().zip(&truth) {
+                let found = g.search_hiding(&q.vector, k, ef, |_| true, own.as_deref());
+                compared += found.compared;
+                hits += found.keys.iter().filter(|k2| truth.contains(k2)).count();
+            }
+            let n = queries.len();
+            let step = TuneStep {
+                ef,
+                recall: hits as f64 / wanted.max(1) as f64,
+                compared: compared / n,
+                micros: started.elapsed().as_secs_f64() * 1e6 / n as f64,
+            };
+            let done = step.recall >= recall || ef >= vectors;
+            steps.push(step);
+            if done {
+                break;
+            }
+        }
+        let last = steps.last().expect("one step at least");
+        let (chosen, reached) = (last.ef, last.recall >= recall);
+        inner.vecs[i].ef_search = chosen;
+        self.save_meta(&inner)?;
+        Ok(TuneReport { steps, chosen, reached, queries: truth.len(), from_data, vectors, exact_micros })
+    }
+
     pub fn drop_vector_index(&self, pattern: &str, field: &str) -> Result<bool> {
         let mut inner = self.lock();
         let before = inner.vecs.len();
@@ -2631,6 +2767,7 @@ impl Engine {
                 not_vectors: v.not_vectors,
                 tombstones: v.graph().map_or(0, |g| g.tombstones()),
                 memory_bytes: v.memory_bytes(),
+                ef_search: if v.ef_search == 0 { hnsw::DEFAULT_EF_SEARCH } else { v.ef_search },
             })
             .collect()
     }
@@ -2718,7 +2855,11 @@ impl Engine {
         } else if let Some(i) = graph {
             // Searched in the graph, then filtered: when too few of the found
             // keys pass, the search asks for more, until the graph is exhausted.
-            let ef = if q.ef == 0 { hnsw::DEFAULT_EF_SEARCH } else { q.ef };
+            let ef = match (q.ef, inner.vecs[i].ef_search) {
+                (0, 0) => hnsw::DEFAULT_EF_SEARCH,
+                (0, tuned) => tuned,
+                (asked, _) => asked,
+            };
             let mut want = limit;
             let mut seen: HashMap<String, bool> = HashMap::new();
             let mut compared = 0;
@@ -3130,7 +3271,40 @@ pub struct VectorIndexInfo {
     /// HNSW: deleted or replaced vectors waiting for the graph to be rebuilt.
     pub tombstones: usize,
     pub memory_bytes: usize,
+    /// HNSW: candidates a search keeps when it does not say.
+    pub ef_search: usize,
 }
+
+/// One `ef` tried by [`Engine::tune_vector_index`].
+#[derive(Clone, Debug)]
+pub struct TuneStep {
+    pub ef: usize,
+    /// Share of the exact closest vectors the graph found.
+    pub recall: f64,
+    /// Vectors compared per search, on average.
+    pub compared: usize,
+    pub micros: f64,
+}
+
+/// What tuning an HNSW index measured and chose.
+#[derive(Clone, Debug)]
+pub struct TuneReport {
+    pub steps: Vec<TuneStep>,
+    /// The `ef_search` now stored with the index.
+    pub chosen: usize,
+    /// Whether `chosen` reaches the recall asked for.
+    pub reached: bool,
+    pub queries: usize,
+    /// Whether indexed vectors stood for the queries (each searched without
+    /// its own node) rather than queries given by the application.
+    pub from_data: bool,
+    pub vectors: usize,
+    /// An exact search over the same index, for comparison.
+    pub exact_micros: f64,
+}
+
+/// The values of `ef` tuning tries, smallest first.
+const TUNE_LADDER: &[usize] = &[10, 16, 25, 40, 64, 100, 160, 250, 400, 640, 1000, 1600, 2500, 4000];
 
 #[derive(Debug)]
 pub struct VectorResult {

@@ -321,6 +321,103 @@ fn hnsw_index_finds_nearly_the_same_neighbours_comparing_far_fewer_vectors() {
 /// Speed on a larger set. Run with:
 /// cargo test --release --test power hnsw_speed -- --ignored --nocapture
 #[test]
+fn tuning_an_hnsw_index_keeps_the_smallest_ef_search_that_reaches_the_recall() {
+    let dir = TempDir::new("hnsw_tune");
+    let path = dir.path().join("store.kiva");
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    // Evenly spread vectors, the hardest case for a graph: a small ef misses.
+    for (i, v) in random_vectors(3000, 16, 33).iter().enumerate() {
+        embed(&e, &format!("chunk:{i:05}"), v, json!({}));
+    }
+    let small = VectorIndexKind::Hnsw(HnswParams { m: 4, ef_construction: 20, ..Default::default() });
+    e.create_vector_index_with("chunk:*", "embedding", small).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].ef_search, 100, "the default");
+
+    let r = e.tune_vector_index("chunk:*", "embedding", 0.9, 10, 40, None).unwrap();
+    assert_eq!((r.queries, r.vectors, r.from_data), (40, 3000, true));
+    assert!(r.steps.len() >= 2, "{:?}", r.steps);
+    assert_eq!(r.steps[0].ef, 10);
+    assert!(r.reached && r.steps.last().unwrap().recall >= 0.9, "{:?}", r.steps);
+    // Smaller values were tried first and missed too much.
+    assert!(r.steps[..r.steps.len() - 1].iter().all(|s| s.recall < 0.9));
+    assert!(r.steps.first().unwrap().compared < r.steps.last().unwrap().compared);
+    assert_eq!(e.list_vector_indexes()[0].ef_search, r.chosen);
+
+    // Searches without ef use the tuned value; an ef of their own wins.
+    let q = random_vectors(1, 16, 77).remove(0);
+    let compared = |ef: usize| {
+        let mut vq = query("chunk:*", q.clone(), Metric::Cosine, 10);
+        vq.ef = ef;
+        e.similar(&vq).unwrap().compared
+    };
+    assert_eq!(compared(0), compared(r.chosen));
+    assert!(compared(10) < compared(0));
+
+    // The value is saved with the index, and the graph read back from disk.
+    drop(e);
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].ef_search, r.chosen);
+    e.set_vector_ef_search("chunk:*", "embedding", 0).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].ef_search, 100);
+
+    // An unreachable recall keeps the largest value tried, and says so.
+    let r = e.tune_vector_index("chunk:*", "embedding", 1.0, 10, 5, None).unwrap();
+    assert_eq!(r.reached, r.steps.last().unwrap().recall >= 1.0);
+    assert!(r.reached || r.chosen == r.steps.iter().map(|s| s.ef).max().unwrap());
+
+    // Nothing to tune on an exact index, nor without an index.
+    e.create_vector_index("other:*", "embedding").unwrap();
+    let err = e.tune_vector_index("other:*", "embedding", 0.9, 10, 10, None).unwrap_err().to_string();
+    assert!(err.contains("nothing to tune"), "{err}");
+    assert!(e.set_vector_ef_search("none:*", "embedding", 50).is_err());
+}
+
+#[test]
+fn hnsw_tuning_from_the_shell() {
+    let dir = TempDir::new("hnsw_tune_shell");
+    let mut s = Session::new(instance(&dir), true, None);
+    for (i, v) in random_vectors(300, 8, 5).iter().enumerate() {
+        ok(&mut s, &format!("set doc:{i:03} {}", json!({ "embedding": v })));
+    }
+    let out = ok(&mut s, "create vector index on doc: (embedding) using hnsw m 8 ef 50 ef_search 40");
+    assert!(out.contains("HNSW vector index created"), "{out}");
+    assert!(ok(&mut s, "indexes").contains("(cosine, m 8, ef 50, ef_search 40)"));
+
+    let out = ok(&mut s, "tune vector index on doc: (embedding) recall 0.9 limit 5 sample 30");
+    assert!(
+        out.contains(
+            "300 vectors: 30 queries taken from its vectors, each searched without its own node, 5 closest each"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("exact search") && out.contains("ef_search 10"), "{out}");
+    assert!(out.contains("Kept ef_search"), "{out}");
+    let kept: usize =
+        out.split("Kept ef_search ").nth(1).unwrap().split([' ', ',', ':']).next().unwrap().parse().unwrap();
+    assert!(ok(&mut s, "indexes").contains(&format!("ef_search {kept})")));
+
+    // Real queries kept by the application, in documents of their own.
+    for (i, v) in random_vectors(12, 8, 6).iter().enumerate() {
+        ok(&mut s, &format!("set query:{i:02} {}", json!({ "embedding": v })));
+    }
+    let out = ok(&mut s, r#"tune vector index on doc: (embedding) limit 5 queries "query:*""#);
+    assert!(out.contains("12 queries read from query:*"), "{out}");
+    ok(&mut s, r#"set query:bad {"embedding": [1, 2]}"#);
+    assert!(
+        fails(&mut s, r#"tune vector index on doc: (embedding) queries "nothing:*""#).contains("no document matching")
+    );
+
+    let out = ok(&mut s, "tune vector index on doc: (embedding) ef_search default");
+    assert!(out.contains("the default, 100"), "{out}");
+    ok(&mut s, "tune vector index on doc: (embedding) ef_search 250");
+    assert!(ok(&mut s, "indexes").contains("ef_search 250)"));
+    assert!(fails(&mut s, "tune vector index on doc: (embedding) ef_search 0").contains("between 1 and 100000"));
+    assert!(fails(&mut s, "tune vector index on doc: (embedding) recall 2").contains("at most 1"));
+    assert!(fails(&mut s, "tune vector index on ghost: (embedding)").contains("no vector index"));
+    assert!(fails(&mut s, "tune index on doc: (embedding)").contains("Usage"));
+}
+
+#[test]
 #[ignore]
 fn hnsw_speed() {
     let n: usize = std::env::var("HNSW_N").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
@@ -363,6 +460,22 @@ fn hnsw_speed() {
     for ef in [50, 100, 200, 400, 800] {
         println!("recall@10 with ef {ef}: {:.3}", recall(&e, &queries[..30], 10, ef));
     }
+    let start = std::time::Instant::now();
+    let r = e.tune_vector_index("chunk:*", "embedding", 0.95, 10, 100, None).unwrap();
+    println!("tune (recall 0.95) in {:?}: exact {:.0} µs per search", start.elapsed(), r.exact_micros);
+    for s in &r.steps {
+        println!("  ef_search {}: recall {:.3}, {} compared, {:.0} µs", s.ef, s.recall, s.compared, s.micros);
+    }
+    println!("kept ef_search {} (reached: {})", r.chosen, r.reached);
+    // The same with the real queries, to see how close the estimate is.
+    for (i, q) in queries.iter().enumerate() {
+        embed(&e, &format!("query:{i:03}"), q, json!({}));
+    }
+    let r = e.tune_vector_index("chunk:*", "embedding", 0.95, 10, 100, Some("query:*")).unwrap();
+    for s in &r.steps {
+        println!("  real queries, ef_search {}: recall {:.3}, {} compared", s.ef, s.recall, s.compared);
+    }
+    println!("kept ef_search {} with the real queries", r.chosen);
     let start = std::time::Instant::now();
     e.close();
     drop(e);
@@ -631,7 +744,7 @@ fn vector_commands() {
         "HNSW vector index created on doc:* (embedding): 3 vectors in a graph (cosine, m 8, ef 50)."
     );
     assert!(ok(&mut s, "indexes")
-        .contains("doc:* (embedding) - HNSW vector index (cosine, m 8, ef 50), 3 vectors, 3 dimensions"));
+        .contains("doc:* (embedding) - HNSW vector index (cosine, m 8, ef 50, ef_search 100), 3 vectors, 3 dimensions"));
     let out = ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 ef 20 return title");
     assert!(out.starts_with(r#"doc:3: 0.97"#) && out.contains("HNSW index, approximate"), "{out}");
     assert!(ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 exact")

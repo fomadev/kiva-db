@@ -545,6 +545,7 @@ const HELP: &str = r#"
   get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
+  tune vector index on <pat> (<field>) [recall 0.95] : Measure an HNSW index and keep the ef_search it needs.
   semantic lookup|store|stats|clear : Semantic cache of answers (questions found by meaning).
   explain <query>                   : Show how a query would be executed.
   convert <key> to msgpack|json     : Change a document's storage encoding.
@@ -640,8 +641,9 @@ impl Session {
             }
         }
 
-        const AUDITED: &[&str] =
-            &["create", "drop", "grant", "revoke", "modify", "del", "compact", "compress", "failover", "replica"];
+        const AUDITED: &[&str] = &[
+            "create", "drop", "tune", "grant", "revoke", "modify", "del", "compact", "compress", "failover", "replica",
+        ];
         let audited = AUDITED.contains(&cmd.as_str())
             || (cmd == "config" && tokens.get(1).is_some_and(|t| t.is_kw("set")))
             || (cmd == "workspace" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
@@ -1700,7 +1702,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         // Compacting only rewrites one's own file: allowed at home.
         "compact" => Need::Owner,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
-        | "bench" | "shutdown" | "encryption" | "backup" => Need::Admin,
+        | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         "workspace" if sub("create") || sub("remove") => Need::Admin,

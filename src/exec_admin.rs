@@ -30,6 +30,7 @@ impl Session {
             }
             "users" => self.cmd_users(out),
             "create" => self.cmd_create(a, out),
+            "tune" => self.cmd_tune(a, out),
             "drop" => self.cmd_drop(a, out),
             "grant" => self.cmd_grant(a, out, true),
             "revoke" => self.cmd_grant(a, out, false),
@@ -109,9 +110,13 @@ impl Session {
                     }
                     let kind = match v.kind {
                         VectorIndexKind::Exact => "vector index".to_string(),
-                        VectorIndexKind::Hnsw(p) => {
-                            format!("HNSW vector index ({}, m {}, ef {})", p.metric.name(), p.m, p.ef_construction)
-                        }
+                        VectorIndexKind::Hnsw(p) => format!(
+                            "HNSW vector index ({}, m {}, ef {}, ef_search {})",
+                            p.metric.name(),
+                            p.m,
+                            p.ef_construction,
+                            v.ef_search
+                        ),
                     };
                     out.say(format!(
                         "{} ({}) - {kind}, {} vectors, {dims}, {} in memory{extra}",
@@ -207,17 +212,22 @@ impl Session {
             Ok(())
         } else if c.eat("vector") {
             const USAGE: &str =
-                "create vector index on <pattern> (<field>) [using hnsw [metric cosine|dot|l2] [m N] [ef N]]";
+                "create vector index on <pattern> (<field>) [using hnsw [metric cosine|dot|l2] [m N] [ef N] [ef_search N]]";
             if !c.eat("index") {
                 return Err(format!("Usage: {USAGE}"));
             }
             let (pattern, field) = parse_index_target(&mut c, USAGE)?;
+            let mut ef_search = 0;
             let kind = if c.eat("using") {
                 if !c.eat("hnsw") {
                     return Err(format!("the only approximate index is hnsw.\nUsage: {USAGE}"));
                 }
                 let mut p = crate::hnsw::Params::default();
                 loop {
+                    if c.eat("ef_search") {
+                        ef_search = parse_ef_search(c.next())?;
+                        continue;
+                    }
                     if c.eat("metric") {
                         let m = word(c.next(), "a metric")?;
                         p.metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
@@ -241,6 +251,9 @@ impl Session {
             };
             c.finish(USAGE)?;
             let n = self.engine.create_vector_index_with(&pattern, &field, kind)?;
+            if ef_search > 0 {
+                self.engine.set_vector_ef_search(&pattern, &field, ef_search)?;
+            }
             match kind {
                 VectorIndexKind::Exact => {
                     out.say(format!("Vector index created on {pattern} ({field}): {n} vectors in memory."))
@@ -301,6 +314,93 @@ impl Session {
         } else {
             Err("Usage: create user ... | create index on <pattern> (<field>) | create trigger ...".into())
         }
+    }
+
+    /// `tune vector index on <pattern> (<field>) [recall R] [limit K] [sample N]`
+    /// measures the HNSW index and keeps the smallest `ef_search` that finds
+    /// that share of the true closest vectors; `... ef_search N | default`
+    /// sets it by hand.
+    fn cmd_tune(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str =
+            "tune vector index on <pattern> (<field>) [recall 0.95] [limit 10] [sample 100] [queries \"<pattern>\"]
+       tune vector index on <pattern> (<field>) ef_search <N> | default";
+        let mut c = Cur::new(a);
+        if !(c.eat("vector") && c.eat("index")) {
+            return Err(format!("Usage: {USAGE}"));
+        }
+        let (pattern, field) = parse_index_target(&mut c, USAGE)?;
+        if c.eat("ef_search") {
+            let ef = parse_ef_search(c.next())?;
+            c.finish(USAGE)?;
+            self.engine.set_vector_ef_search(&pattern, &field, ef)?;
+            let shown =
+                if ef == 0 { format!("the default, {}", crate::hnsw::DEFAULT_EF_SEARCH) } else { ef.to_string() };
+            out.say(format!("Searches on {pattern} ({field}) now keep {shown} candidates (ef_search)."));
+            return Ok(());
+        }
+        let (mut recall, mut k, mut sample) = (0.95, 10, 100);
+        let mut queries = None;
+        loop {
+            if c.eat("queries") {
+                queries = Some(word(c.next(), "the key pattern of documents holding real queries")?);
+                continue;
+            }
+            if c.eat("recall") {
+                let t = c.next().map(|t| t.text.clone()).unwrap_or_default();
+                recall = t
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|r| *r > 0.0 && *r <= 1.0)
+                    .ok_or("recall is a share of the true closest vectors, above 0 and at most 1 (0.95 = 95 %)")?;
+            } else if c.eat("limit") {
+                k = uint(c.next(), "limit")? as usize;
+                if !(1..=100).contains(&k) {
+                    return Err("limit must be between 1 and 100".into());
+                }
+            } else if c.eat("sample") {
+                sample = uint(c.next(), "sample")? as usize;
+                if !(1..=1000).contains(&sample) {
+                    return Err("sample must be between 1 and 1000".into());
+                }
+            } else {
+                break;
+            }
+        }
+        c.finish(USAGE)?;
+        let r = self.engine.tune_vector_index(&pattern, &field, recall, k, sample, queries.as_deref())?;
+        let source = match &queries {
+            Some(q) => format!("read from {q}"),
+            None => "taken from its vectors, each searched without its own node".to_string(),
+        };
+        out.say(format!(
+            "Tuning {pattern} ({field}), {} vectors: {} queries {source}, {k} closest each",
+            r.vectors, r.queries
+        ));
+        out.say(format!("  exact search       : {:.0} µs per search, every vector compared", r.exact_micros));
+        for s in &r.steps {
+            out.say(format!(
+                "  ef_search {:<8} : recall {:>5.1} %, {} vectors compared, {:.0} µs per search",
+                s.ef,
+                s.recall * 100.0,
+                s.compared,
+                s.micros
+            ));
+        }
+        if r.reached {
+            out.say(format!(
+                "Kept ef_search {} for {pattern} ({field}): the smallest that finds {:.0} % of the true closest vectors.",
+                r.chosen,
+                recall * 100.0
+            ));
+        } else {
+            out.say(format!(
+                "Kept ef_search {}, the largest tried: no value reached {:.0} %. A graph with more links \
+                 (create vector index ... using hnsw m 32 ef 400) finds more; 'get similar ... exact' finds them all.",
+                r.chosen,
+                recall * 100.0
+            ));
+        }
+        Ok(())
     }
 
     fn cmd_drop(&mut self, a: &[Token], out: &mut Out) -> R {
@@ -1264,6 +1364,18 @@ fn parse_index_spec(c: &mut Cur, usage: &str) -> Result<(String, String), String
 
 /// `on <pattern> (<field>)` or `on <pattern>.<field>`, leaving what follows
 /// to the caller.
+/// `ef_search`: a number of candidates, or `default`.
+fn parse_ef_search(t: Option<&Token>) -> Result<usize, String> {
+    if t.is_some_and(|t| t.is_kw("default")) {
+        return Ok(0);
+    }
+    let ef = uint(t, "ef_search")? as usize;
+    if !(1..=100_000).contains(&ef) {
+        return Err("ef_search must be between 1 and 100000, or default".into());
+    }
+    Ok(ef)
+}
+
 fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
     if !c.eat("on") {
         return Err(format!("Usage: {usage}"));

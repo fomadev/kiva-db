@@ -202,6 +202,9 @@ pub struct VecIndex {
     pub not_vectors: usize,
     /// Memory of an exact store, kept up to date (a graph counts its own).
     exact_bytes: usize,
+    /// HNSW: candidates a search keeps when it does not say; 0 = the
+    /// default ([`crate::hnsw::DEFAULT_EF_SEARCH`]). Set by `tune`.
+    pub ef_search: usize,
 }
 
 impl VecIndex {
@@ -222,6 +225,7 @@ impl VecIndex {
             rejected: 0,
             not_vectors: 0,
             exact_bytes: 0,
+            ef_search: 0,
         }
     }
 
