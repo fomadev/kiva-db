@@ -1112,6 +1112,112 @@ fn redis_sorted_sets() {
 }
 
 #[test]
+fn redis_classic_commands_on_strings_keys_hashes_and_lists() {
+    let dir = TempDir::new("resp_classic");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+
+    // Strings.
+    assert_eq!(r.cmd(&["SET", "greet", "Hello World"]), ok_reply());
+    assert_eq!(r.cmd(&["GETRANGE", "greet", "0", "4"]), b("Hello"));
+    assert_eq!(r.cmd(&["GETRANGE", "greet", "-5", "-1"]), b("World"));
+    assert_eq!(r.cmd(&["GETRANGE", "ghost", "0", "-1"]), b(""));
+    assert_eq!(r.cmd(&["SETRANGE", "greet", "6", "Kivu!"]), R::I(11));
+    assert_eq!(r.cmd(&["GET", "greet"]), b("Hello Kivu!"));
+    assert_eq!(r.cmd(&["SETRANGE", "pad", "3", "x"]), R::I(4));
+    assert_eq!(r.cmd(&["STRLEN", "pad"]), R::I(4));
+    assert_eq!(r.cmd(&["MSETNX", "m1", "a", "m2", "b"]), R::I(1));
+    assert_eq!(r.cmd(&["MSETNX", "m2", "z", "m3", "c"]), R::I(0));
+    assert_eq!(r.cmd(&["EXISTS", "m3"]), R::I(0));
+
+    // Keys.
+    assert_eq!(r.cmd(&["SET", "session", "s1", "EX", "600"]), ok_reply());
+    assert_eq!(r.cmd(&["COPY", "session", "session:copy"]), R::I(1));
+    assert!(matches!(r.cmd(&["TTL", "session:copy"]), R::I(t) if t > 590));
+    assert_eq!(r.cmd(&["COPY", "session", "m1"]), R::I(0));
+    assert_eq!(r.cmd(&["COPY", "session", "m1", "REPLACE"]), R::I(1));
+    assert_eq!(r.cmd(&["RENAMENX", "m1", "m2"]), R::I(0));
+    assert_eq!(r.cmd(&["RENAMENX", "m1", "m9"]), R::I(1));
+    assert!(matches!(r.cmd(&["RENAMENX", "ghost", "x"]), R::E(e) if e.contains("no such key")));
+    assert_eq!(r.cmd(&["TOUCH", "m9", "m2", "ghost"]), R::I(2));
+
+    // Hashes.
+    assert_eq!(r.cmd(&["HSET", "item", "price", "10.5", "name", "maize"]), R::I(2));
+    assert_eq!(r.cmd(&["HINCRBYFLOAT", "item", "price", "0.25"]), b("10.75"));
+    assert_eq!(r.cmd(&["HINCRBYFLOAT", "item", "stock", "3"]), b("3"));
+    assert!(matches!(r.cmd(&["HINCRBYFLOAT", "item", "name", "1"]), R::E(e) if e.contains("not a float")));
+    assert_eq!(r.cmd(&["HSTRLEN", "item", "name"]), R::I(5));
+    assert_eq!(r.cmd(&["HSTRLEN", "item", "none"]), R::I(0));
+    assert_eq!(r.cmd(&["HSCAN", "item", "0", "MATCH", "n*"]), R::A(Some(vec![b("0"), bulks(&["name", "maize"])])));
+    assert_eq!(
+        r.cmd(&["HSCAN", "item", "0", "NOVALUES"]),
+        R::A(Some(vec![b("0"), bulks(&["price", "name", "stock"])]))
+    );
+    assert!(
+        matches!(r.cmd(&["HRANDFIELD", "item"]), R::B(Some(f)) if ["price", "name", "stock"].contains(&f.as_str()))
+    );
+    match r.cmd(&["HRANDFIELD", "item", "10"]) {
+        R::A(Some(v)) => assert_eq!(v.len(), 3),
+        other => panic!("{other:?}"),
+    }
+    match r.cmd(&["HRANDFIELD", "item", "-5", "WITHVALUES"]) {
+        R::A(Some(v)) => assert_eq!(v.len(), 10),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.cmd(&["HRANDFIELD", "ghost"]), R::B(None));
+
+    // Lists.
+    assert_eq!(r.cmd(&["LPUSHX", "jobs", "a"]), R::I(0));
+    assert_eq!(r.cmd(&["EXISTS", "jobs"]), R::I(0));
+    assert_eq!(r.cmd(&["RPUSH", "jobs", "a", "b", "c", "b", "d", "b"]), R::I(6));
+    assert_eq!(r.cmd(&["RPUSHX", "jobs", "e"]), R::I(7));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "b"]), R::I(1));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "b", "RANK", "2"]), R::I(3));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "b", "RANK", "-1"]), R::I(5));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "b", "COUNT", "0"]), ints(&[1, 3, 5]));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "b", "COUNT", "0", "MAXLEN", "4"]), ints(&[1, 3]));
+    assert_eq!(r.cmd(&["LPOS", "jobs", "zz"]), R::B(None));
+    assert!(matches!(r.cmd(&["LPOS", "jobs", "b", "RANK", "0"]), R::E(e) if e.contains("RANK can't be zero")));
+    assert_eq!(r.cmd(&["LREM", "jobs", "-2", "b"]), R::I(2));
+    assert_eq!(r.cmd(&["LRANGE", "jobs", "0", "-1"]), bulks(&["a", "b", "c", "d", "e"]));
+    assert_eq!(r.cmd(&["LSET", "jobs", "-1", "E"]), ok_reply());
+    assert!(matches!(r.cmd(&["LSET", "jobs", "9", "x"]), R::E(e) if e.contains("index out of range")));
+    assert!(matches!(r.cmd(&["LSET", "ghost", "0", "x"]), R::E(e) if e.contains("no such key")));
+    assert_eq!(r.cmd(&["LINSERT", "jobs", "BEFORE", "c", "b2"]), R::I(6));
+    assert_eq!(r.cmd(&["LINSERT", "jobs", "AFTER", "zz", "x"]), R::I(-1));
+    assert_eq!(r.cmd(&["LINSERT", "ghost", "AFTER", "a", "x"]), R::I(0));
+    assert_eq!(r.cmd(&["LRANGE", "jobs", "0", "-1"]), bulks(&["a", "b", "b2", "c", "d", "E"]));
+    // A capped list: keep the last 4.
+    assert_eq!(r.cmd(&["LTRIM", "jobs", "-4", "-1"]), ok_reply());
+    assert_eq!(r.cmd(&["LRANGE", "jobs", "0", "-1"]), bulks(&["b2", "c", "d", "E"]));
+
+    // A reliable queue: move a job to a processing list, atomically.
+    assert_eq!(r.cmd(&["LMOVE", "jobs", "processing", "LEFT", "RIGHT"]), b("b2"));
+    assert_eq!(r.cmd(&["RPOPLPUSH", "jobs", "processing"]), b("E"));
+    assert_eq!(r.cmd(&["LRANGE", "processing", "0", "-1"]), bulks(&["E", "b2"]));
+    assert_eq!(r.cmd(&["LMOVE", "jobs", "jobs", "LEFT", "RIGHT"]), b("c"));
+    assert_eq!(r.cmd(&["LRANGE", "jobs", "0", "-1"]), bulks(&["d", "c"]));
+    assert_eq!(r.cmd(&["LMOVE", "ghost", "processing", "LEFT", "LEFT"]), R::B(None));
+    assert_eq!(r.cmd(&["SET", "str", "x"]), ok_reply());
+    assert!(matches!(r.cmd(&["LMOVE", "jobs", "str", "LEFT", "LEFT"]), R::E(e) if e.starts_with("WRONGTYPE")));
+    assert_eq!(r.cmd(&["LLEN", "jobs"]), R::I(2));
+    assert_eq!(
+        r.cmd(&["LMPOP", "2", "ghost", "jobs", "RIGHT", "COUNT", "5"]),
+        R::A(Some(vec![b("jobs"), bulks(&["c", "d"])]))
+    );
+    assert_eq!(r.cmd(&["EXISTS", "jobs"]), R::I(0));
+    assert_eq!(r.cmd(&["LMPOP", "1", "jobs", "LEFT"]), R::A(None));
+
+    // Inside MULTI and from a script, like any other command.
+    assert_eq!(r.cmd(&["MULTI"]), ok_reply());
+    assert_eq!(r.cmd(&["RPUSH", "q", "1", "2"]), R::S("QUEUED".into()));
+    assert_eq!(r.cmd(&["LMOVE", "q", "q2", "LEFT", "LEFT"]), R::S("QUEUED".into()));
+    assert_eq!(r.cmd(&["EXEC"]), R::A(Some(vec![R::I(2), b("1")])));
+    assert_eq!(r.cmd(&["EVAL", "return redis.call('LPOS', KEYS[1], '2')", "1", "q"]), R::I(0));
+}
+
+#[test]
 fn redis_refuses_unsupported_commands_clearly() {
     let dir = TempDir::new("resp_refused");
     let inst = instance(&dir);
