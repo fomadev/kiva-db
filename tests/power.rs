@@ -743,8 +743,9 @@ fn vector_commands() {
         ok(&mut s, "create vector index on doc: (embedding) using hnsw m 8 ef 50"),
         "HNSW vector index created on doc:* (embedding): 3 vectors in a graph (cosine, m 8, ef 50)."
     );
-    assert!(ok(&mut s, "indexes")
-        .contains("doc:* (embedding) - HNSW vector index (cosine, m 8, ef 50, ef_search 100), 3 vectors, 3 dimensions"));
+    assert!(ok(&mut s, "indexes").contains(
+        "doc:* (embedding) - HNSW vector index (cosine, m 8, ef 50, ef_search 100), 3 vectors, 3 dimensions"
+    ));
     let out = ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 ef 20 return title");
     assert!(out.starts_with(r#"doc:3: 0.97"#) && out.contains("HNSW index, approximate"), "{out}");
     assert!(ok(&mut s, "get similar doc:*.embedding to [0, 0, 1] limit 1 exact")
