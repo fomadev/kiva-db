@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+#[path = "resp_classic.rs"]
+mod classic;
 #[path = "resp_commands.rs"]
 mod commands;
 #[path = "resp_sets.rs"]
@@ -1327,6 +1329,9 @@ impl Conn {
             }
             _ => {
                 if let Some(r) = self.run_sets(name, args) {
+                    return r;
+                }
+                if let Some(r) = self.run_classic(name, args) {
                     return r;
                 }
                 Err(commands::unknown(args))

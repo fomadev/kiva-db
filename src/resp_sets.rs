@@ -918,7 +918,7 @@ fn numkeys(args: &[Vec<u8>]) -> std::result::Result<Split<'_>, Reply> {
 }
 
 /// `[MATCH pattern] [COUNT n]` of SSCAN and ZSCAN.
-fn scan_pattern(args: &[Vec<u8>]) -> std::result::Result<String, Reply> {
+pub(super) fn scan_pattern(args: &[Vec<u8>]) -> std::result::Result<String, Reply> {
     let mut pattern = "*".to_string();
     for pair in args.chunks(2) {
         match (upper(&pair[0]).as_str(), pair.get(1)) {

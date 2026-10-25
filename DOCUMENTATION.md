@@ -3154,16 +3154,31 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Group | Commands |
 | :--- | :--- |
 | Connection | `PING`, `ECHO`, `AUTH`, `HELLO` (protocol 2 or 3), `SELECT` (0 to 15, see [23.4](#234-logins-databases-roles)), `CLIENT`, `QUIT`, `COMMAND` (`COUNT`, `LIST`), `INFO`, `TIME` |
-| Strings | `GET`, `SET` (with `EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `APPEND`, `STRLEN`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT` |
-| Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `KEYS`, `SCAN`, `RENAME`, `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
-| Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HDEL`, `HINCRBY` |
-| Lists | `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`, `LINDEX` |
+| Strings | `GET`, `SET` (with `EX`, `PX`, `EXAT`, `PXAT`, `NX`, `XX`, `KEEPTTL`, `GET`), `SETNX`, `SETEX`, `PSETEX`, `GETSET`, `GETDEL`, `GETEX`, `MGET`, `MSET`, `MSETNX`, `APPEND`, `STRLEN`, `GETRANGE` (`SUBSTR`), `SETRANGE`, `INCR`, `DECR`, `INCRBY`, `DECRBY`, `INCRBYFLOAT` |
+| Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `TOUCH`, `KEYS`, `SCAN`, `RENAME`, `RENAMENX`, `COPY` (`REPLACE`), `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
+| Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HSTRLEN`, `HDEL`, `HINCRBY`, `HINCRBYFLOAT`, `HSCAN` (`MATCH`, `NOVALUES`), `HRANDFIELD` (`WITHVALUES`) |
+| Lists | `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`, `RPOP`, `LMPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LPOS` (`RANK`, `COUNT`, `MAXLEN`), `LSET`, `LINSERT`, `LREM`, `LTRIM`, `LMOVE`, `RPOPLPUSH` |
 | Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SINTERCARD`, `SSCAN` ([23.8](#238-sets-and-sorted-sets)) |
 | Sorted sets | `ZADD` (`NX`, `XX`, `GT`, `LT`, `CH`, `INCR`), `ZINCRBY`, `ZREM`, `ZSCORE`, `ZMSCORE`, `ZCARD`, `ZCOUNT`, `ZLEXCOUNT`, `ZRANK`, `ZREVRANK` (`WITHSCORE`), `ZRANGE` (`BYSCORE`, `BYLEX`, `REV`, `LIMIT`, `WITHSCORES`), `ZRANGESTORE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYLEX`, `ZRANDMEMBER`, `ZSCAN`, `ZUNION`, `ZINTER`, `ZDIFF`, `ZUNIONSTORE`, `ZINTERSTORE`, `ZDIFFSTORE`, `ZINTERCARD` |
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
 | KivaDB | `KIVA.SIMILAR` (vector search), `KIVA.API` (any structured request) ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)) |
+
+**Lists as queues.** `LMOVE` takes a job from a queue and puts it in a processing list in one step, so a worker that crashes never loses it; `LTRIM` keeps a list to its last entries:
+
+```text
+127.0.0.1:6379> LMOVE q:jobs q:processing LEFT RIGHT
+"j1"
+127.0.0.1:6379> LREM q:processing 1 j1
+(integer) 1
+127.0.0.1:6379> LPUSH log:recent e9
+(integer) 6
+127.0.0.1:6379> LTRIM log:recent 0 4
+OK
+```
+
+`COPY` works within one database: `COPY ... DB n` is refused, because each database is a separate workspace. `TOUCH` only counts the keys that exist, since KivaDB keeps no access time.
 
 Pipelining works, in RESP2 and RESP3. `COMMAND LIST` answers exactly the commands above, `COMMAND COUNT` how many there are.
 

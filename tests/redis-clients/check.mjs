@@ -171,6 +171,29 @@ await step("node-redis (RESP3): sets and sorted sets", async () => {
   assert.deepEqual(await pay.zPopMin("pay:queue"), { value: "a", score: 1 });
   assert.deepEqual(await pay.zRange("pay:queue", 0, -1), ["b", "c"]);
 });
+await step("ioredis: reliable job queue with LMOVE, capped log with LTRIM", async () => {
+  await io.rpush("q:jobs", "j1", "j2", "j3");
+  assert.equal(await io.lmove("q:jobs", "q:processing", "LEFT", "RIGHT"), "j1");
+  // Done: the job leaves the processing list.
+  assert.equal(await io.lrem("q:processing", 1, "j1"), 1);
+  assert.equal(await io.rpoplpush("q:jobs", "q:jobs"), "j3");
+  assert.deepEqual(await io.lrange("q:jobs", 0, -1), ["j3", "j2"]);
+  for (let i = 1; i <= 8; i++) {
+    await io.multi().lpush("log:recent", `e${i}`).ltrim("log:recent", 0, 4).exec();
+  }
+  assert.deepEqual(await io.lrange("log:recent", 0, -1), ["e8", "e7", "e6", "e5", "e4"]);
+  assert.equal(await io.lpos("log:recent", "e6"), 2);
+});
+await step("node-redis (RESP3): HINCRBYFLOAT, HSCAN, LMPOP, COPY", async () => {
+  await pay.hSet("pay:acc:1", { balance: "10.5", currency: "CDF" });
+  assert.equal(await pay.hIncrByFloat("pay:acc:1", "balance", 2.25), "12.75");
+  const scan = await pay.hScan("pay:acc:1", "0", { MATCH: "bal*" });
+  assert.deepEqual(scan.entries, [{ field: "balance", value: "12.75" }]);
+  await pay.rPush("pay:out", ["a", "b", "c"]);
+  assert.deepEqual(await pay.lmPop(["pay:none", "pay:out"], "LEFT", { COUNT: 2 }), ["pay:out", ["a", "b"]]);
+  assert.equal(await pay.copy("pay:acc:1", "pay:acc:1:backup"), 1);
+  assert.equal(await pay.hGet("pay:acc:1:backup", "currency"), "CDF");
+});
 
 // --- Publish/subscribe: every instance hears that the texts changed ------------
 const nextMessage = (subscribe) =>
