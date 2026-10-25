@@ -452,9 +452,12 @@ const HELP: &str = r#"
   keys [like P] [from A to B] [limit N] [reverse]
   range <A> to <B> [reverse] [limit N] [return f1, f2]
   json get|set|delete <key> <.path> [value]
+  json append|insert|incr <key> <.path> <v> : Change an array or a number in place.
+  json type|len|keys <key> [<.path>]  : Inspect a document.
   get where <pat>.<field> <op> <v> [limit N] [return f1, f2]
   count where ... | sum where ...   : Aggregates (op: = != > >= < <=).
-  create index on <pat> (<field>)   : Secondary index. Also: drop index, indexes.
+  create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
+                                    Also <pat>.<field>; drop index, indexes.
   get similar <pat>.<field> to [..] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
@@ -1263,51 +1266,137 @@ impl Session {
     }
 
     fn cmd_json(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str =
-            "Usage: json get <key> <.path> | json set <key> <.path> <value> | json delete <key> <.path>";
+        const USAGE: &str = "Usage: json get|type|len|keys <key> [<.path>] | json set <key> <.path> <value> \
+                             | json delete <key> <.path> | json append <key> <.path> <value>... \
+                             | json insert <key> <.path[n]> <value> | json incr <key> <.path> <number>";
         let mut c = Cur::new(a);
         let sub = c.next().ok_or(USAGE)?.text.to_ascii_lowercase();
         let key = key_for_read(c.next().ok_or(USAGE)?)?;
-        let path_text = word(c.next(), "a path such as .name").map_err(|_| USAGE.to_string())?;
+        let reading = matches!(sub.as_str(), "get" | "type" | "len" | "keys");
+        let path_text = match c.next() {
+            // `["a.b"]` reaches us as a JSON literal token.
+            Some(t) if t.kind == Kind::Json => t.text.clone(),
+            Some(t) => word(Some(t), "a path such as .name").map_err(|_| USAGE.to_string())?,
+            None if reading => ".".to_string(),
+            None => return Err(USAGE.into()),
+        };
         let path = jsonpath::parse_path(&path_text)?;
-        let Some((value, meta)) = self.kv_get(&key)? else {
-            return Err(format!("Key '{key}' not found."));
+        let at = match path_text.trim() {
+            _ if path.is_empty() => key.clone(),
+            p if p.starts_with(['.', '[']) => format!("{key}{p}"),
+            p => format!("{key}.{p}"),
         };
-        let Value::Doc(mut doc) = value else {
-            return Err(format!("TypeError: '{key}' is a [{}], not an object or array.", value.ty().name()));
-        };
-        match sub.as_str() {
-            "get" => {
-                c.finish(USAGE)?;
-                match jsonpath::get(&doc, &path) {
-                    Some(j) => {
-                        let v = Value::from_json(j.clone());
-                        out.say(format!("{key}{path_text}: {} [{}]", v.display(), v.ty().name()));
+
+        if reading {
+            c.finish(USAGE)?;
+            let Some((value, _)) = self.kv_get(&key)? else {
+                return Err(format!("Key '{key}' not found."));
+            };
+            let doc = doc_of(&key, value)?;
+            let Some(j) = jsonpath::get(&doc, &path) else {
+                out.say(format!("{at}: (nil)"));
+                return Ok(());
+            };
+            let ty = || Value::from_json(j.clone()).ty().name();
+            match sub.as_str() {
+                "get" => {
+                    let v = Value::from_json(j.clone());
+                    out.say(format!("{at}: {} [{}]", v.display(), v.ty().name()));
+                }
+                "type" => out.say(format!("{at}: [{}]", ty())),
+                "len" => match jsonpath::len(j) {
+                    Some(n) => out.say(format!("{at}: {n}")),
+                    None => return Err(format!("TypeError: {at} is a [{}], which has no length.", ty())),
+                },
+                _ => {
+                    let Json::Object(m) = j else {
+                        return Err(format!("TypeError: {at} is a [{}], not an object.", ty()));
+                    };
+                    if m.is_empty() {
+                        out.say(format!("{at}: no fields"));
                     }
-                    None => out.say(format!("{key}{path_text}: (nil)")),
+                    for k in m.keys() {
+                        out.say(k.clone());
+                    }
                 }
             }
-            "set" => {
-                let vt = c.next().ok_or(USAGE)?;
-                c.finish(USAGE)?;
-                let new = parse_value(vt, None, &key)?;
-                jsonpath::set(&mut doc, &path, new.to_json())?;
-                if !(doc.is_object() || doc.is_array()) {
-                    return Err("the root of a document must stay an object or array.".into());
+            return Ok(());
+        }
+
+        enum Change {
+            Set(Json),
+            Delete,
+            Append(Vec<Json>),
+            Insert(Json),
+            Incr(serde_json::Number),
+        }
+        let change = match sub.as_str() {
+            "set" => Change::Set(parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json()),
+            "delete" | "del" => Change::Delete,
+            "append" => {
+                let mut values = Vec::new();
+                while let Some(t) = c.next() {
+                    if t.kind != Kind::Comma {
+                        values.push(parse_value(t, None, &key)?.to_json());
+                    }
                 }
-                self.kv_put(&key, Value::Doc(doc), meta.expires_at, meta.msgpack)?;
-                out.say(format!("OK: {key}{path_text} updated."));
+                if values.is_empty() {
+                    return Err(USAGE.into());
+                }
+                Change::Append(values)
             }
-            "delete" | "del" => {
-                c.finish(USAGE)?;
-                if !jsonpath::delete(&mut doc, &path) {
-                    out.say(format!("Not found: {key}{path_text}"));
-                    return Ok(());
+            "insert" => Change::Insert(parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json()),
+            "incr" => {
+                let t = c.next().ok_or(USAGE)?;
+                match literal_json(&t.text, t.is_quoted()) {
+                    Ok(Json::Number(n)) if t.is_bare() => Change::Incr(n),
+                    _ => return Err("ValueError: the increment must be a number.".into()),
                 }
-                self.kv_put(&key, Value::Doc(doc), meta.expires_at, meta.msgpack)?;
-                out.say(format!("Deleted: {key}{path_text}"));
             }
             _ => return Err(USAGE.into()),
+        };
+        c.finish(USAGE)?;
+
+        // Read, change and write back under the engine lock: a client
+        // changing another field of the same document at the same time
+        // cannot lose this change, nor this one lose theirs.
+        let done = self.kv_modify(&key, |value| {
+            let mut doc = doc_of(&key, value)?;
+            let msg = match change {
+                Change::Set(v) => {
+                    jsonpath::set(&mut doc, &path, v).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    format!("OK: {at} updated.")
+                }
+                Change::Delete => {
+                    if !jsonpath::delete(&mut doc, &path) {
+                        return Ok((None, format!("Not found: {at}")));
+                    }
+                    format!("Deleted: {at}")
+                }
+                Change::Append(values) => {
+                    let n = jsonpath::append(&mut doc, &path, values)
+                        .map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    format!("OK: {at} now has {n} elements.")
+                }
+                Change::Insert(v) => {
+                    let n =
+                        jsonpath::insert(&mut doc, &path, v).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    format!("OK: inserted at {at}; the array now has {n} elements.")
+                }
+                Change::Incr(by) => {
+                    let v =
+                        jsonpath::incr(&mut doc, &path, &by).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    format!("{at}: {v} [number]")
+                }
+            };
+            if !(doc.is_object() || doc.is_array()) {
+                return Err(KivaError::Invalid("the root of a document must stay an object or array.".into()));
+            }
+            Ok((Some(Value::Doc(doc)), msg))
+        })?;
+        match done {
+            Some(msg) => out.say(msg),
+            None => return Err(format!("Key '{key}' not found.")),
         }
         Ok(())
     }
@@ -1494,7 +1583,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "auth" | "login" | "help" | "h" | "exit" | "quit" | "ping" | "version" | "clear" | "cls" => Need::None,
         "set" | "update" | "del" | "change" | "bump" | "begin" | "commit" | "rollback" | "savepoint" | "convert"
         | "eval" | "wait" => Need::Write,
-        "json" if !sub("get") => Need::Write,
+        "json" if !["get", "type", "len", "keys"].iter().any(|k| sub(k)) => Need::Write,
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,
         "semantic" if sub("store") || sub("clear") => Need::Write,
@@ -1533,4 +1622,13 @@ fn redact(cmd: &str, t: &[Token], line: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn doc_of(key: &str, value: Value) -> crate::error::Result<Json> {
+    match value {
+        Value::Doc(d) => Ok(d),
+        other => {
+            Err(KivaError::Invalid(format!("TypeError: '{key}' is a [{}], not an object or array.", other.ty().name())))
+        }
+    }
 }

@@ -1248,6 +1248,10 @@ A **path** designates a place inside a document:
 | `.name` | the field `name` |
 | `.address.city` | the field `city` inside the field `address` |
 | `.tags[0]` or `.tags.0` | the first element of the array `tags` |
+| `.tags[-1]` | the last element of `tags` (`-2` the one before, and so on) |
+| `["read.time"]` | the field `read.time`: a name with a dot, a space or a bracket goes between quotes and brackets |
+
+In the shell, quote a path that contains quotes, with the other kind of quote: `'.meta["read.time"]'`.
 
 ### 10.2 Reading a field
 
@@ -1296,6 +1300,8 @@ kiva> json delete user:2 .nothing
 Not found: user:2.nothing
 ```
 
+Every change of a field (`json set`, `json delete`, and those of [10.8](#108-arrays-and-numbers-in-place)) reads the document, changes it and writes it back as one step: two clients changing different fields of the same document at the same moment both see their change kept. Inside a transaction, the change waits for `commit` like any other write.
+
 ### 10.5 Replacing the whole document
 
 `update` with a new JSON literal replaces everything:
@@ -1337,6 +1343,53 @@ OK: user:1 converted to JSON (51 -> 70 bytes).
 ```
 
 `scan` shows `msgpack` in the STATUS column for keys stored that way.
+
+### 10.8 Arrays and numbers in place
+
+```text
+json append <key> <.path> <value> [, <value>...]
+json insert <key> <.path[n]> <value>
+json incr <key> <.path> <number>
+```
+
+```text
+kiva> set post:1 {"title": "Hello", "tags": ["news", "tech"], "views": 0}
+OK: post:1 saved.
+kiva> json append post:1 .tags "africa"
+OK: post:1.tags now has 3 elements.
+kiva> json insert post:1 .tags[0] "featured"
+OK: inserted at post:1.tags[0]; the array now has 4 elements.
+kiva> json get post:1 .tags[-1]
+post:1.tags[-1]: africa [string]
+kiva> json delete post:1 .tags[-1]
+Deleted: post:1.tags[-1]
+kiva> json incr post:1 .views 1
+post:1.views: 1 [number]
+kiva> json incr post:1 .stats.shares 1
+post:1.stats.shares: 1 [number]
+```
+
+* `json append` adds at the end; a missing field becomes a new array.
+* `json insert` puts the value before the position given: `[0]` at the start, `[-1]` before the last element, the array's length at the end.
+* `json incr` adds a number, negative to subtract; a missing field counts as 0. Whole numbers stay whole while they fit in 64 bits, and a sum that would not fit is refused.
+
+Because each of these is one step on the server ([10.4](#104-removing-a-field)), a counter kept with `json incr` by many clients at once never loses a step.
+
+### 10.9 Inspecting a document
+
+```text
+kiva> json type post:1 .tags
+post:1.tags: [array]
+kiva> json len post:1 .tags
+post:1.tags: 3
+kiva> json keys post:1
+title
+tags
+views
+stats
+```
+
+`json len` counts the elements of an array, the fields of an object or the characters of a string. Without a path, `json get`, `json type`, `json len` and `json keys` look at the whole document.
 
 ---
 
@@ -1392,7 +1445,8 @@ Sum: 96 (3 matches)
 Without help, a query has to open every document that matches the pattern. A **secondary index** keeps, in memory, the list of keys for each value of a field, so the answer is found directly.
 
 ```text
-create index on <pattern> (<field>)
+create index on <pattern> (<field>) [using btree|hash]
+create index on <pattern>.<field> [using btree|hash]
 ```
 
 ```text
@@ -1400,16 +1454,33 @@ kiva> create index on user: (role)
 Index created on user:* (role): 3 documents indexed.
 ```
 
-A pattern without wildcard is taken as a prefix: `user:` means `user:*`.
+A pattern without wildcard is taken as a prefix: `user:` means `user:*`. The second form splits pattern and field as conditions do ([11.1](#111-the-condition)): `create index on user:*.address.city` indexes `address.city`.
+
+An index keeps its values one of two ways:
+
+| Kind | Answers | Use it for |
+| :--- | :--- | :--- |
+| `btree` (the default) | `=`, `>`, `>=`, `<`, `<=` | Numbers, dates, anything compared or sorted |
+| `hash` | `=` only, in the same time whatever the number of distinct values | Identifiers, e-mails, codes: fields only ever compared with `=` |
+
+```text
+kiva> create index on user:*.name using hash
+Index created on user:* (name) using hash: 3 documents indexed.
+```
+
+A query with `>` or `<` on a field that has only a hash index reads the documents as if there were no index; `explain` shows it. A field has one index at a time: to change its kind, drop it and create it again.
 
 From then on the index is kept up to date by every write, automatically. Index definitions are saved and the indexes are rebuilt when KivaDB starts.
 
 ```text
 kiva> indexes
-user:* (role) - 3 documents indexed
+user:* (role) - 3 documents indexed, 2 distinct values
+user:* (name) - hash, 3 documents indexed, 3 distinct values
 kiva> drop index on user: (role)
 Index on user:* (role) dropped.
 ```
+
+A write that leaves an indexed field unchanged does not touch that index.
 
 Create an index on fields you filter on often. Each index uses memory and makes writes on matching keys slightly slower, so do not index everything.
 
@@ -4224,12 +4295,16 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `keys [like <pat>] [from <A> to <B>] [limit N] [reverse]` | Key names |
 | `scan [pattern] [limit N]` | Keys with details |
 | `range <A> to <B> [reverse] [limit N] [return f1, f2]` | Keys and values |
-| `json get <key> <.path>` | Read a field |
+| `json get <key> [<.path>]` | Read a field |
 | `json set <key> <.path> <value>` | Change a field |
 | `json delete <key> <.path>` | Remove a field |
+| `json append <key> <.path> <value> [, ...]` | Add at the end of an array |
+| `json insert <key> <.path[n]> <value>` | Insert into an array |
+| `json incr <key> <.path> <number>` | Add to a number |
+| `json type / len / keys <key> [<.path>]` | Type, length, field names |
 | `get where <pat>.<field> <op> <value> [limit N] [return f1, f2]` | Find documents |
 | `count where ...` / `sum where ...` | Aggregates |
-| `create index on <pat> (<field>)` | Create an index (admin) |
+| `create index on <pat> (<field>) [using btree\|hash]` | Create an index; also `on <pat>.<field>` (admin) |
 | `drop index on <pat> (<field>)` | Remove it (admin) |
 | `indexes` | List indexes |
 | `explain <query>` | Show the execution plan |

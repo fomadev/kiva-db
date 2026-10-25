@@ -7,7 +7,7 @@
 
 use crate::auth::{self, Priv, Role};
 use crate::compress::Compression;
-use crate::engine::VectorIndexKind;
+use crate::engine::{IndexKind, VectorIndexKind};
 use crate::exec::{key_for_read, uint, word, Cur, Out, R};
 use crate::lexer::{Kind, Token};
 use crate::repl;
@@ -85,8 +85,12 @@ impl Session {
                 if list.is_empty() && vectors.is_empty() {
                     out.say("No secondary indexes in this workspace.");
                 }
-                for (p, f, n) in list {
-                    out.say(format!("{p} ({f}) - {n} documents indexed"));
+                for i in list {
+                    let how = if i.kind == IndexKind::Hash { "hash, " } else { "" };
+                    out.say(format!(
+                        "{} ({}) - {how}{} documents indexed, {} distinct values",
+                        i.pattern, i.field, i.documents, i.values
+                    ));
                 }
                 for v in vectors {
                     let dims = v.dims.map(|d| format!("{d} dimensions")).unwrap_or_else(|| "empty".into());
@@ -222,9 +226,17 @@ impl Session {
             }
             Ok(())
         } else if c.eat("index") {
-            let (pattern, field) = parse_index_spec(&mut c, "create index on <pattern> (<field>)")?;
-            let n = self.engine.create_index(&pattern, &field)?;
-            out.say(format!("Index created on {pattern} ({field}): {n} documents indexed."));
+            const USAGE: &str = "create index on <pattern> (<field>) [using btree|hash]";
+            let (pattern, field) = parse_index_target(&mut c, USAGE)?;
+            let kind = if c.eat("using") {
+                IndexKind::parse(&word(c.next(), "an index kind")?).ok_or("the index kind must be btree or hash")?
+            } else {
+                IndexKind::BTree
+            };
+            c.finish(USAGE)?;
+            let n = self.engine.create_index_with(&pattern, &field, kind)?;
+            let how = if kind == IndexKind::Hash { " using hash" } else { "" };
+            out.say(format!("Index created on {pattern} ({field}){how}: {n} documents indexed."));
             Ok(())
         } else if c.eat("trigger") {
             const USAGE: &str = "create trigger [name] on set|update|del \"<pattern>\" run \"<script>\"";
@@ -1165,19 +1177,23 @@ fn parse_index_spec(c: &mut Cur, usage: &str) -> Result<(String, String), String
     Ok(target)
 }
 
-/// `on <pattern> (<field>)`, leaving what follows to the caller.
+/// `on <pattern> (<field>)` or `on <pattern>.<field>`, leaving what follows
+/// to the caller.
 fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
     if !c.eat("on") {
         return Err(format!("Usage: {usage}"));
     }
-    let mut pattern = word(c.next(), "a key pattern")?;
-    if !c.next().is_some_and(|t| t.kind == Kind::LParen) {
-        return Err(format!("Usage: {usage}"));
-    }
-    let field = word(c.next(), "a field name")?;
-    if !c.next().is_some_and(|t| t.kind == Kind::RParen) {
-        return Err(format!("Usage: {usage}"));
-    }
+    let target = word(c.next(), "a key pattern")?;
+    let (mut pattern, field) = if c.peek().is_some_and(|t| t.kind == Kind::LParen) {
+        c.next();
+        let field = word(c.next(), "a field name")?;
+        if !c.next().is_some_and(|t| t.kind == Kind::RParen) {
+            return Err(format!("Usage: {usage}"));
+        }
+        (target, field)
+    } else {
+        crate::exec::split_target(&target).map_err(|_| format!("Usage: {usage}"))?
+    };
     if !pattern.contains(['*', '?']) {
         pattern.push('*');
     }

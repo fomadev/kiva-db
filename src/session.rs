@@ -305,6 +305,37 @@ impl Session {
         self.apply(vec![BatchOp::Put { key: key.to_string(), value, expires_at, msgpack }])
     }
 
+    /// Read-modify-write of one key, atomic with respect to other clients:
+    /// see [`crate::engine::Engine::update_with`]. Inside a transaction the
+    /// change is buffered like any other write. Returns `None` when the key
+    /// does not exist.
+    pub fn kv_modify<T>(
+        &mut self,
+        key: &str,
+        f: impl FnOnce(Value) -> Result<(Option<Value>, T)>,
+    ) -> Result<Option<T>> {
+        if self.txn.is_some() {
+            let Some((value, meta)) = self.kv_get(key)? else {
+                return Ok(None);
+            };
+            let (new, out) = f(value)?;
+            if let Some(new) = new {
+                self.kv_put(key, new, meta.expires_at, meta.msgpack)?;
+            }
+            return Ok(Some(out));
+        }
+        self.writable()?;
+        self.inst.metrics.gets.fetch_add(1, Ordering::Relaxed);
+        let Some((out, wrote)) = self.engine.update_with(key, f)? else {
+            return Ok(None);
+        };
+        if wrote {
+            self.inst.metrics.sets.fetch_add(1, Ordering::Relaxed);
+            self.wrote = self.ws == "default";
+        }
+        Ok(Some(out))
+    }
+
     pub fn kv_del(&mut self, key: &str) -> Result<bool> {
         let existed = self.kv_exists(key)?;
         if existed {

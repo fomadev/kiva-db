@@ -257,10 +257,117 @@ fn queries_ranges_and_indexes() {
     ok(&mut s, r#"json set user:001 .role "admin""#);
     ok(&mut s, "del user:005");
     assert_eq!(ok(&mut s, r#"count where user:*.role = "admin""#), "Count: 6");
-    assert!(ok(&mut s, "indexes").contains("user:* (role) - 29 documents indexed"));
+    assert!(ok(&mut s, "indexes").contains("user:* (role) - 29 documents indexed, 2 distinct values"));
     assert!(ok(&mut s, r#"explain range "a" to "z""#).contains("ORDERED INDEX RANGE SCAN"));
     assert!(ok(&mut s, "explain get zebra").contains("POINT LOOKUP"));
     assert_eq!(ok(&mut s, "drop index on user: (role)"), "Index on user:* (role) dropped.");
+}
+
+#[test]
+fn json_changes_arrays_numbers_and_awkward_paths_in_place() {
+    let dir = TempDir::new("json-ops");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set doc {"tags": ["a", "b"], "n": 1, "m": {"x": 1}}"#);
+    assert_eq!(ok(&mut s, "json get doc .tags[-1]"), "doc.tags[-1]: b [string]");
+    assert_eq!(ok(&mut s, r#"json append doc .tags "c", "d""#), "OK: doc.tags now has 4 elements.");
+    assert_eq!(
+        ok(&mut s, r#"json insert doc .tags[0] "z""#),
+        "OK: inserted at doc.tags[0]; the array now has 5 elements."
+    );
+    assert_eq!(ok(&mut s, r#"json append doc .new 1"#), "OK: doc.new now has 1 elements.");
+    assert_eq!(ok(&mut s, "json delete doc .tags[-1]"), "Deleted: doc.tags[-1]");
+    assert_eq!(ok(&mut s, "json get doc .tags"), r#"doc.tags: ["z","a","b","c"] [array]"#);
+    assert_eq!(ok(&mut s, "json incr doc .n 41"), "doc.n: 42 [number]");
+    assert_eq!(ok(&mut s, "json incr doc .n -0.5"), "doc.n: 41.5 [number]");
+    assert_eq!(ok(&mut s, "json incr doc .stats.views 1"), "doc.stats.views: 1 [number]");
+    assert_eq!(ok(&mut s, r#"json set doc '["a.b"]' true"#), r#"OK: doc["a.b"] updated."#);
+    assert_eq!(ok(&mut s, r#"json get doc ["a.b"]"#), r#"doc["a.b"]: true [boolean]"#);
+    assert_eq!(ok(&mut s, "json type doc .m"), "doc.m: [object]");
+    assert_eq!(ok(&mut s, "json len doc .tags"), "doc.tags: 4");
+    assert_eq!(ok(&mut s, "json keys doc .m"), "x");
+    assert_eq!(ok(&mut s, "json len doc"), "doc: 6");
+    assert_eq!(ok(&mut s, "json get doc .nothing"), "doc.nothing: (nil)");
+
+    assert!(fails(&mut s, "json incr doc .tags 1").contains("not a number (doc.tags)"));
+    assert!(fails(&mut s, r#"json incr doc .n "1""#).contains("must be a number"));
+    assert!(fails(&mut s, "json append doc .n 1").contains("not an array"));
+    assert!(fails(&mut s, "json insert doc .tags[9] 1").contains("out of range"));
+    assert!(fails(&mut s, "json get doc .tags..x").contains("empty segment"));
+    assert!(fails(&mut s, "json len doc .n").contains("no length"));
+    assert!(fails(&mut s, "json incr ghost .n 1").contains("not found"));
+
+    // Inside a transaction the change waits for the commit.
+    ok(&mut s, "begin");
+    ok(&mut s, "json incr doc .stats.views 1");
+    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 2 [number]");
+    ok(&mut s, "rollback");
+    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 1 [number]");
+}
+
+#[test]
+fn field_changes_from_two_clients_never_undo_each_other() {
+    let dir = TempDir::new("json-race");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, r#"set counter {"a": 0, "b": 0}"#);
+    let workers: Vec<_> = ["a", "b"]
+        .into_iter()
+        .map(|field| {
+            let inst = inst.clone();
+            std::thread::spawn(move || {
+                let mut s = Session::new(inst, true, None);
+                for _ in 0..300 {
+                    ok(&mut s, &format!("json incr counter .{field} 1"));
+                    ok(&mut s, &format!(r#"json set counter .last_{field} "x""#));
+                }
+            })
+        })
+        .collect();
+    for w in workers {
+        w.join().unwrap();
+    }
+    assert_eq!(ok(&mut s, "json get counter .a"), "counter.a: 300 [number]");
+    assert_eq!(ok(&mut s, "json get counter .b"), "counter.b: 300 [number]");
+}
+
+#[test]
+fn hash_indexes_and_the_dotted_index_syntax() {
+    let dir = TempDir::new("hash-index");
+    let mut s = kiva(&dir);
+    for i in 1..=20 {
+        let city = ["Kinshasa", "Goma", "Lubumbashi", "Bukavu"][i % 4];
+        ok(&mut s, &format!(r#"set user:{i:02} {{"age": {}, "address": {{"city": "{city}"}}}}"#, 20 + i));
+    }
+    assert_eq!(
+        ok(&mut s, "create index on user:*.address.city using hash"),
+        "Index created on user:* (address.city) using hash: 20 documents indexed."
+    );
+    assert_eq!(
+        ok(&mut s, "create index on user:(age) using btree"),
+        "Index created on user:* (age): 20 documents indexed."
+    );
+    assert!(fails(&mut s, "create index on user: (age) using hash").contains("already exists (btree)"));
+    assert!(fails(&mut s, "create index on user: (x) using trie").contains("btree or hash"));
+    let list = ok(&mut s, "indexes");
+    assert!(list.contains("user:* (address.city) - hash, 20 documents indexed, 4 distinct values"), "{list}");
+    assert!(list.contains("user:* (age) - 20 documents indexed, 20 distinct values"), "{list}");
+
+    let plan = ok(&mut s, r#"explain get where user:*.address.city = "Goma""#);
+    assert!(plan.contains("INDEX SCAN") && plan.contains("using hash") && plan.contains("5 of 20"), "{plan}");
+    // A hash index cannot answer a range: it falls back to a scan.
+    ok(&mut s, "drop index on user:*.age");
+    let plan = ok(&mut s, r#"explain get where user:*.address.city > "A""#);
+    assert!(plan.contains("PREFIX SCAN"), "{plan}");
+
+    // Kept exact by field changes, deletes and restarts.
+    ok(&mut s, r#"json set user:02 .address.city "Goma""#);
+    ok(&mut s, "del user:05");
+    assert_eq!(ok(&mut s, r#"count where user:*.address.city = "Goma""#), "Count: 5");
+    drop(s);
+    let mut s = kiva(&dir);
+    assert!(ok(&mut s, "indexes").contains("user:* (address.city) - hash, 19 documents indexed"));
+    assert_eq!(ok(&mut s, r#"count where user:*.address.city = "Goma""#), "Count: 5");
+    assert!(ok(&mut s, r#"explain count where user:*.address.city = "Goma""#).contains("using hash"));
 }
 
 #[test]
