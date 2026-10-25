@@ -86,6 +86,7 @@ impl Session {
                 if list.is_empty() && vectors.is_empty() {
                     out.say("No secondary indexes in this workspace.");
                 }
+                let has_vectors = !vectors.is_empty();
                 for i in list {
                     let how = if i.kind == IndexKind::Hash { "hash, " } else { "" };
                     out.say(format!(
@@ -97,6 +98,12 @@ impl Session {
                     let dims = v.dims.map(|d| format!("{d} dimensions")).unwrap_or_else(|| "empty".into());
                     let mut extra =
                         if v.rejected > 0 { format!(", {} skipped (other length)", v.rejected) } else { String::new() };
+                    if v.not_vectors > 0 {
+                        extra.push_str(&format!(
+                            ", {} skipped (not an array of numbers: embeddings are computed by the application)",
+                            v.not_vectors
+                        ));
+                    }
                     if v.tombstones > 0 {
                         extra.push_str(&format!(", {} replaced or deleted awaiting a rebuild", v.tombstones));
                     }
@@ -106,7 +113,27 @@ impl Session {
                             format!("HNSW vector index ({}, m {}, ef {})", p.metric.name(), p.m, p.ef_construction)
                         }
                     };
-                    out.say(format!("{} ({}) - {kind}, {} vectors, {dims}{extra}", v.pattern, v.field, v.vectors));
+                    out.say(format!(
+                        "{} ({}) - {kind}, {} vectors, {dims}, {} in memory{extra}",
+                        v.pattern,
+                        v.field,
+                        v.vectors,
+                        human_size(v.memory_bytes as u64)
+                    ));
+                }
+                if has_vectors {
+                    let m = self.engine.memory();
+                    out.say(match m.vector_limit {
+                        0 => {
+                            format!("Vector memory: {} (no bound: vector.max_ram_mb = 0)", human_size(m.vectors as u64))
+                        }
+                        b => format!(
+                            "Vector memory: {} of {} ({:.1}%, vector.max_ram_mb)",
+                            human_size(m.vectors as u64),
+                            human_size(b as u64),
+                            m.vectors as f64 * 100.0 / b as f64
+                        ),
+                    });
                 }
                 Ok(())
             }
@@ -519,7 +546,8 @@ impl Session {
                     "storage",
                     "auto_compact" | "compact_threshold" | "compression" | "cache_values" | "cache_size_mb"
                     | "max_memory_mb" | "sync_writes",
-                ) => self.inst.apply_storage_config(),
+                )
+                | ("vector", "max_ram_mb") => self.inst.apply_storage_config(),
                 // Read again at every use: nothing to restart.
                 ("security", _)
                 | ("http", "rate_limit" | "cors" | "stream")
@@ -1066,7 +1094,15 @@ impl Session {
         out.say(format!("Memory of workspace '{}' (estimates)", self.ws));
         out.say(format!("  Keys              : {} ({} keys)", size(m.keys), m.key_count));
         out.say(format!("  Secondary indexes : {}", size(m.secondary)));
-        out.say(format!("  Vector indexes    : {}", size(m.vectors)));
+        match m.vector_limit {
+            0 => out.say(format!("  Vector indexes    : {} (no bound of their own)", size(m.vectors))),
+            b => out.say(format!(
+                "  Vector indexes    : {} of {} ({:.1}%, vector.max_ram_mb)",
+                size(m.vectors),
+                size(b),
+                m.vectors as f64 * 100.0 / b as f64
+            )),
+        }
         out.say(format!("  Pinned values     : {} ({} values)", size(m.pinned), m.pinned_values));
         out.say(format!("  Value cache       : {} (given back first)", size(m.cache)));
         out.say(format!("  Total             : {}", size(m.total())));

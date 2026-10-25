@@ -116,6 +116,8 @@ pub struct EngineOptions {
     pub cache_bytes: usize,
     /// Memory bound of this workspace in bytes; 0 = no bound. See [`Engine::check_room`].
     pub max_memory_bytes: usize,
+    /// Memory bound of the vector indexes in bytes; 0 = none of their own.
+    pub max_vector_bytes: usize,
     /// Encryption at rest: new records are encrypted with the current key.
     pub keys: Option<Arc<Keys>>,
     /// Refuse unencrypted records (and an unencrypted index snapshot).
@@ -135,6 +137,7 @@ impl Default for EngineOptions {
             background: true,
             cache_bytes: 0,
             max_memory_bytes: 0,
+            max_vector_bytes: 0,
             keys: None,
             require_encryption: false,
         }
@@ -429,6 +432,8 @@ pub struct MemoryReport {
     pub cache: usize,
     /// `storage.max_memory_mb` in bytes; 0 = no bound.
     pub limit: usize,
+    /// `vector.max_ram_mb` in bytes; 0 = no bound of their own.
+    pub vector_limit: usize,
 }
 
 impl MemoryReport {
@@ -537,6 +542,17 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
     }
 }
 
+/// A graph search pre-filters through a secondary index only when the
+/// candidates are at most this fraction of the graph (1/10).
+const PREFILTER_RATIO: usize = 10;
+
+fn as_doc(v: &Value) -> Option<&Json> {
+    match v {
+        Value::Doc(j) => Some(j),
+        _ => None,
+    }
+}
+
 fn pattern_covers(index_pattern: &str, query_pattern: &str) -> bool {
     if index_pattern == query_pattern || index_pattern == "*" {
         return true;
@@ -577,10 +593,9 @@ struct Inner {
     cache: ValueCache,
     /// Sum of `key_cost` over the index, kept up to date on every change.
     key_bytes: usize,
-    /// Memory of the vector indexes, refreshed by the maintenance thread
-    /// (walking them on every write would cost too much).
-    vec_bytes: usize,
     max_memory: usize,
+    /// `vector.max_ram_mb` in bytes; 0 = no bound of their own.
+    max_vectors: usize,
     keys: Option<Arc<Keys>>,
     active_txns: usize,
     /// Versions of keys deleted while a transaction was open.
@@ -843,8 +858,16 @@ impl Inner {
     }
 
     fn rebuild_vec(&mut self, i: usize) {
-        self.vecs[i].clear();
-        let pattern = self.vecs[i].pattern.clone();
+        let mut index = std::mem::replace(&mut self.vecs[i], VecIndex::new("", "", Vec::new()));
+        self.build_vec(&mut index, usize::MAX);
+        self.vecs[i] = index;
+    }
+
+    /// Fills `index` from the documents on disk, stopping once it holds
+    /// more than `budget` bytes. Returns whether every document was read.
+    fn build_vec(&mut self, index: &mut VecIndex, budget: usize) -> bool {
+        index.clear();
+        let pattern = index.pattern.clone();
         let prefix = glob_prefix(&pattern).to_string();
         let now = now_secs();
         let keys: Vec<(String, Entry)> = self
@@ -855,10 +878,14 @@ impl Inner {
             .map(|(k, e)| (k.clone(), e.clone()))
             .collect();
         for (k, e) in keys {
+            if index.memory_bytes() > budget {
+                return false;
+            }
             if let Ok(Value::Doc(doc)) = self.read_value(&k, &e) {
-                self.vecs[i].update(&k, Some(&doc));
+                index.update(&k, Some(&doc));
             }
         }
+        true
     }
 
     /// Brings a graph read from disk up to date: it reflected the data up to
@@ -1031,8 +1058,57 @@ impl Inner {
         self.key_bytes = self.index.keys().map(|k| key_cost(k)).sum();
     }
 
-    fn refresh_vec_bytes(&mut self) {
-        self.vec_bytes = self.vecs.iter().map(|v| v.memory_bytes()).sum();
+    /// Memory of the vector indexes; each one keeps its own count.
+    fn vec_bytes(&self) -> usize {
+        self.vecs.iter().map(|v| v.memory_bytes()).sum()
+    }
+
+    /// Memory the vector indexes would gain from writing `doc` under `key`.
+    fn vector_growth(&self, key: &str, doc: Option<&Json>) -> usize {
+        self.vecs.iter().map(|v| v.growth(key, doc)).sum()
+    }
+
+    /// Bytes the vector indexes may still take under both bounds.
+    fn vector_room_left(&self) -> usize {
+        let mut left = usize::MAX;
+        if self.max_vectors > 0 {
+            left = self.max_vectors.saturating_sub(self.vec_bytes());
+        }
+        if self.max_memory > 0 {
+            left = left.min(self.max_memory.saturating_sub(self.memory().resident()));
+        }
+        left
+    }
+
+    /// Refuses a write that would take the vector indexes past their bound,
+    /// or past the workspace's memory bound. Vector indexes live in memory
+    /// only, so this is what stops them from exhausting the machine's RAM.
+    fn check_vector_room(&self, added: usize) -> Result<()> {
+        if added == 0 {
+            return Ok(());
+        }
+        let size = |n: usize| crate::util::human_size(n as u64);
+        let used = self.vec_bytes();
+        if self.max_vectors > 0 && used + added > self.max_vectors {
+            return Err(KivaError::Other(format!(
+                "OOM: the vector indexes of this workspace reached their memory bound ({} of {} used), \
+                 so new vectors are refused. Delete documents, drop a vector index, or raise vector.max_ram_mb.",
+                size(used),
+                size(self.max_vectors)
+            )));
+        }
+        if self.max_memory > 0 {
+            let m = self.memory();
+            if m.resident() + added > self.max_memory {
+                return Err(KivaError::Other(format!(
+                    "OOM: this workspace reached its memory bound ({} of {} used), so new vectors are refused. \
+                     Delete keys or expired data, drop an index, or raise storage.max_memory_mb.",
+                    size(m.resident()),
+                    size(self.max_memory)
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn memory(&self) -> MemoryReport {
@@ -1046,12 +1122,13 @@ impl Inner {
             keys: self.key_bytes + self.expiry.len() * (avg_key + 2 * std::mem::size_of::<String>()),
             key_count: n,
             secondary: self.sec.iter().map(|s| s.rev.len() * per_doc).sum(),
-            vectors: self.vec_bytes,
+            vectors: self.vec_bytes(),
             pinned: self.cache.pinned_bytes(),
             pinned_values: self.cache.pinned_len(),
             pinned_patterns: self.cache.patterns().to_vec(),
             cache: self.cache.bytes(),
             limit: self.max_memory,
+            vector_limit: self.max_vectors,
         }
     }
 
@@ -1270,8 +1347,8 @@ impl Engine {
             vecs: Vec::new(),
             cache: ValueCache::new(opts.cache_bytes),
             key_bytes: 0,
-            vec_bytes: 0,
             max_memory: opts.max_memory_bytes,
+            max_vectors: opts.max_vector_bytes,
             keys: opts.keys.clone(),
             active_txns: 0,
             tomb_versions: HashMap::new(),
@@ -1336,7 +1413,6 @@ impl Engine {
                 }
             }
         }
-        inner.refresh_vec_bytes();
         inner.load.ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let signal = Arc::new(Signal { wake: Mutex::new(false), cv: Condvar::new(), stop: AtomicBool::new(false) });
@@ -1520,11 +1596,24 @@ impl Engine {
 
     /// Stores `value` under `key`. Returns whether the key was created.
     pub fn put(&self, key: &str, value: &Value, expires_at: i64, msgpack: bool) -> Result<bool> {
-        self.put_at(key, value, expires_at, msgpack, now_secs())
+        self.put_at(key, value, expires_at, msgpack, now_secs(), true)
     }
 
-    fn put_at(&self, key: &str, value: &Value, expires_at: i64, msgpack: bool, timestamp: i64) -> Result<bool> {
+    /// `check`: refuse a vector past the memory bounds (never for what a
+    /// master sent: the replica must stay a copy).
+    fn put_at(
+        &self,
+        key: &str,
+        value: &Value,
+        expires_at: i64,
+        msgpack: bool,
+        timestamp: i64,
+        check: bool,
+    ) -> Result<bool> {
         let mut inner = self.lock();
+        if check {
+            inner.check_vector_room(inner.vector_growth(key, as_doc(value)))?;
+        }
         let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
@@ -1555,6 +1644,7 @@ impl Engine {
         let Some(new) = new else {
             return Ok(Some((out, false)));
         };
+        inner.check_vector_room(inner.vector_growth(key, as_doc(&new)))?;
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
@@ -1603,7 +1693,7 @@ impl Engine {
         expires_at: i64,
     ) -> Result<()> {
         let value = Value::decode(ty, raw, msgpack)?;
-        self.put_at(key, &value, expires_at, msgpack, timestamp).map(|_| ())
+        self.put_at(key, &value, expires_at, msgpack, timestamp, false).map(|_| ())
     }
 
     pub fn delete(&self, key: &str) -> Result<bool> {
@@ -1662,6 +1752,7 @@ impl Engine {
         let mut recs: Vec<Vec<u8>> = Vec::with_capacity(ops.len());
         // Later operations in the batch must see earlier ones.
         let mut shadow: HashMap<String, bool> = HashMap::new();
+        let mut vector_growth = 0;
         for op in ops {
             match op {
                 BatchOp::Put { key, value, expires_at, msgpack } => {
@@ -1671,6 +1762,7 @@ impl Engine {
                         None => inner.live(&key, now).is_some(),
                     };
                     shadow.insert(key.clone(), true);
+                    vector_growth += inner.vector_growth(&key, as_doc(&value));
                     let doc = match value {
                         Value::Doc(j) => Some(j),
                         _ => None,
@@ -1695,6 +1787,7 @@ impl Engine {
         if recs.is_empty() {
             return Ok(());
         }
+        inner.check_vector_room(vector_growth)?;
         // Mark the final record as the commit point (flags byte is covered by
         // the CRC, so re-stamp it).
         let last = recs.last_mut().unwrap();
@@ -2186,9 +2279,6 @@ impl Engine {
                     g.rebuild();
                 }
             }
-            if inner.ticks.is_multiple_of(5) {
-                inner.refresh_vec_bytes();
-            }
             // Writing a large graph costs more than replaying the few writes it
             // misses at the next start: save it after many changes, not often.
             let changes = inner.graph_changes();
@@ -2371,14 +2461,17 @@ impl Engine {
 
     /// Where this workspace's memory goes.
     pub fn memory(&self) -> MemoryReport {
-        let mut inner = self.lock();
-        inner.refresh_vec_bytes();
-        inner.memory()
+        self.lock().memory()
     }
 
     /// Sets the memory bound in bytes; 0 removes it.
     pub fn set_memory_limit(&self, bytes: usize) {
         self.lock().max_memory = bytes;
+    }
+
+    /// Sets the memory bound of the vector indexes in bytes; 0 removes it.
+    pub fn set_vector_limit(&self, bytes: usize) {
+        self.lock().max_vectors = bytes;
     }
 
     /// Checks that writing `keys` fits in the memory bound. Changing a key
@@ -2482,10 +2575,24 @@ impl Engine {
         if inner.vecs.iter().any(|v| v.pattern == pattern && v.field == field) {
             return Err(KivaError::Exists(format!("vector index on {pattern} ({field}) already exists")));
         }
-        inner.vecs.push(VecIndex::with_kind(pattern, field, path, kind));
-        let i = inner.vecs.len() - 1;
-        inner.rebuild_vec(i);
-        let n = inner.vecs[i].len();
+        // Built, then measured: the size of a vector is known once it is read.
+        // The new index is not counted yet, so it is checked against the rest.
+        // The build stops as soon as it passes the room left, so that an
+        // index too large for the bounds never fills the memory first.
+        let mut index = VecIndex::with_kind(pattern, field, path, kind);
+        let room = inner.vector_room_left();
+        let complete = inner.build_vec(&mut index, room);
+        let (n, built) = (index.len(), index.memory_bytes());
+        if let Err(e) = inner.check_vector_room(built) {
+            let e = e.to_string();
+            let what = if complete { "would hold" } else { "stopped building after" };
+            return Err(KivaError::Other(format!(
+                "the vector index on {pattern} ({field}) {what} {n} vectors in {}. {}",
+                crate::util::human_size(built as u64),
+                e.strip_prefix("Error: ").unwrap_or(&e)
+            )));
+        }
+        inner.vecs.push(index);
         self.save_meta(&inner)?;
         if kind != VectorIndexKind::Exact {
             // Building the graph took a while: keep it for the next start.
@@ -2521,7 +2628,9 @@ impl Engine {
                 vectors: v.len(),
                 dims: v.dims,
                 rejected: v.rejected,
+                not_vectors: v.not_vectors,
                 tombstones: v.graph().map_or(0, |g| g.tombstones()),
+                memory_bytes: v.memory_bytes(),
             })
             .collect()
     }
@@ -2535,77 +2644,188 @@ impl Engine {
             return Err(KivaError::Invalid("a query vector contains only finite numbers".into()));
         }
         let path = jsonpath::parse_path(&q.field).map_err(KivaError::Invalid)?;
+        let mut filter = Vec::with_capacity(q.filter.len());
+        for c in &q.filter {
+            filter.push((jsonpath::parse_path(&c.field).map_err(KivaError::Invalid)?, c));
+        }
+        let passes = |doc: &Json| {
+            filter.iter().all(|(p, c)| jsonpath::get(doc, p).is_some_and(|v| compare_json(v, c.op, &c.value)))
+        };
         let query = vector::Query::new(q.vector.clone(), q.metric);
         let mut inner = self.lock();
         let now = now_secs();
         let limit = if q.limit == 0 { 10 } else { q.limit };
 
         let index = inner.vecs.iter().position(|v| v.field == q.field && pattern_covers(&v.pattern, &q.pattern));
-        let (scored, examined, indexed, approximate) = match index {
-            Some(i) => {
-                if let Some(d) = inner.vecs[i].dims {
-                    if d != query.dims() {
-                        return Err(KivaError::Invalid(format!(
-                            "the query vector has {} dimensions, the indexed vectors have {d} dimensions",
-                            query.dims()
-                        )));
-                    }
+        if let Some(d) = index.and_then(|i| inner.vecs[i].dims) {
+            if d != query.dims() {
+                return Err(KivaError::Invalid(format!(
+                    "the query vector has {} dimensions, the indexed vectors have {d} dimensions",
+                    query.dims()
+                )));
+            }
+        }
+        // The graph answers searches over its whole pattern, with the metric
+        // it was built for. Anything else compares every vector.
+        let graph = index.filter(|&i| {
+            let v = &inner.vecs[i];
+            v.graph().is_some_and(|g| !q.exact && g.params.metric == q.metric && q.pattern == v.pattern)
+        });
+        // Pre-filtering: the condition a secondary index narrows the most.
+        // Its candidates are compared one by one, which is exact; with a
+        // graph, only when they are few enough to beat the graph search.
+        let narrowest = q
+            .filter
+            .iter()
+            .filter_map(|c| Self::find_index(&inner, c).map(|i| (i, Self::index_candidates(&inner.sec[i], c))))
+            .min_by_key(|(_, keys)| keys.len());
+        let prefilter = narrowest.filter(|(_, keys)| match graph {
+            Some(i) => keys.len().saturating_mul(PREFILTER_RATIO) <= inner.vecs[i].len(),
+            None => true,
+        });
+
+        // Documents read to test the filter, kept for the answer.
+        let mut docs: HashMap<String, Json> = HashMap::new();
+        let mut read = 0usize;
+        let (chosen, examined, compared, approximate, how) = if let Some((s, candidates)) = prefilter {
+            let examined = candidates.len();
+            let mut scored = Vec::new();
+            for key in candidates {
+                if !glob_match(&q.pattern, &key) {
+                    continue;
                 }
-                let index_ref = &inner.vecs[i];
-                let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
-                // The graph answers searches over its whole pattern, with the
-                // metric it was built for. Anything else compares every vector.
-                let graph = index_ref
-                    .graph()
-                    .filter(|g| !q.exact && g.params.metric == q.metric && q.pattern == index_ref.pattern);
-                match graph {
-                    Some(g) => {
-                        let ef = if q.ef == 0 { hnsw::DEFAULT_EF_SEARCH } else { q.ef };
-                        let found = g.search(&query.vector, limit, ef, live);
-                        let scored: Vec<(String, f32)> = found
-                            .keys
-                            .into_iter()
-                            .filter_map(|k| index_ref.get(&k).map(|(v, n)| (k.clone(), query.score(v, n))))
-                            .collect();
-                        (scored, found.compared, true, true)
-                    }
+                let Some(e) = inner.live(&key, now) else { continue };
+                let Value::Doc(doc) = inner.value_of(&key, &e)? else { continue };
+                read += 1;
+                if !passes(&doc) {
+                    continue;
+                }
+                let found = match index {
+                    Some(i) => inner.vecs[i].get(&key).map(|(v, n)| query.score(v, n)),
                     None => {
-                        let scored = index_ref.scores(&q.pattern, &query, live);
-                        let n = scored.len();
-                        (scored, n, true, false)
+                        vector::extract(&doc, &path).filter(|v| v.len() == query.dims()).map(|v| query.score_vec(&v))
                     }
+                };
+                if let Some(score) = found {
+                    scored.push((key.clone(), score));
+                    docs.insert(key, doc);
                 }
             }
-            None => {
-                let prefix = glob_prefix(&q.pattern).to_string();
-                let candidates: Vec<(String, Entry)> = inner
-                    .index
-                    .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-                    .take_while(|(k, _)| k.starts_with(&prefix))
-                    .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(&q.pattern, k))
-                    .map(|(k, e)| (k.clone(), e.clone()))
-                    .collect();
-                let examined = candidates.len();
-                let mut scored = Vec::new();
-                for (k, e) in candidates {
-                    if let Value::Doc(doc) = inner.value_of(&k, &e)? {
-                        if let Some(v) = vector::extract(&doc, &path).filter(|v| v.len() == query.dims()) {
-                            scored.push((k, query.score_vec(&v)));
+            let ix = &inner.sec[s];
+            let how = format!("pre-filtered by the index on {} ({}), {read} documents read", ix.pattern, ix.field);
+            let n = scored.len();
+            (vector::top_k(scored, limit, &query), examined, n, false, Some(how))
+        } else if let Some(i) = graph {
+            // Searched in the graph, then filtered: when too few of the found
+            // keys pass, the search asks for more, until the graph is exhausted.
+            let ef = if q.ef == 0 { hnsw::DEFAULT_EF_SEARCH } else { q.ef };
+            let mut want = limit;
+            let mut seen: HashMap<String, bool> = HashMap::new();
+            let mut compared = 0;
+            let mut scored = Vec::new();
+            loop {
+                let found = {
+                    let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
+                    let g = inner.vecs[i].graph().expect("graph index");
+                    g.search(&query.vector, want, ef.max(want), live)
+                };
+                compared += found.compared;
+                let total = inner.vecs[i].len();
+                for key in found.keys {
+                    if seen.contains_key(&key) {
+                        continue;
+                    }
+                    let ok = filter.is_empty() || {
+                        let doc = match inner.live(&key, now) {
+                            Some(e) => Some(inner.value_of(&key, &e)?),
+                            None => None,
+                        };
+                        read += 1;
+                        match doc {
+                            Some(Value::Doc(d)) if passes(&d) => {
+                                docs.insert(key.clone(), d);
+                                true
+                            }
+                            _ => false,
+                        }
+                    };
+                    seen.insert(key.clone(), ok);
+                    if ok {
+                        if let Some((v, n)) = inner.vecs[i].get(&key) {
+                            scored.push((key, query.score(v, n)));
                         }
                     }
                 }
-                (scored, examined, false, false)
+                if filter.is_empty() || scored.len() >= limit || want >= total {
+                    break;
+                }
+                want = want.saturating_mul(4).min(total);
             }
+            let how = (!filter.is_empty()).then(|| format!("tested on the graph's matches, {read} documents read"));
+            (vector::top_k(scored, limit, &query), compared, compared, true, how)
+        } else if let Some(i) = index {
+            let scored = {
+                let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
+                inner.vecs[i].scores(&q.pattern, &query, live)
+            };
+            let n = scored.len();
+            if filter.is_empty() {
+                (vector::top_k(scored, limit, &query), n, n, false, None)
+            } else {
+                // Post-filtering: closest first, until enough pass.
+                let mut chosen = Vec::new();
+                for (key, score) in vector::top_k(scored, n, &query) {
+                    let Some(e) = inner.live(&key, now) else { continue };
+                    let Value::Doc(doc) = inner.value_of(&key, &e)? else { continue };
+                    read += 1;
+                    if passes(&doc) {
+                        docs.insert(key.clone(), doc);
+                        chosen.push((key, score));
+                        if chosen.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                let how = format!("tested on the closest vectors first, {read} documents read");
+                (chosen, n, n, false, Some(how))
+            }
+        } else {
+            let prefix = glob_prefix(&q.pattern).to_string();
+            let candidates: Vec<(String, Entry)> = inner
+                .index
+                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                .take_while(|(k, _)| k.starts_with(&prefix))
+                .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(&q.pattern, k))
+                .map(|(k, e)| (k.clone(), e.clone()))
+                .collect();
+            let examined = candidates.len();
+            let mut scored = Vec::new();
+            for (k, e) in candidates {
+                if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                    if !passes(&doc) {
+                        continue;
+                    }
+                    if let Some(v) = vector::extract(&doc, &path).filter(|v| v.len() == query.dims()) {
+                        scored.push((k, query.score_vec(&v)));
+                    }
+                }
+            }
+            let n = scored.len();
+            let how = (!filter.is_empty()).then(|| "tested on every document read".to_string());
+            (vector::top_k(scored, limit, &query), examined, n, false, how)
         };
-        let compared = if approximate { examined } else { scored.len() };
         let mut rows = Vec::new();
-        for (key, score) in vector::top_k(scored, limit, &query) {
+        for (key, score) in chosen {
+            if let Some(doc) = docs.remove(&key) {
+                rows.push((key, score, doc));
+                continue;
+            }
             let Some(e) = inner.live(&key, now) else { continue };
             if let Value::Doc(doc) = inner.value_of(&key, &e)? {
                 rows.push((key, score, doc));
             }
         }
-        Ok(VectorResult { rows, indexed, approximate, examined, compared })
+        Ok(VectorResult { rows, indexed: index.is_some(), approximate, examined, compared, filter: how })
     }
 
     /// The index that can answer `cond`; for `=`, a hash index is preferred.
@@ -2875,11 +3095,23 @@ pub struct VectorQuery {
     pub ef: usize,
     /// Compare every vector even when an HNSW index exists.
     pub exact: bool,
+    /// Conditions on the documents' other fields, all of which must hold;
+    /// their pattern is the query's.
+    pub filter: Vec<Cond>,
 }
 
 impl VectorQuery {
     pub fn new(pattern: &str, field: &str, vector: Vec<f32>, metric: Metric, limit: usize) -> VectorQuery {
-        VectorQuery { pattern: pattern.into(), field: field.into(), vector, metric, limit, ef: 0, exact: false }
+        VectorQuery {
+            pattern: pattern.into(),
+            field: field.into(),
+            vector,
+            metric,
+            limit,
+            ef: 0,
+            exact: false,
+            filter: Vec::new(),
+        }
     }
 }
 
@@ -2893,8 +3125,11 @@ pub struct VectorIndexInfo {
     pub dims: Option<usize>,
     /// Documents skipped because their vector had another length.
     pub rejected: usize,
+    /// Documents whose field held something else than numbers (text to embed).
+    pub not_vectors: usize,
     /// HNSW: deleted or replaced vectors waiting for the graph to be rebuilt.
     pub tombstones: usize,
+    pub memory_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -2909,4 +3144,6 @@ pub struct VectorResult {
     pub examined: usize,
     /// Vectors actually compared (right field, right number of dimensions).
     pub compared: usize,
+    /// How the filter was applied, when there is one.
+    pub filter: Option<String>,
 }

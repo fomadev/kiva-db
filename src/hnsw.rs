@@ -134,6 +134,9 @@ pub struct Hnsw {
     rng: u64,
     /// Insertions and removals since the graph was last saved.
     pub changes: u64,
+    /// Memory held by the nodes and the key map, kept up to date so that a
+    /// write can be checked against the vector memory bound in O(1).
+    bytes: usize,
     visits: RefCell<Visits>,
 }
 
@@ -154,6 +157,7 @@ impl Hnsw {
             deleted: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
             changes: 0,
+            bytes: 0,
             visits: RefCell::default(),
         }
     }
@@ -172,13 +176,16 @@ impl Hnsw {
         self.deleted
     }
 
+    /// Memory of the graph, tombstones included, counting every layer of a
+    /// node as full: an estimate that a growing graph does not outrun.
     pub fn memory_bytes(&self) -> usize {
-        let nodes: usize = self
-            .nodes
-            .iter()
-            .map(|n| n.key.len() + n.vector.len() * 4 + n.links.iter().map(|l| l.len() * 4 + 24).sum::<usize>() + 80)
-            .sum();
-        nodes + self.ids.keys().map(|k| k.len() + 40).sum::<usize>()
+        self.bytes
+    }
+
+    /// What a node of `levels` layers and its entry in the key map cost.
+    pub fn node_bytes(&self, key: usize, dims: usize, levels: usize) -> usize {
+        let links: usize = (0..levels).map(|l| self.max_links(l) * 4 + 24).sum();
+        key + dims * 4 + links + 80 + key + 40
     }
 
     pub fn clear(&mut self) {
@@ -199,6 +206,8 @@ impl Hnsw {
 
     pub fn remove(&mut self, key: &str) {
         if let Some(id) = self.ids.remove(key) {
+            // The node stays as a tombstone until the graph is rebuilt.
+            self.bytes -= key.len() + 40;
             self.nodes[id as usize].deleted = true;
             self.deleted += 1;
             self.changes += 1;
@@ -357,6 +366,7 @@ impl Hnsw {
         let level = self.random_level();
         let id = self.nodes.len() as u32;
         let vn = norm(&vector);
+        self.bytes += self.node_bytes(key.len(), vector.len(), level + 1);
         self.nodes.push(Node {
             key: key.to_string(),
             vector,
@@ -495,7 +505,9 @@ impl Hnsw {
                 links.push(l);
             }
             let id = g.nodes.len() as u32;
+            g.bytes += g.node_bytes(key.len(), vector.len(), links.len());
             if deleted {
+                g.bytes -= key.len() + 40;
                 g.deleted += 1;
             } else {
                 g.ids.insert(key.clone(), id);

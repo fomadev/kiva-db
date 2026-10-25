@@ -371,6 +371,226 @@ fn hnsw_speed() {
     assert_eq!(e.list_vector_indexes()[0].vectors, n);
 }
 
+/// The `limit` closest keys by cosine among the documents `keep` accepts.
+fn brute_force(
+    docs: &[(String, Vec<f32>, Json)],
+    q: &[f32],
+    keep: impl Fn(&Json) -> bool,
+    limit: usize,
+) -> Vec<String> {
+    let cos = |v: &[f32]| {
+        let d: f32 = v.iter().zip(q).map(|(a, b)| a * b).sum();
+        d / (v.iter().map(|x| x * x).sum::<f32>().sqrt() * q.iter().map(|x| x * x).sum::<f32>().sqrt())
+    };
+    let mut scored: Vec<(f32, &String)> = docs.iter().filter(|d| keep(&d.2)).map(|d| (cos(&d.1), &d.0)).collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(b.1)));
+    scored.into_iter().take(limit).map(|(_, k)| k.clone()).collect()
+}
+
+#[test]
+fn vector_search_filters_on_metadata_before_or_after_the_similarity() {
+    use kivadb::engine::{CmpOp, Cond};
+    let dir = TempDir::new("vector_filter");
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(0)).unwrap();
+    let vectors = random_vectors(2000, 8, 21);
+    let docs: Vec<(String, Vec<f32>, Json)> = vectors
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let meta = json!({
+                "lang": if i % 10 == 0 { "fr" } else { "en" },
+                "year": 2000 + (i % 25) as i64,
+                "tag": if i % 400 == 0 { "rare" } else { "common" },
+            });
+            (format!("chunk:{i:05}"), v, meta)
+        })
+        .collect();
+    for (k, v, meta) in &docs {
+        embed(&e, k, v, meta.clone());
+    }
+    let cond = |field: &str, op: CmpOp, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op, value };
+    let fr = || cond("lang", CmpOp::Eq, json!("fr"));
+    let recent = || cond("year", CmpOp::Ge, json!(2020));
+    let is_fr_recent = |d: &Json| d["lang"] == "fr" && d["year"].as_i64().unwrap() >= 2020;
+    let q = vec![0.3, -0.1, 0.2, 0.0, 0.1, 0.25, -0.2, 0.05];
+    let search = |filter: Vec<Cond>, exact: bool| {
+        let mut vq = query("chunk:*", q.clone(), Metric::Cosine, 5);
+        vq.filter = filter;
+        vq.exact = exact;
+        e.similar(&vq).unwrap()
+    };
+    let keys = |r: &kivadb::engine::VectorResult| r.rows.iter().map(|(k, _, _)| k.clone()).collect::<Vec<_>>();
+    let truth = brute_force(&docs, &q, is_fr_recent, 5);
+    assert_eq!(truth.len(), 5);
+
+    // Without a vector index the filter is tested on every document read.
+    let r = search(vec![fr(), recent()], false);
+    assert_eq!(keys(&r), truth);
+    assert!(r.filter.as_deref().unwrap().contains("every document"), "{:?}", r.filter);
+
+    // An exact index: closest first, documents read only until 5 pass.
+    e.create_vector_index("chunk:*", "embedding").unwrap();
+    let r = search(vec![fr(), recent()], false);
+    assert_eq!(keys(&r), truth);
+    let how = r.filter.unwrap();
+    assert!(how.contains("closest vectors first"), "{how}");
+    let read: usize = how.split(", ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+    assert!(read < 2000 / 4, "{read} documents read for 5 results");
+
+    // An HNSW graph: searched, then filtered, widening until enough pass.
+    e.drop_vector_index("chunk:*", "embedding").unwrap();
+    e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap();
+    let r = search(vec![fr(), recent()], false);
+    assert!(r.approximate);
+    assert_eq!(r.rows.len(), 5);
+    assert!(r.rows.iter().all(|(_, _, d)| is_fr_recent(d)));
+    let found = keys(&r).iter().filter(|k| truth.contains(k)).count();
+    assert!(found >= 4, "recall {found}/5");
+    // A filter nothing passes ends with the whole graph explored.
+    assert!(search(vec![cond("lang", CmpOp::Eq, json!("sw"))], false).rows.is_empty());
+
+    // A secondary index serving a selective condition: pre-filtering, exact.
+    e.create_index("chunk:*", "tag").unwrap();
+    let rare = || cond("tag", CmpOp::Eq, json!("rare"));
+    let r = search(vec![rare()], false);
+    assert!(!r.approximate, "few candidates are compared one by one");
+    assert_eq!(r.examined, 5);
+    assert!(r.filter.as_deref().unwrap().contains("pre-filtered by the index on chunk:* (tag)"));
+    assert_eq!(keys(&r), brute_force(&docs, &q, |d| d["tag"] == "rare", 5));
+    // Not selective enough for a graph: the graph is searched instead.
+    e.create_index("chunk:*", "lang").unwrap();
+    let r = search(vec![cond("lang", CmpOp::Eq, json!("en"))], false);
+    assert!(r.approximate);
+    assert!(r.rows.iter().all(|(_, _, d)| d["lang"] == "en"));
+    // Exact on request: the index's candidates, every one compared.
+    let r = search(vec![fr(), recent()], true);
+    assert_eq!(keys(&r), truth);
+    assert!(r.filter.unwrap().contains("pre-filtered"));
+}
+
+#[test]
+fn vector_indexes_stay_within_their_memory_bound() {
+    let dir = TempDir::new("vector_ram");
+    let path = dir.path().join("store.kiva");
+    // 64 dimensions: about 330 bytes per vector in an exact index.
+    let opts = || EngineOptions { max_vector_bytes: 16 * 1024, ..quiet(0) };
+    let e = Engine::open(&path, opts()).unwrap();
+    e.create_vector_index("doc:*", "embedding").unwrap();
+    let v = |i: usize| (0..64).map(|d| ((i * 7 + d) % 13) as f32 / 13.0).collect::<Vec<f32>>();
+    let put = |e: &Engine, i: usize| e.put(&format!("doc:{i:03}"), &Value::Doc(json!({ "embedding": v(i) })), 0, false);
+    let mut stored = 0;
+    let refused = loop {
+        match put(&e, stored) {
+            Ok(_) => stored += 1,
+            Err(err) => break err.to_string(),
+        }
+        assert!(stored < 1000, "never refused");
+    };
+    assert!(refused.contains("OOM") && refused.contains("vector.max_ram_mb"), "{refused}");
+    assert!((40..=50).contains(&stored), "{stored} vectors in 16 KB");
+    let m = e.memory();
+    assert!(m.vectors <= 16 * 1024 && m.vector_limit == 16 * 1024);
+    assert_eq!(e.list_vector_indexes()[0].memory_bytes, m.vectors);
+    // What adds no vector is never refused: a new vector for a key that has
+    // one, a document without a vector, other keys, deletes.
+    put(&e, 0).unwrap();
+    e.put("doc:text", &Value::Doc(json!({ "text": "no vector" })), 0, false).unwrap();
+    e.put("other:1", &Value::Doc(json!({ "embedding": v(1) })), 0, false).unwrap();
+    e.delete("doc:001").unwrap();
+    put(&e, stored).expect("a delete gives its room back");
+    assert!(put(&e, stored + 1).is_err());
+
+    // An index too large is refused before it fills the memory.
+    for i in 0..200 {
+        e.put(&format!("big:{i:03}"), &Value::Doc(json!({ "embedding": v(i) })), 0, false).unwrap();
+    }
+    let err = e.create_vector_index("big:*", "embedding").unwrap_err().to_string();
+    assert!(err.contains("stopped building after") && err.contains("vector.max_ram_mb"), "{err}");
+    assert_eq!(e.list_vector_indexes().len(), 1);
+
+    // The bound is a setting: lifted, the index and the writes go through.
+    e.set_vector_limit(0);
+    assert_eq!(e.create_vector_index("big:*", "embedding").unwrap(), 200);
+    put(&e, stored + 1).unwrap();
+    // A restart never refuses what is already stored.
+    drop(e);
+    let e = Engine::open(&path, opts()).unwrap();
+    assert_eq!(e.list_vector_indexes().iter().map(|v| v.vectors).sum::<usize>(), stored + 1 + 200);
+    assert!(put(&e, 999).is_err());
+
+    // The workspace bound counts the vectors too, even for an existing key.
+    let e2 = Engine::open(dir.path().join("two.kiva"), quiet(0)).unwrap();
+    e2.put("doc:1", &Value::Doc(json!({ "title": "no vector yet" })), 0, false).unwrap();
+    e2.create_vector_index("doc:*", "embedding").unwrap();
+    e2.set_memory_limit(e2.memory().resident() + 100);
+    let err = e2.put("doc:1", &Value::Doc(json!({ "embedding": v(1) })), 0, false).unwrap_err().to_string();
+    assert!(err.contains("storage.max_memory_mb"), "{err}");
+}
+
+#[test]
+fn vector_filters_limits_and_embeddings_from_the_shell_and_the_api() {
+    let dir = TempDir::new("vector_shell");
+    let mut s = Session::new(instance(&dir), true, None);
+    ok(&mut s, r#"set doc:1 {"title": "Kinshasa guide", "lang": "fr", "year": 2024, "embedding": [0.9, 0.1, 0.0]}"#);
+    ok(&mut s, r#"set doc:2 {"title": "Goma guide", "lang": "en", "year": 2024, "embedding": [0.95, 0.05, 0.0]}"#);
+    ok(&mut s, r#"set doc:3 {"title": "Old Kinshasa", "lang": "fr", "year": 1990, "embedding": [0.8, 0.2, 0.1]}"#);
+    ok(&mut s, r#"set doc:4 {"title": "Text only", "embedding": "a guide to Kinshasa"}"#);
+    ok(&mut s, "create vector index on doc:* (embedding)");
+
+    let out = ok(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang = "fr" and year >= 2000 return title"#);
+    assert!(out.contains("doc:1") && !out.contains("doc:2") && !out.contains("doc:3"), "{out}");
+    assert!(out.contains("(1 results") && out.contains("filter tested on the closest vectors first"), "{out}");
+    // The field may repeat the pattern of the search.
+    let out = ok(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where doc:*.lang = "fr" limit 1 return title"#);
+    assert!(out.contains("doc:1:"), "{out}");
+    assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang = "fr" or lang = "en""#)
+        .contains("'and' only"));
+    assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where user:*.lang = "fr""#)
+        .contains("fields of the documents searched (doc:*)"));
+    assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang in "fr""#).contains("operators"));
+
+    // KivaDB receives vectors; text to embed is the application's job.
+    assert!(fails(&mut s, r#"get similar doc:*.embedding to "a guide to Kinshasa""#)
+        .contains("does not compute embeddings"));
+    let indexes = ok(&mut s, "indexes");
+    assert!(
+        indexes.contains("1 skipped (not an array of numbers: embeddings are computed by the application)"),
+        "{indexes}"
+    );
+    assert!(indexes.contains("in memory") && indexes.contains("Vector memory:"), "{indexes}");
+    assert!(ok(&mut s, "memory").contains("Vector indexes    :"));
+
+    // The bound is a setting, applied at once.
+    ok(&mut s, "config set vector.max_ram_mb 0");
+    assert!(ok(&mut s, "indexes").contains("no bound: vector.max_ram_mb = 0"));
+    assert!(fails(&mut s, "config set vector.max_ram_mb lots").contains("invalid value"));
+    ok(&mut s, "config set vector.max_ram_mb auto");
+
+    // The structured API: equalities as an object, comparisons as a list.
+    let api = |s: &mut Session, req: Json| kivadb::api::handle(s, &req);
+    let r = api(
+        &mut s,
+        json!({ "op": "similar", "target": "doc:*.embedding", "vector": [1, 0, 0], "filter": { "lang": "fr" } }),
+    )
+    .unwrap();
+    let keys: Vec<&str> = r["results"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap()).collect();
+    assert_eq!(keys, ["doc:1", "doc:3"]);
+    assert!(r["filter"].as_str().unwrap().contains("closest vectors first"));
+    let r = api(
+        &mut s,
+        json!({ "op": "similar", "target": "doc:*.embedding", "vector": [1, 0, 0],
+                "filter": [{ "field": "year", "cmp": "<", "value": 2000 }] }),
+    )
+    .unwrap();
+    assert_eq!(r["results"][0]["key"], "doc:3");
+    assert_eq!(r["results"].as_array().unwrap().len(), 1);
+    let err = api(&mut s, json!({ "op": "similar", "target": "doc:*.embedding", "vector": "Kinshasa" })).unwrap_err();
+    assert!(err.to_string().contains("does not compute embeddings"));
+    let err = api(&mut s, json!({ "op": "similar", "target": "doc:*.embedding", "vector": [1, 0, 0], "filter": 3 }))
+        .unwrap_err();
+    assert!(err.to_string().contains("\"filter\""));
+}
+
 #[test]
 fn vector_commands() {
     let dir = TempDir::new("vector_cmds");

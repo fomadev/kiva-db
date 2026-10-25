@@ -40,6 +40,78 @@ pub fn human_size(n: u64) -> String {
     }
 }
 
+/// The memory this process may use: the machine's RAM, or the limit of the
+/// container it runs in when that is lower. `None` when it cannot be read.
+pub fn physical_memory() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let total = std::fs::read_to_string("/proc/meminfo").ok().and_then(|m| {
+            let line = m.lines().find(|l| l.starts_with("MemTotal:"))?;
+            line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb * 1024)
+        })?;
+        // cgroup v2, then v1: "max" or a huge number means no limit.
+        let limit = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok()?.trim().parse::<u64>().ok());
+        Some(limit.map_or(total, |l| l.min(total)))
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page_file: u64,
+            avail_page_file: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+        }
+        let mut s = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page_file: 0,
+            avail_page_file: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended_virtual: 0,
+        };
+        // SAFETY: the structure has the layout Win32 expects, with its size set.
+        let ok = unsafe { GlobalMemoryStatusEx(&mut s) } != 0;
+        (ok && s.total_phys > 0).then_some(s.total_phys)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn sysctlbyname(
+                name: *const std::ffi::c_char,
+                old: *mut std::ffi::c_void,
+                old_len: *mut usize,
+                new: *mut std::ffi::c_void,
+                new_len: usize,
+            ) -> i32;
+        }
+        let mut bytes = 0u64;
+        let mut len = std::mem::size_of::<u64>();
+        // SAFETY: "hw.memsize" is a 64-bit integer, written into `bytes`.
+        let rc = unsafe {
+            sysctlbyname(c"hw.memsize".as_ptr(), (&mut bytes as *mut u64).cast(), &mut len, std::ptr::null_mut(), 0)
+        };
+        (rc == 0 && bytes > 0).then_some(bytes)
+    }
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    {
+        None
+    }
+}
+
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);

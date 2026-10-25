@@ -22,6 +22,9 @@ use std::collections::HashMap;
 /// Longest vector accepted (OpenAI's largest embeddings have 3072 dimensions).
 pub const MAX_DIMS: usize = 16_384;
 
+/// The answer to text sent where a vector is expected.
+pub const NOT_EMBEDDINGS: &str = "KivaDB does not compute embeddings: it stores and compares the vectors      your application sends. Compute the vector of this text with your embedding model (OpenAI, Mistral,      Ollama, sentence-transformers...) and send it as an array of numbers, such as [0.12, -0.4, ...].";
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Metric {
     /// Cosine similarity, from -1 to 1; higher is closer.
@@ -179,6 +182,11 @@ enum Store {
     Graph(Hnsw),
 }
 
+/// What one vector costs in an exact store.
+fn exact_cost(key: &str, dims: usize) -> usize {
+    key.len() + dims * 4 + 64
+}
+
 /// In-memory copy of one vector field of the documents matching a pattern.
 pub struct VecIndex {
     pub pattern: String,
@@ -189,6 +197,11 @@ pub struct VecIndex {
     store: Store,
     /// Documents whose vector had another length than `dims`.
     pub rejected: usize,
+    /// Documents whose field holds something else than numbers, such as the
+    /// text to embed: KivaDB stores vectors, it does not compute them.
+    pub not_vectors: usize,
+    /// Memory of an exact store, kept up to date (a graph counts its own).
+    exact_bytes: usize,
 }
 
 impl VecIndex {
@@ -207,6 +220,8 @@ impl VecIndex {
                 Kind::Hnsw(p) => Store::Graph(Hnsw::new(p)),
             },
             rejected: 0,
+            not_vectors: 0,
+            exact_bytes: 0,
         }
     }
 
@@ -251,8 +266,29 @@ impl VecIndex {
 
     pub fn memory_bytes(&self) -> usize {
         match &self.store {
-            Store::Exact(m) => m.iter().map(|(k, (v, _))| k.len() + v.len() * 4 + 64).sum(),
+            Store::Exact(_) => self.exact_bytes,
             Store::Graph(g) => g.memory_bytes(),
+        }
+    }
+
+    /// Memory that writing `doc` under `key` would add to the index: what
+    /// a new vector costs, nothing for an exact store that replaces one.
+    pub fn growth(&self, key: &str, doc: Option<&Json>) -> usize {
+        if !glob_match(&self.pattern, key) {
+            return 0;
+        }
+        let Some(v) = doc.and_then(|d| extract(d, &self.path)) else {
+            return 0;
+        };
+        if self.dims.is_some_and(|d| d != v.len()) {
+            return 0;
+        }
+        match &self.store {
+            Store::Exact(m) if m.contains_key(key) => 0,
+            Store::Exact(_) => exact_cost(key, v.len()),
+            // A replaced vector leaves its node behind as a tombstone.
+            Store::Graph(g) if g.get(key).is_some_and(|(old, _)| old == v.as_slice()) => 0,
+            Store::Graph(g) => g.node_bytes(key.len(), v.len(), 1),
         }
     }
 
@@ -279,12 +315,16 @@ impl VecIndex {
         }
         self.dims = None;
         self.rejected = 0;
+        self.not_vectors = 0;
+        self.exact_bytes = 0;
     }
 
     pub fn remove(&mut self, key: &str) {
         match &mut self.store {
             Store::Exact(m) => {
-                m.remove(key);
+                if let Some((v, _)) = m.remove(key) {
+                    self.exact_bytes -= exact_cost(key, v.len());
+                }
             }
             Store::Graph(g) => g.remove(key),
         }
@@ -294,7 +334,11 @@ impl VecIndex {
         if !glob_match(&self.pattern, key) {
             return;
         }
-        let Some(v) = doc.and_then(|d| extract(d, &self.path)) else {
+        let field = doc.and_then(|d| jsonpath::get(d, &self.path));
+        let Some(v) = field.and_then(from_json) else {
+            if field.is_some() {
+                self.not_vectors += 1;
+            }
             self.remove(key);
             return;
         };
@@ -307,7 +351,10 @@ impl VecIndex {
         match &mut self.store {
             Store::Exact(m) => {
                 let n = norm(&v);
-                m.insert(key.to_string(), (v, n));
+                self.exact_bytes += exact_cost(key, v.len());
+                if let Some((old, _)) = m.insert(key.to_string(), (v, n)) {
+                    self.exact_bytes -= exact_cost(key, old.len());
+                }
             }
             // A document changed elsewhere than in its vector keeps its node:
             // replacing it would only leave a tombstone behind.

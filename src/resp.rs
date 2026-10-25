@@ -597,14 +597,21 @@ impl Conn {
         })
     }
 
-    /// `KIVA.SIMILAR <pattern>.<field> <vector as JSON> [LIMIT n] [METRIC cosine|dot|l2] [EF n] [EXACT]`:
-    /// the closest documents, as `[key, score, document as JSON]` triples.
+    /// `KIVA.SIMILAR <pattern>.<field> <vector as JSON> [FILTER <field> <op> <value>]... [LIMIT n]
+    /// [METRIC cosine|dot|l2] [EF n] [EXACT]`: the closest documents, as
+    /// `[key, score, document as JSON]` triples. Every FILTER must hold.
     fn kiva_similar(&mut self, args: &[Vec<u8>]) -> Res {
         arity(args, 3)?;
         let text = |a: &Vec<u8>| String::from_utf8_lossy(a).to_string();
-        let vector: Json = serde_json::from_slice(&args[2])
-            .map_err(|_| Reply::err("the vector must be a JSON array of numbers, such as [0.1,0.2]"))?;
-        let mut req = json!({ "op": "similar", "target": text(&args[1]), "vector": vector });
+        let vector: Json = serde_json::from_slice(&args[2]).map_err(|_| {
+            // Plain text where numbers were expected: the embedding was not computed.
+            if args[2].first().is_some_and(|b| *b != b'[') {
+                Reply::err(crate::vector::NOT_EMBEDDINGS)
+            } else {
+                Reply::err("the vector must be a JSON array of numbers, such as [0.1,0.2]")
+            }
+        })?;
+        let mut req = json!({ "op": "similar", "target": text(&args[1]), "vector": vector, "filter": [] });
         let mut rest = args[3..].iter();
         while let Some(opt) = rest.next() {
             let opt = text(opt).to_ascii_uppercase();
@@ -617,6 +624,18 @@ impl Conn {
                 }
                 "METRIC" => req["metric"] = value()?.to_ascii_lowercase().into(),
                 "EXACT" => req["exact"] = true.into(),
+                "FILTER" => {
+                    let (field, cmp, raw) = (value()?, value()?, value()?);
+                    // A number, true, false or null as such; anything else is a string.
+                    let v = serde_json::from_str::<Json>(&raw)
+                        .ok()
+                        .filter(|j| !j.is_object() && !j.is_array())
+                        .unwrap_or(Json::String(raw));
+                    req["filter"]
+                        .as_array_mut()
+                        .expect("array")
+                        .push(json!({ "field": field, "cmp": cmp, "value": v }));
+                }
                 _ => return Err(Reply::err("syntax error")),
             }
         }

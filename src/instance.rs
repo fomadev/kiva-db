@@ -321,6 +321,12 @@ impl Instance {
                 0
             },
             max_memory_bytes: (c.get_u64("storage", "max_memory_mb") as usize).saturating_mul(1024 * 1024),
+            max_vector_bytes: match c.get("vector", "max_ram_mb").as_str() {
+                // Half the RAM leaves room for the rest of the server and the
+                // system; unknown RAM means no bound rather than a wrong one.
+                "auto" => crate::util::physical_memory().map_or(0, |b| (b / 2) as usize),
+                _ => (c.get_u64("vector", "max_ram_mb") as usize).saturating_mul(1024 * 1024),
+            },
             // Keys are read once, at start: changing them needs a restart.
             keys: self.keys.clone(),
             require_encryption: self.keys.is_some() && c.get_bool("encryption", "required"),
@@ -421,6 +427,7 @@ impl Instance {
             e.set_compression(o.compression);
             e.set_cache_limit(o.cache_bytes);
             e.set_memory_limit(o.max_memory_bytes);
+            e.set_vector_limit(o.max_vector_bytes);
             e.set_sync_writes(o.sync_writes);
         }
     }

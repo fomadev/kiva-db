@@ -393,6 +393,35 @@ fn condition_value(text: &str) -> Result<Json, String> {
 /// Parses `<pattern>.<field> <op> <value>`; spaces around the operator are
 /// optional. One pattern, one condition: see [`crate::query`].
 fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
+    let cond = parse_one_cond(c, None)?;
+    // A second condition, a join or a pipeline right after the first one.
+    match c.peek() {
+        Some(t) if t.kind == Kind::Comma => return Err(query::Unsupported::Operator.message().into()),
+        t => refuse_unsupported(t)?,
+    }
+    Ok(cond)
+}
+
+/// The filter of a vector search: `<field> <op> <value>` conditions joined
+/// by `and`, on the documents of `pattern` (the field may repeat it).
+fn parse_filter(c: &mut Cur, pattern: &str) -> Result<Vec<Cond>, String> {
+    let mut filter = Vec::new();
+    loop {
+        filter.push(parse_one_cond(c, Some(pattern))?);
+        if !c.eat("and") {
+            break;
+        }
+    }
+    if c.peek().is_some_and(|t| t.is_kw("or") || t.is_kw("not")) {
+        return Err("a vector filter joins its conditions with 'and' only: run one search per alternative \
+                    and merge the results in your application."
+            .into());
+    }
+    Ok(filter)
+}
+
+/// One condition. With `pattern`, the target is a field of its documents.
+fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
     const USAGE: &str = "expected a condition such as: user:*.role = \"admin\"";
     let t0 = c.next().ok_or(USAGE)?;
     let mut target = t0.text.clone();
@@ -439,13 +468,23 @@ fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
         }
     };
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
-    let (pattern, field) = split_target(&target)?;
+    let (pattern, field) = match pattern {
+        Some(p) => {
+            let field = match target.strip_prefix(p).and_then(|f| f.strip_prefix('.')) {
+                Some(f) => f.to_string(),
+                None if target.contains('*') => {
+                    return Err(format!(
+                        "a vector filter tests fields of the documents searched ({p}): {}",
+                        query::Unsupported::Join.message()
+                    ))
+                }
+                None => target,
+            };
+            (p.to_string(), field)
+        }
+        None => split_target(&target)?,
+    };
     query::check_field(&field)?;
-    // A second condition, a join or a pipeline right after the first one.
-    match c.peek() {
-        Some(t) if t.kind == Kind::Comma => return Err(query::Unsupported::Operator.message().into()),
-        t => refuse_unsupported(t)?,
-    }
     Ok(Cond { pattern, field, op, value })
 }
 
@@ -503,7 +542,7 @@ const HELP: &str = r#"
   count where ... | sum where ...   : Aggregates (op: = != > >= < <=).
   create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
                                     Also <pat>.<field>; drop index, indexes.
-  get similar <pat>.<field> to [..] [limit N] [metric cosine|dot|l2] [return f1, f2]
+  get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
   semantic lookup|store|stats|clear : Semantic cache of answers (questions found by meaning).
@@ -1179,7 +1218,7 @@ impl Session {
 
     fn cmd_similar(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
-            "get similar <pattern>.<field> to [n1, n2, ...] | <key>.<field> [limit N] [metric cosine|dot|l2] [ef N] [exact] [return f1, f2]";
+            "get similar <pattern>.<field> to [n1, n2, ...] | <key>.<field> [where <field> <op> <value> [and ...]] [limit N] [metric cosine|dot|l2] [ef N] [exact] [return f1, f2]";
         let mut c = Cur::new(a);
         let target = word(c.next(), "<pattern>.<field>").map_err(|e| format!("{e}\nUsage: {USAGE}"))?;
         let (pattern, field) = split_target(&target)?;
@@ -1194,13 +1233,22 @@ impl Session {
                 Some((v, _)) => v.to_json(),
                 None => return Err(format!("'{}' does not exist.", vt.text)),
             },
+            Kind::DQuote | Kind::SQuote => return Err(crate::vector::NOT_EMBEDDINGS.into()),
             _ => return Err(format!("The query vector must be a JSON array of numbers.\nUsage: {USAGE}")),
         };
         let vector = crate::vector::from_json(&json).ok_or("The query vector must be a non-empty array of numbers.")?;
         let mut metric = crate::vector::Metric::Cosine;
         let mut tail = Tail::default();
         let (mut ef, mut exact) = (0, false);
+        let mut filter = Vec::new();
         loop {
+            if c.eat("where") {
+                if !filter.is_empty() {
+                    return Err("one 'where' per search: join its conditions with 'and'".into());
+                }
+                filter = parse_filter(&mut c, &pattern)?;
+                continue;
+            }
             if c.eat("metric") {
                 let m = word(c.next(), "a metric")?;
                 metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
@@ -1233,6 +1281,7 @@ impl Session {
         let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, tail.limit);
         q.ef = ef;
         q.exact = exact;
+        q.filter = filter;
         let (r, cached) = self.similar_cached(&q)?;
         for (key, score, doc) in &r.rows {
             let shown = match &tail.fields {
@@ -1250,7 +1299,7 @@ impl Session {
             return Ok(());
         }
         out.say(format!(
-            "({} results, {} metric, {} vectors compared, {})",
+            "({} results, {} metric, {} vectors compared, {}{})",
             r.rows.len(),
             metric.name(),
             r.compared,
@@ -1258,7 +1307,8 @@ impl Session {
                 (true, true) => "HNSW index, approximate",
                 (true, false) => "vector index",
                 _ => "documents read from disk",
-            }
+            },
+            r.filter.as_ref().map(|f| format!("; filter {f}")).unwrap_or_default()
         ));
         Ok(())
     }
