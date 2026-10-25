@@ -226,9 +226,15 @@ impl Ord for OrdF64 {
         self.0.total_cmp(&o.0)
     }
 }
+// Equal under `total_cmp` means the same bits, so hashing the bits agrees with `eq`.
+impl std::hash::Hash for OrdF64 {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.0.to_bits().hash(h);
+    }
+}
 
 /// Sortable form of a scalar JSON value. Variant order groups values by kind.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SKey {
     Null,
     Bool(bool),
@@ -252,23 +258,121 @@ impl SKey {
     }
 }
 
+/// How a secondary index keeps the values of its field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IndexKind {
+    /// Values in order (a B-tree): answers `=`, `>`, `>=`, `<` and `<=`.
+    #[default]
+    BTree,
+    /// A hash table: answers `=` only, in constant time whatever the number
+    /// of distinct values.
+    Hash,
+}
+
+impl IndexKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            IndexKind::BTree => "btree",
+            IndexKind::Hash => "hash",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<IndexKind> {
+        match s.to_ascii_lowercase().as_str() {
+            "btree" | "b-tree" => Some(IndexKind::BTree),
+            "hash" => Some(IndexKind::Hash),
+            _ => None,
+        }
+    }
+
+    fn serves(self, op: CmpOp) -> bool {
+        match self {
+            IndexKind::BTree => op != CmpOp::Ne,
+            IndexKind::Hash => op == CmpOp::Eq,
+        }
+    }
+}
+
+/// Field value -> keys of the documents holding it.
+enum Postings {
+    Tree(BTreeMap<SKey, BTreeSet<String>>),
+    Hash(HashMap<SKey, BTreeSet<String>>),
+}
+
+impl Postings {
+    fn new(kind: IndexKind) -> Postings {
+        match kind {
+            IndexKind::BTree => Postings::Tree(BTreeMap::new()),
+            IndexKind::Hash => Postings::Hash(HashMap::new()),
+        }
+    }
+
+    fn get(&self, sk: &SKey) -> Option<&BTreeSet<String>> {
+        match self {
+            Postings::Tree(m) => m.get(sk),
+            Postings::Hash(m) => m.get(sk),
+        }
+    }
+
+    fn add(&mut self, sk: SKey, key: &str) {
+        match self {
+            Postings::Tree(m) => m.entry(sk).or_default(),
+            Postings::Hash(m) => m.entry(sk).or_default(),
+        }
+        .insert(key.to_string());
+    }
+
+    fn take(&mut self, sk: &SKey, key: &str) {
+        let set = match self {
+            Postings::Tree(m) => m.get_mut(sk),
+            Postings::Hash(m) => m.get_mut(sk),
+        };
+        let emptied = set.is_some_and(|set| set.remove(key) && set.is_empty());
+        if emptied {
+            match self {
+                Postings::Tree(m) => m.remove(sk),
+                Postings::Hash(m) => m.remove(sk),
+            };
+        }
+    }
+
+    fn distinct(&self) -> usize {
+        match self {
+            Postings::Tree(m) => m.len(),
+            Postings::Hash(m) => m.len(),
+        }
+    }
+}
+
 struct SecIndex {
     pattern: String,
     field: String,
     path: Vec<jsonpath::Seg>,
-    map: BTreeMap<SKey, BTreeSet<String>>,
+    kind: IndexKind,
+    map: Postings,
     rev: HashMap<String, SKey>,
 }
 
 impl SecIndex {
+    fn new(pattern: &str, field: &str, path: Vec<jsonpath::Seg>, kind: IndexKind) -> SecIndex {
+        SecIndex {
+            pattern: pattern.to_string(),
+            field: field.to_string(),
+            path,
+            kind,
+            map: Postings::new(kind),
+            rev: HashMap::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.map = Postings::new(self.kind);
+        self.rev.clear();
+    }
+
     fn remove(&mut self, key: &str) {
         if let Some(sk) = self.rev.remove(key) {
-            if let Some(set) = self.map.get_mut(&sk) {
-                set.remove(key);
-                if set.is_empty() {
-                    self.map.remove(&sk);
-                }
-            }
+            self.map.take(&sk, key);
         }
     }
 
@@ -276,12 +380,29 @@ impl SecIndex {
         if !glob_match(&self.pattern, key) {
             return;
         }
+        let sk = doc.and_then(|d| jsonpath::get(d, &self.path)).and_then(SKey::from_json);
+        // A write that leaves the indexed field as it was costs nothing more.
+        if self.rev.get(key) == sk.as_ref() {
+            return;
+        }
         self.remove(key);
-        if let Some(sk) = doc.and_then(|d| jsonpath::get(d, &self.path)).and_then(SKey::from_json) {
-            self.map.entry(sk.clone()).or_default().insert(key.to_string());
+        if let Some(sk) = sk {
+            self.map.add(sk.clone(), key);
             self.rev.insert(key.to_string(), sk);
         }
     }
+}
+
+/// What `indexes` shows about one secondary index.
+#[derive(Clone, Debug)]
+pub struct IndexInfo {
+    pub pattern: String,
+    pub field: String,
+    pub kind: IndexKind,
+    /// Documents that have the field.
+    pub documents: usize,
+    /// Distinct values of the field.
+    pub values: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -844,8 +965,7 @@ impl Inner {
     }
 
     fn rebuild_sec(&mut self, i: usize) {
-        self.sec[i].map.clear();
-        self.sec[i].rev.clear();
+        self.sec[i].clear();
         let pattern = self.sec[i].pattern.clone();
         let prefix = glob_prefix(&pattern).to_string();
         let now = now_secs();
@@ -1073,13 +1193,8 @@ impl Engine {
                 for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
                         if let Ok(segs) = jsonpath::parse_path(f) {
-                            inner.sec.push(SecIndex {
-                                pattern: p.to_string(),
-                                field: f.to_string(),
-                                path: segs,
-                                map: BTreeMap::new(),
-                                rev: HashMap::new(),
-                            });
+                            let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
+                            inner.sec.push(SecIndex::new(p, f, segs, kind));
                             let i = inner.sec.len() - 1;
                             inner.rebuild_sec(i);
                         }
@@ -1228,7 +1343,48 @@ impl Engine {
 
     fn put_at(&self, key: &str, value: &Value, expires_at: i64, msgpack: bool, timestamp: i64) -> Result<bool> {
         let mut inner = self.lock();
-        let (rec, mut entry, raw) = build_put(&inner, key, value, expires_at, msgpack, timestamp, 0)?;
+        let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
+        self.after_write(&inner);
+        Ok(created)
+    }
+
+    /// Reads `key`, lets `f` compute its new value and writes it, all while
+    /// holding the engine lock: no other write can come in between, so two
+    /// clients changing different fields of one document never undo each
+    /// other's change. `f` returns the new value (`None` leaves the key as
+    /// it is) and a result for the caller. The key keeps its TTL and its
+    /// encoding. Returns `None` when the key does not exist, otherwise the
+    /// result of `f` and whether something was written. `f` must not call
+    /// back into the engine.
+    pub fn update_with<T>(
+        &self,
+        key: &str,
+        f: impl FnOnce(Value) -> Result<(Option<Value>, T)>,
+    ) -> Result<Option<(T, bool)>> {
+        let mut inner = self.lock();
+        let Some(e) = inner.live(key, now_secs()) else {
+            return Ok(None);
+        };
+        let current = inner.value_of(key, &e)?;
+        let (new, out) = f(current)?;
+        let Some(new) = new else {
+            return Ok(Some((out, false)));
+        };
+        self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
+        self.after_write(&inner);
+        Ok(Some((out, true)))
+    }
+
+    fn put_locked(
+        &self,
+        inner: &mut Inner,
+        key: &str,
+        value: &Value,
+        expires_at: i64,
+        msgpack: bool,
+        timestamp: i64,
+    ) -> Result<bool> {
+        let (rec, mut entry, raw) = build_put(inner, key, value, expires_at, msgpack, timestamp, 0)?;
         let created = inner.live(key, now_secs()).is_none();
         entry.offset = inner.append(&rec, self.opts.sync_writes)?;
         inner.seq += 1;
@@ -1241,7 +1397,6 @@ impl Engine {
         inner.idx_insert(key, entry, doc);
         inner.dirty_ops += 1;
         self.emit(&Op::Set { key: key.to_string(), ty: value.ty(), raw, msgpack, timestamp, expires_at, created });
-        self.after_write(&inner);
         Ok(created)
     }
 
@@ -1413,8 +1568,7 @@ impl Engine {
         inner.file_len = FILE_HEADER_LEN;
         inner.index.clear();
         for s in &mut inner.sec {
-            s.map.clear();
-            s.rev.clear();
+            s.clear();
         }
         for v in &mut inner.vecs {
             v.clear();
@@ -1914,8 +2068,18 @@ impl Engine {
     // -- secondary indexes --------------------------------------------------
 
     fn save_meta(&self, inner: &Inner) -> Result<()> {
-        let defs: Vec<Json> =
-            inner.sec.iter().map(|s| serde_json::json!({ "pattern": s.pattern, "field": s.field })).collect();
+        let defs: Vec<Json> = inner
+            .sec
+            .iter()
+            .map(|s| {
+                let mut def = serde_json::json!({ "pattern": s.pattern, "field": s.field });
+                // B-tree indexes keep the format older versions read.
+                if s.kind != IndexKind::BTree {
+                    def["kind"] = s.kind.name().into();
+                }
+                def
+            })
+            .collect();
         let vecs: Vec<Json> = inner
             .vecs
             .iter()
@@ -1938,21 +2102,23 @@ impl Engine {
     /// Creates an index on `field` of every document whose key matches
     /// `pattern`. Returns the number of documents indexed.
     pub fn create_index(&self, pattern: &str, field: &str) -> Result<usize> {
+        self.create_index_with(pattern, field, IndexKind::BTree)
+    }
+
+    /// Like `create_index`, choosing how the values are kept.
+    pub fn create_index_with(&self, pattern: &str, field: &str, kind: IndexKind) -> Result<usize> {
         let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
         if path.is_empty() {
             return Err(KivaError::Invalid("an index needs a field name".into()));
         }
         let mut inner = self.lock();
-        if inner.sec.iter().any(|s| s.pattern == pattern && s.field == field) {
-            return Err(KivaError::Exists(format!("index on {pattern} ({field}) already exists")));
+        if let Some(s) = inner.sec.iter().find(|s| s.pattern == pattern && s.field == field) {
+            return Err(KivaError::Exists(format!(
+                "index on {pattern} ({field}) already exists ({}); drop it first to change its kind",
+                s.kind.name()
+            )));
         }
-        inner.sec.push(SecIndex {
-            pattern: pattern.to_string(),
-            field: field.to_string(),
-            path,
-            map: BTreeMap::new(),
-            rev: HashMap::new(),
-        });
+        inner.sec.push(SecIndex::new(pattern, field, path, kind));
         let i = inner.sec.len() - 1;
         inner.rebuild_sec(i);
         let n = inner.sec[i].rev.len();
@@ -1971,9 +2137,18 @@ impl Engine {
         Ok(removed)
     }
 
-    /// `(pattern, field, indexed documents)` for every index.
-    pub fn list_indexes(&self) -> Vec<(String, String, usize)> {
-        self.lock().sec.iter().map(|s| (s.pattern.clone(), s.field.clone(), s.rev.len())).collect()
+    pub fn list_indexes(&self) -> Vec<IndexInfo> {
+        self.lock()
+            .sec
+            .iter()
+            .map(|s| IndexInfo {
+                pattern: s.pattern.clone(),
+                field: s.field.clone(),
+                kind: s.kind,
+                documents: s.rev.len(),
+                values: s.map.distinct(),
+            })
+            .collect()
     }
 
     // -- value cache --------------------------------------------------------
@@ -2127,11 +2302,14 @@ impl Engine {
         Ok(VectorResult { rows, indexed, approximate, examined, compared })
     }
 
+    /// The index that can answer `cond`; for `=`, a hash index is preferred.
     fn find_index(inner: &Inner, cond: &Cond) -> Option<usize> {
-        if cond.op == CmpOp::Ne || SKey::from_json(&cond.value).is_none() {
-            return None;
-        }
-        inner.sec.iter().position(|s| s.field == cond.field && pattern_covers(&s.pattern, &cond.pattern))
+        // Only a scalar value can be looked up.
+        SKey::from_json(&cond.value)?;
+        let usable =
+            |s: &SecIndex| s.kind.serves(cond.op) && s.field == cond.field && pattern_covers(&s.pattern, &cond.pattern);
+        let hash = inner.sec.iter().position(|s| s.kind == IndexKind::Hash && usable(s));
+        hash.or_else(|| inner.sec.iter().position(usable))
     }
 
     fn index_candidates(idx: &SecIndex, cond: &Cond) -> Vec<String> {
@@ -2140,15 +2318,20 @@ impl Engine {
         };
         let mut out = Vec::new();
         let mut push = |set: &BTreeSet<String>| out.extend(set.iter().cloned());
-        match cond.op {
-            CmpOp::Eq => {
-                if let Some(set) = idx.map.get(&sk) {
-                    push(set);
-                }
+        if cond.op == CmpOp::Eq {
+            if let Some(set) = idx.map.get(&sk) {
+                push(set);
             }
+            return out;
+        }
+        // Only a B-tree is ever chosen for a range.
+        let Postings::Tree(map) = &idx.map else {
+            return out;
+        };
+        match cond.op {
             CmpOp::Gt | CmpOp::Ge => {
                 let lo = if cond.op == CmpOp::Gt { Bound::Excluded(&sk) } else { Bound::Included(&sk) };
-                for (k, set) in idx.map.range((lo, Bound::Unbounded)) {
+                for (k, set) in map.range((lo, Bound::Unbounded)) {
                     if !k.same_kind(&sk) {
                         break;
                     }
@@ -2157,14 +2340,14 @@ impl Engine {
             }
             CmpOp::Lt | CmpOp::Le => {
                 let hi = if cond.op == CmpOp::Lt { Bound::Excluded(&sk) } else { Bound::Included(&sk) };
-                for (k, set) in idx.map.range((Bound::Unbounded, hi)).rev() {
+                for (k, set) in map.range((Bound::Unbounded, hi)).rev() {
                     if !k.same_kind(&sk) {
                         break;
                     }
                     push(set);
                 }
             }
-            CmpOp::Ne => {}
+            CmpOp::Eq | CmpOp::Ne => {}
         }
         out.sort();
         out
@@ -2180,9 +2363,10 @@ impl Engine {
         let total_keys = inner.index.len();
         if let Some(i) = Self::find_index(inner, cond) {
             let idx = &inner.sec[i];
+            let kind = if idx.kind == IndexKind::Hash { " using hash" } else { "" };
             return Plan {
                 strategy: "INDEX SCAN",
-                index: Some(format!("{} ({})", idx.pattern, idx.field)),
+                index: Some(format!("{} ({}){kind}", idx.pattern, idx.field)),
                 candidates: Self::index_candidates(idx, cond).len(),
                 total_keys,
             };

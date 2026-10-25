@@ -2,6 +2,22 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased
+
+### Added
+
+* Documents: `json append`, `json insert` and `json incr` change an array or a number in place; `json type`, `json len` and `json keys` inspect a document. Paths accept negative positions (`.tags[-1]` is the last element) and quoted field names (`["read.time"]`) ([10.8, 10.9](DOCUMENTATION.md#108-arrays-and-numbers-in-place)).
+* Hash indexes: `create index on <pattern> (<field>) using hash` answers `=` in constant time; the default stays the sorted (B-tree) index, which also answers `>` and `<`. `indexes` shows each index's kind and number of distinct values ([11.4](DOCUMENTATION.md#114-indexes--making-queries-fast)).
+* `create index on user:*.address.city`: the field can follow the pattern after a dot, as in conditions.
+
+### Fixed
+
+* Two clients changing different fields of the same document at the same moment (`json set`, `json delete`) could lose one of the two changes. Each field change is now one step on the server.
+
+### Changed
+
+* A write that leaves an indexed field unchanged no longer updates that index.
+
 ## 1.5.1 - 2026-10-22
 
 A fix release: `config set` now says correctly when a setting applies, and `help` lists every command.
