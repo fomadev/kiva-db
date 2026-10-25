@@ -1632,7 +1632,8 @@ kiva> get similar doc:*.embedding to [0.12, -0.4, ...] limit 5 return title
 | `metric cosine|dot|l2` | `create` | `cosine` | The metric the graph is built for. Searches with another metric compare every vector |
 | `m N` | `create` | 16 (2 to 100) | Links per point. More: better results and more memory |
 | `ef N` | `create` | 200 (10 to 2000) | Candidates while building. More: a better graph, built more slowly |
-| `ef N` | `get similar` | 100 | Candidates while searching. More: fewer misses, slower |
+| `ef_search N` | `create`, `tune` | 100 | Candidates a search keeps when it does not say: the index's own default. `tune` measures it ([12.12](#1212-tuning-an-hnsw-index)) |
+| `ef N` | `get similar` | the index's `ef_search` | Candidates while searching, for this search. More: fewer misses, slower |
 | `exact` | `get similar` | | Compare every vector this time, for example to check the results |
 
 ```text
@@ -1642,7 +1643,7 @@ kiva> get similar img:*.features to [...] limit 10 exact
 ```
 
 * **Writes.** A new or changed vector is added to the graph at once; a deleted or replaced one stays in it as a mark, still used to find the way but never returned. When those marks reach a third of the graph, the maintenance task rebuilds it from the live vectors; on a large graph this takes a while, and the commands of that workspace wait meanwhile. Changing another field of a document does not touch the graph.
-* **Restarts.** The graph is saved next to the data (`<file>.graphs`) when the index is created, when KivaDB stops, after a compaction, and from time to time after many changes. At start, KivaDB reads it back and replays only the writes made after it was saved, instead of building the graph again. A missing or damaged file is not an error: the graph is built again from the documents.
+* **Restarts.** The graph is saved next to the data (`<file>.graphs`) when the index is created, when KivaDB stops, after a compaction, and from time to time after many changes. At start, KivaDB reads it back and replays only the writes made after it was saved, instead of building the graph again. A missing or damaged file is not an error: the graph is built again from the documents. The format is described in [12.12](#1212-tuning-an-hnsw-index).
 * **When it is used.** A search uses the graph when its pattern is the index's own (`doc:*` for an index on `doc:`) and its metric is the graph's. A narrower pattern (`doc:2026*`) or another metric compares every vector of the index, exactly, as in 12.4.
 * **Building.** Creating the index builds the graph at once, on one processor core, and the workspace waits meanwhile: about 0.6 ms per vector of 128 dimensions with the defaults, more with longer vectors or a higher `ef`. Create it before loading millions of documents, or at a quiet time. Afterwards, each write adds its vector to the graph in about the same time.
 * **Memory.** The vectors (4 bytes per number) plus the links (about `m` × 8 bytes per vector): 1 million vectors of 768 dimensions take about 3.2 GB.
@@ -1763,6 +1764,46 @@ const answer = cached ? cached.answer : await askTheModel(question);
 if (!cached) await db.semanticStore("faq", answer, { text: question, vector: embedding, depends: ["kb:*"] });
 ```
 ---
+
+### 12.12 Tuning an HNSW index
+
+How many of the true closest vectors HNSW finds depends on the data, and the right `ef_search` (candidates kept per search) cannot be guessed: on vectors grouped by topic, 25 is plenty; on evenly spread ones, even 800 misses one in eight. `tune` measures it on your data and keeps the smallest value that finds the share you ask for:
+
+```text
+kiva> tune vector index on chunk: (embedding) recall 0.95
+Tuning chunk:* (embedding), 100000 vectors: 100 queries taken from its vectors, each searched without its own node, 10 closest each
+  exact search       : 89510 µs per search, every vector compared
+  ef_search 10       : recall  72.3 %, 320 vectors compared, 36 µs per search
+  ef_search 16       : recall  84.1 %, 387 vectors compared, 49 µs per search
+  ef_search 25       : recall  93.5 %, 458 vectors compared, 67 µs per search
+  ef_search 40       : recall  98.0 %, 534 vectors compared, 72 µs per search
+Kept ef_search 40 for chunk:* (embedding): the smallest that finds 95 % of the true closest vectors.
+```
+
+* **How it measures.** It takes `sample` vectors spread over the index (100), answers each one exactly by comparing every vector, then with the graph for growing values of `ef_search` (10, 16, 25, 40, 64, 100, 160... up to 4000), and stops at the first that finds `recall` (0.95) of the `limit` (10) true closest. An indexed vector would be too easy a query, since the search would land on its own node, whose links lead straight to its neighbours; each one is searched as if its node were not in the graph (*leave-one-out*), as a new query resembling the data.
+* **Your own queries.** When your application keeps real queries (questions asked, with their embeddings), `queries "<pattern>"` uses those documents instead: `tune vector index on chunk: (embedding) queries "query:*"`. They must hold a vector in the same field.
+* **How close the estimate is.** Measured on 100 000 vectors of 128 dimensions (release build), compared with 100 real queries:
+
+| Vectors | `tune` alone keeps | With the real queries | Recall of the real queries at the kept value |
+| :--- | :--- | :--- | :--- |
+| Grouped around topics | 40 | 25 | over 95.2 % (already reached at 25) |
+| Spread evenly at random | 1600 | 1600 | 95.4 % |
+
+  The estimate errs on the side of caution: it may keep a larger value than needed, which costs some speed, rarely a smaller one.
+* **What it keeps.** The value is saved with the index, survives restarts, and is used by every `get similar`, `KIVA.SIMILAR` and structured `similar` request that does not give its own `ef`. `indexes` shows it: `HNSW vector index (cosine, m 16, ef 200, ef_search 40)`.
+* **When no value reaches the recall**, it keeps the largest it tried and says so: build the graph with more links (`using hnsw m 32 ef 400`), or use `exact`.
+* **By hand.** `tune vector index on chunk: (embedding) ef_search 200` sets it, `ef_search default` goes back to 100, and `create vector index ... using hnsw ef_search 200` sets it at creation. `ef_search` only changes searches: the graph is not rebuilt.
+* **Cost.** Each query is also answered exactly, so tuning takes about `sample` exact searches (9 s on 100 000 vectors), and the workspace waits meanwhile: run it at a quiet time, after loading the data, and again when the data changes a lot. It needs the admin role. An exact index has nothing to tune: it always finds the true closest vectors.
+
+**The graphs file.** Graphs are saved to `<file>.graphs` in a binary format of their own, read back at start instead of being built again (0.6 s for 100 000 vectors of 128 dimensions, against 57 s to build):
+
+| Part | Content |
+| :--- | :--- |
+| Header | `KVGRAPH1`, the identity of the data file, and the point of the log the graphs reflect |
+| Per graph | Pattern, field, dimensions, skipped documents, metric, `m`, `ef`, entry point, and every node: key, vector, deleted mark, links per layer |
+| End | A CRC32 checksum of everything before it |
+
+It is written to `<file>.graphs.tmp`, synced to disk, then renamed, so a crash leaves either the old file or the new one, never half of one. At start, a file that belongs to another data file, reflects a point the log no longer reaches, fails its checksum, or holds a link to a node that does not exist, is ignored and the graph is built again; one that is valid is brought up to date by replaying only the writes made after it. With encryption at rest, the file is encrypted with the data ([16.12](#1612-encryption-at-rest)). The index settings themselves (`m`, `ef`, `ef_search`) live in `<file>.meta`.
 
 ## Chapter 13 — Transactions
 

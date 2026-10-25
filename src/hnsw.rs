@@ -301,6 +301,10 @@ impl Hnsw {
                     continue;
                 }
                 let d = dist(n);
+                // A hidden node is neither a result nor a way through.
+                if d == f32::INFINITY {
+                    continue;
+                }
                 *count += 1;
                 if best.len() < ef || best.peek().is_some_and(|w| d < w.dist) {
                     let near = Near { dist: d, id: n };
@@ -407,11 +411,27 @@ impl Hnsw {
     /// `ef` (at least `k`) trades speed for accuracy; when too few accepted
     /// keys are found, the search widens until the whole graph is explored.
     pub fn search(&self, query: &[f32], k: usize, ef: usize, accept: impl Fn(&str) -> bool) -> Found {
+        self.search_hiding(query, k, ef, accept, None)
+    }
+
+    /// Like [`Hnsw::search`], as if the node of `hidden` were not in the
+    /// graph: the search never steps on it. Searching with an indexed vector
+    /// while hiding its own node tells how the graph serves a new query that
+    /// resembles the data, which is how tuning measures the graph.
+    pub fn search_hiding(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: usize,
+        accept: impl Fn(&str) -> bool,
+        hidden: Option<&str>,
+    ) -> Found {
         if self.entry == NONE || k == 0 {
             return Found { keys: Vec::new(), compared: 0 };
         }
         let qn = norm(query);
-        let dist = |o: u32| self.dist_to(query, qn, o);
+        let hidden = hidden.and_then(|k| self.ids.get(k).copied()).filter(|&h| h != self.entry);
+        let dist = |o: u32| if Some(o) == hidden { f32::INFINITY } else { self.dist_to(query, qn, o) };
         let mut compared = 1;
         let mut cur = Near { dist: dist(self.entry), id: self.entry };
         for l in (1..=self.max_level).rev() {
@@ -422,6 +442,7 @@ impl Hnsw {
             let found = self.search_layer(&[cur], ef, 0, &dist, &mut compared);
             let keys: Vec<String> = found
                 .iter()
+                .filter(|n| Some(n.id) != hidden)
                 .map(|n| &self.nodes[n.id as usize])
                 .filter(|n| !n.deleted && accept(&n.key))
                 .take(k)
