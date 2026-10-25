@@ -1062,6 +1062,8 @@ Error: Key 'ghost' not found or already expired.
 
 Once the time has passed, the key behaves exactly as if it had been deleted: `get` answers `(nil)`, `has` answers no, and it no longer appears in listings. `update` keeps the TTL of a key; `change` keeps it when renaming.
 
+Expired keys also leave memory by themselves: every second, KivaDB removes those whose time has passed. It keeps the keys with a TTL sorted by deadline, so this costs nothing for the keys that have not expired, however many there are. When very many keys expire at the same moment, they are removed by batches of 10 000, one right after the other, so that other commands never wait long. `stats` shows how many keys have a TTL (`Total Keys : 120 (8 with TTL)`).
+
 ---
 
 ## Chapter 8 — Calculations and text with print
@@ -3159,6 +3161,7 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Transactions | `MULTI`, `EXEC`, `DISCARD` |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
+| KivaDB | `KIVA.SIMILAR` (vector search), `KIVA.API` (any structured request) ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)) |
 
 Pipelining works, in RESP2 and RESP3. Not supported: streams, blocking commands (`BLPOP`, `BZPOPMIN`...), sharded publish/subscribe (`SPUBLISH`), `WATCH`, cluster commands. An unsupported command answers `ERR unknown command`, so an application finds out immediately.
 
@@ -3278,6 +3281,46 @@ game:lb: {"redis":"zset","members":{"amani":120,"baraka":180,"chiku":200}} [obje
 | `tls.*` | | Encrypted connections, see [16.11](#1611-encrypted-connections-tls) |
 
 `--no-resp` turns it off for one start. If a real Redis already uses port 6379 on the machine, KivaDB says so in its log and carries on without the listener; choose another port.
+
+### 23.10 Vector search and the semantic cache from a Redis client
+
+An application that already talks to KivaDB through a Redis library can use the vector search of [Chapter 12](#chapter-12--vector-search-for-ai) and the semantic cache of [12.8](#128-semantic-cache-reuse-answers-to-the-same-question) on the same connection, with two commands of its own:
+
+```text
+KIVA.SIMILAR <pattern>.<field> <vector as JSON> [LIMIT n] [METRIC cosine|dot|l2] [EF n] [EXACT]
+KIVA.API <request as JSON>
+```
+
+```text
+127.0.0.1:6379> KIVA.SIMILAR doc:*.embedding "[1, 0, 0]" LIMIT 2
+1) 1) "doc:1"
+   2) "0.9938837"
+   3) "{\\"title\\":\\"Kinshasa guide\\",\\"embedding\\":[0.9,0.1,0.0]}"
+2) 1) "doc:2"
+   2) "0.11043153"
+   3) "{\\"title\\":\\"Goma guide\\",\\"embedding\\":[0.1,0.9,0.0]}"
+```
+
+* `KIVA.SIMILAR` answers one `[key, score, document]` triple per result, closest first. The score is a double in RESP3 and text in RESP2. It uses the vector index (exact or HNSW) when there is one, as `get similar` does.
+* `KIVA.API` runs any structured request of [20.4](#204-structured-requests-for-tools) and answers its JSON result as text: `similar`, `query`, `semantic` (lookup and store), `stats`...
+
+With redis-py, for a cache of LLM answers:
+
+```python
+import json, redis
+r = redis.Redis(port=6379, username="kiva", password="...")
+def ask(question, embedding):
+    hit = json.loads(r.execute_command("KIVA.API", json.dumps(
+        {"op": "semantic", "cache": "llm", "text": question, "vector": embedding})))
+    if hit.get("hit"):
+        return hit["answer"]
+    answer = call_the_llm(question)
+    r.execute_command("KIVA.API", json.dumps({"op": "semantic", "action": "store", "cache": "llm",
+        "text": question, "vector": embedding, "answer": answer, "depends": ["doc:*"]}))
+    return answer
+```
+
+Both commands are checked against the user's role like any other.
 
 ---
 

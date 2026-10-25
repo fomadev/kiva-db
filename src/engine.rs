@@ -396,6 +396,9 @@ impl SecIndex {
     }
 }
 
+/// Expired keys removed per pass of the maintenance thread.
+const PURGE_BATCH: usize = 10_000;
+
 /// Memory taken by one key in the in-memory index: its bytes, the entry and
 /// the B-tree node overhead.
 fn key_cost(key: &str) -> usize {
@@ -556,7 +559,9 @@ struct Inner {
     index: BTreeMap<String, Entry>,
     /// File header plus the records the index currently points to.
     live_bytes: u64,
-    ttl_count: usize,
+    /// Keys with a TTL, by deadline: the expired ones are found without
+    /// looking at the others.
+    expiry: BTreeSet<(i64, String)>,
     seq: u64,
     compression: Compression,
     auto_compact: bool,
@@ -942,17 +947,18 @@ impl Inner {
 
     fn idx_insert(&mut self, key: &str, e: Entry, doc: Option<&Json>) {
         self.live_bytes += e.rec_len();
-        if e.expires_at > 0 {
-            self.ttl_count += 1;
-        }
+        let expires_at = e.expires_at;
         match self.index.insert(key.to_string(), e) {
             Some(old) => {
                 self.live_bytes -= old.rec_len();
                 if old.expires_at > 0 {
-                    self.ttl_count -= 1;
+                    self.expiry.remove(&(old.expires_at, key.to_string()));
                 }
             }
             None => self.key_bytes += key_cost(key),
+        }
+        if expires_at > 0 {
+            self.expiry.insert((expires_at, key.to_string()));
         }
         for s in &mut self.sec {
             s.update(key, doc);
@@ -968,7 +974,7 @@ impl Inner {
         self.key_bytes -= key_cost(key);
         self.live_bytes -= old.rec_len();
         if old.expires_at > 0 {
-            self.ttl_count -= 1;
+            self.expiry.remove(&(old.expires_at, key.to_string()));
         }
         for s in &mut self.sec {
             s.remove(key);
@@ -1000,7 +1006,8 @@ impl Inner {
 
     fn recount(&mut self) {
         self.live_bytes = FILE_HEADER_LEN + self.index.values().map(|e| e.rec_len()).sum::<u64>();
-        self.ttl_count = self.index.values().filter(|e| e.expires_at > 0).count();
+        self.expiry =
+            self.index.iter().filter(|(_, e)| e.expires_at > 0).map(|(k, e)| (e.expires_at, k.clone())).collect();
         self.key_bytes = self.index.keys().map(|k| key_cost(k)).sum();
     }
 
@@ -1015,7 +1022,8 @@ impl Inner {
         // the value, and the nodes holding them.
         let per_doc = 2 * (avg_key + std::mem::size_of::<String>()) + std::mem::size_of::<SKey>() + 64;
         MemoryReport {
-            keys: self.key_bytes,
+            // The deadlines of keys with a TTL are kept in a second tree.
+            keys: self.key_bytes + self.expiry.len() * (avg_key + 2 * std::mem::size_of::<String>()),
             key_count: n,
             secondary: self.sec.iter().map(|s| s.rev.len() * per_doc).sum(),
             vectors: self.vec_bytes,
@@ -1045,15 +1053,20 @@ impl Inner {
         }
     }
 
+    /// Removes keys whose TTL has elapsed, earliest deadline first, at most
+    /// `PURGE_BATCH` per call so that the lock is never held for long. Keys
+    /// that have not expired are not looked at.
     fn purge_expired(&mut self, now: i64) -> usize {
-        if self.ttl_count == 0 {
-            return 0;
-        }
-        let dead: Vec<String> = self.index.iter().filter(|(_, e)| e.is_expired(now)).map(|(k, _)| k.clone()).collect();
+        let dead: Vec<String> =
+            self.expiry.iter().take_while(|(t, _)| *t <= now).take(PURGE_BATCH).map(|(_, k)| k.clone()).collect();
         for k in &dead {
             self.idx_remove(k);
         }
         dead.len()
+    }
+
+    fn purge_all_expired(&mut self, now: i64) {
+        while self.purge_expired(now) == PURGE_BATCH {}
     }
 
     fn rebuild_sec(&mut self, i: usize) {
@@ -1228,7 +1241,7 @@ impl Engine {
             file_id,
             index,
             live_bytes: 0,
-            ttl_count: 0,
+            expiry: BTreeSet::new(),
             seq,
             compression: opts.compression,
             auto_compact: opts.auto_compact,
@@ -1771,7 +1784,7 @@ impl Engine {
             if inner.closed {
                 return Err(KivaError::Other("database is closed".into()));
             }
-            inner.purge_expired(now_secs());
+            inner.purge_all_expired(now_secs());
             if let Some(c) = recompress {
                 inner.compression = c;
             }
@@ -1910,7 +1923,7 @@ impl Engine {
     /// (`.bak`) is taken and corrupted entries are removed.
     pub fn check(&self, repair: bool) -> Result<CheckReport> {
         let mut inner = self.lock();
-        inner.purge_expired(now_secs());
+        inner.purge_all_expired(now_secs());
         let entries: Vec<(String, Entry)> = inner.index.iter().map(|(k, e)| (k.clone(), e.clone())).collect();
         let mut report = CheckReport { total: entries.len(), ..Default::default() };
         let before = inner.corrupted_detected;
@@ -1998,7 +2011,7 @@ impl Engine {
         let mut s = EngineStats {
             path: self.path.display().to_string(),
             keys: inner.index.len(),
-            ttl_keys: inner.ttl_count,
+            ttl_keys: inner.expiry.len(),
             file_bytes: inner.file_len,
             live_bytes: inner.live_bytes,
             fragmentation: inner.fragmentation(),
@@ -2055,7 +2068,7 @@ impl Engine {
         if inner.closed {
             return;
         }
-        inner.purge_expired(now_secs());
+        inner.purge_all_expired(now_secs());
         inner.write_hint(&self.path);
         if inner.graph_changes() > 0 {
             inner.save_graphs(&self.path);
@@ -2070,8 +2083,10 @@ impl Engine {
                 return;
             }
             inner.ticks += 1;
-            if inner.ticks.is_multiple_of(5) {
-                inner.purge_expired(now_secs());
+            // Every second: cheap, since only expired keys are visited. A
+            // full batch means more are waiting: come back at once.
+            if inner.purge_expired(now_secs()) == PURGE_BATCH {
+                self.wake();
             }
             if inner.unsynced {
                 let _ = inner.file.sync_data();

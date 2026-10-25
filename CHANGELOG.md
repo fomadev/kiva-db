@@ -12,6 +12,7 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * `memory pin "<pattern>"` keeps the values of matching keys in memory, now and after every write, whether the value cache is on or not; `memory unpin` lets them go. Pinned patterns are saved with the workspace ([18.5](DOCUMENTATION.md#185-pinning-keys-in-memory)).
 * `memory` shows where a workspace's memory goes: keys, secondary and vector indexes, pinned values, value cache.
 * `storage.max_memory_mb` bounds a workspace's memory: past it, the value cache gives its memory back, then new keys are refused with an `OOM:` error; changing, reading and deleting keys still work ([18.6](DOCUMENTATION.md#186-a-memory-bound)).
+* Redis clients reach vector search and the semantic cache: `KIVA.SIMILAR <pattern>.<field> <vector> [LIMIT n] [METRIC m] [EF n] [EXACT]` answers `[key, score, document]` triples, and `KIVA.API <json>` runs any structured request (`similar`, `semantic`, `query`...) ([23.10](DOCUMENTATION.md#2310-vector-search-and-the-semantic-cache-from-a-redis-client)).
 * Queries say plainly what the language leaves out: several conditions (`and`, `or`), joins (two patterns, or a value taken from other documents), pipelines (`group by`, `order by`...), other operators (`in`, `like`...) and distributed queries are refused with what to do instead, in the shell and in the structured `query` request ([11.6](DOCUMENTATION.md#116-what-a-query-does-not-do)).
 
 ### Fixed
@@ -22,6 +23,7 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 * A write that leaves an indexed field unchanged no longer updates that index.
 * `explain get where ...` refuses words after the condition instead of ignoring them.
+* Expired keys are removed every second (every 5 seconds before) and the sweep no longer walks every key: keys with a TTL are kept sorted by deadline, so it visits only the expired ones, by batches of 10 000. Before, as soon as one key had a TTL, each sweep read the whole index while holding the workspace lock.
 
 ## 1.5.1 - 2026-10-22
 
