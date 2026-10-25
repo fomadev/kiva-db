@@ -1220,9 +1220,9 @@ impl Session {
 
     /// `semantic lookup | store | stats | clear`: the semantic cache.
     fn cmd_semantic(&mut self, a: &[Token], out: &mut Out) -> R {
-        use crate::semantic_cache::{Lookup, Question, Settings};
+        use crate::semantic_cache::{Lookup, Question, Settings, Stored};
         const USAGE: &str = "Usage: semantic lookup <cache> [text \"<question>\"] [vector [..]] [threshold <0-1>]
-       semantic store <cache> [text \"<question>\"] [vector [..]] answer <value> [ttl <sec>] [depends \"<pattern>\", ...]
+       semantic store <cache> [text \"<question>\"] [vector [..]] answer <value> [ttl <sec>] [depends \"<pattern>\", ...] [since <token>]
        semantic stats | semantic clear [<cache>]";
         let settings = Settings::of(&self.inst.cfg());
         let mut c = Cur::new(a);
@@ -1234,9 +1234,12 @@ impl Session {
                 if stats.is_empty() {
                     out.say("No semantic cache in this workspace yet.");
                 }
-                for (name, entries, hits, misses) in stats {
-                    let rate = (hits * 100).checked_div(hits + misses).unwrap_or(0);
-                    out.say(format!("{name}: {entries} entries, {hits} hits, {misses} misses ({rate}% hit rate)"));
+                for s in stats {
+                    let rate = (s.hits * 100).checked_div(s.hits + s.misses).unwrap_or(0);
+                    out.say(format!(
+                        "{}: {} entries, {} hits, {} misses ({rate}% hit rate), {} invalidated by writes, {} dependencies",
+                        s.name, s.entries, s.hits, s.misses, s.invalidated, s.depends
+                    ));
                 }
                 Ok(())
             }
@@ -1250,8 +1253,8 @@ impl Session {
             act @ ("lookup" | "store") => {
                 let name = word(c.next(), "a cache name").map_err(|e| format!("{e}\n{USAGE}"))?;
                 let mut q = Question::default();
-                let (mut threshold, mut ttl, mut answer, mut depends) =
-                    (settings.threshold, settings.ttl, None, Vec::new());
+                let (mut threshold, mut ttl, mut answer, mut depends, mut since) =
+                    (settings.threshold, settings.ttl, None, Vec::new(), None);
                 loop {
                     if c.eat("text") {
                         q.text = Some(
@@ -1271,6 +1274,8 @@ impl Session {
                             .ok_or("threshold is a number between 0 and 1")?;
                     } else if c.eat("ttl") {
                         ttl = uint(c.next(), "ttl")? as i64;
+                    } else if act == "store" && c.eat("since") {
+                        since = Some(uint(c.next(), "since")?);
                     } else if c.eat("answer") {
                         let t = c.next().ok_or("answer needs a value")?;
                         answer = Some(match t.kind {
@@ -1303,15 +1308,34 @@ impl Session {
                         Lookup::Hit { id, similarity, answer } => {
                             out.say(format!("Hit (similarity {similarity:.4}, {id}): {answer}"))
                         }
-                        Lookup::Miss { best: Some(b) } => {
-                            out.say(format!("Miss (closest similarity {b:.4}, threshold {threshold})"))
+                        Lookup::Miss { best: Some(b), since } => {
+                            out.say(format!("Miss (closest similarity {b:.4}, threshold {threshold}; since {since})"))
                         }
-                        Lookup::Miss { best: None } => out.say("Miss (nothing cached for this question)"),
+                        Lookup::Miss { best: None, since } => {
+                            out.say(format!("Miss (nothing cached for this question; since {since})"))
+                        }
                     }
                     return Ok(());
                 }
                 let answer = answer.ok_or_else(|| format!("store needs an answer.\n{USAGE}"))?;
-                let id = self.inst.semantic.store(&self.ws, &name, &q, answer, ttl, depends, settings.max_entries)?;
+                let id = match self.inst.semantic.store_since(
+                    &self.ws,
+                    &name,
+                    &q,
+                    answer,
+                    ttl,
+                    depends,
+                    settings.max_entries,
+                    since,
+                )? {
+                    Stored::Kept(id) => id,
+                    Stored::Stale(why) => {
+                        out.say(format!(
+                            "Not stored: {why} after the lookup, so this answer may be built from old data."
+                        ));
+                        return Ok(());
+                    }
+                };
                 out.say(if ttl > 0 {
                     format!("Stored as {id} (expires in {ttl} s).")
                 } else {

@@ -241,7 +241,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             }))
         }
         "semantic" => {
-            use crate::semantic_cache::{lookup_json, Question, Settings};
+            use crate::semantic_cache::{lookup_json, Question, Settings, Stored};
             let s = Settings::of(&sess.inst.cfg());
             let cache = str_field(req, "cache")?;
             let vector = match &req["vector"] {
@@ -265,9 +265,15 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                         .as_array()
                         .map(|a| a.iter().filter_map(|p| p.as_str().map(String::from)).collect())
                         .unwrap_or_default();
-                    let id =
-                        sess.inst.semantic.store(&ws, cache, &q, req["answer"].clone(), ttl, depends, s.max_entries)?;
-                    Ok(json!({ "id": id }))
+                    let since = match &req["since"] {
+                        Json::Null => None,
+                        v => Some(v.as_u64().ok_or_else(|| invalid("\"since\" is the token a lookup answered"))?),
+                    };
+                    let answer = req["answer"].clone();
+                    match sess.inst.semantic.store_since(&ws, cache, &q, answer, ttl, depends, s.max_entries, since)? {
+                        Stored::Kept(id) => Ok(json!({ "id": id, "stored": true })),
+                        Stored::Stale(why) => Ok(json!({ "id": null, "stored": false, "stale": why })),
+                    }
                 }
                 other => Err(invalid(format!("unknown semantic action '{other}' (lookup or store)"))),
             }

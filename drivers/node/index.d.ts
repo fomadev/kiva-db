@@ -87,12 +87,18 @@ export class KivaClient extends EventEmitter {
     cache: string,
     question: { text?: string; vector?: number[]; threshold?: number },
   ): Promise<{ answer: T; similarity: number; id: string } | null>;
-  /** Semantic cache: remembers an answer; returns its id. */
+  /** Semantic cache: remembers an answer; returns its id, or null when data it depends on changed after `since`. */
   semanticStore(
     cache: string,
     answer: unknown,
-    question: { text?: string; vector?: number[]; ttl?: number; depends?: string[] },
-  ): Promise<string>;
+    question: { text?: string; vector?: number[]; ttl?: number; depends?: string[]; since?: number },
+  ): Promise<string | null>;
+  /** Semantic cache in one call: the cached answer, or compute()'s, stored unless its data changed meanwhile. */
+  semanticCached<T = unknown>(
+    cache: string,
+    question: { text?: string; vector?: number[]; threshold?: number; ttl?: number; depends?: string[] },
+    compute: () => Promise<T>,
+  ): Promise<T>;
   stats(): Promise<Record<string, unknown>>;
   /** After this, "change" events are emitted for matching keys. */
   subscribe(pattern?: string): Promise<void>;

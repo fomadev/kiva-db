@@ -47,12 +47,12 @@ fn questions_answers_and_invalidation_from_the_shell() {
     assert!(ok(&mut s, r#"semantic lookup faq text "what is the  capital of the drc?""#)
         .starts_with("Hit (similarity 1.0000"));
     // Another question: a miss, with how close it came.
-    assert_eq!(
-        ok(&mut s, "semantic lookup faq vector [0.6, 0.8, 0]"),
-        "Miss (closest similarity 0.6000, threshold 0.98)"
-    );
+    assert!(ok(&mut s, "semantic lookup faq vector [0.6, 0.8, 0]")
+        .starts_with("Miss (closest similarity 0.6000, threshold 0.98; since "));
     assert!(ok(&mut s, "semantic lookup faq vector [0.6, 0.8, 0] threshold 0.5").starts_with("Hit"));
-    assert_eq!(ok(&mut s, "semantic lookup other text \"x\""), "Miss (nothing cached for this question)");
+    assert!(
+        ok(&mut s, "semantic lookup other text \"x\"").starts_with("Miss (nothing cached for this question; since ")
+    );
 
     // Data the answer depends on changes: the answer goes.
     ok(&mut s, r#"set geo:cd {"capital": "Kinshasa"}"#);
@@ -64,7 +64,10 @@ fn questions_answers_and_invalidation_from_the_shell() {
     std::thread::sleep(Duration::from_millis(2100));
     assert!(ok(&mut s, "semantic lookup faq vector [0, 1, 0]").starts_with("Miss"));
 
-    assert!(ok(&mut s, "semantic stats").starts_with("faq: 0 entries, 4 hits, 3 misses (57% hit rate)"));
+    assert_eq!(
+        ok(&mut s, "semantic stats"),
+        "faq: 0 entries, 4 hits, 3 misses (57% hit rate), 1 invalidated by writes, 0 dependencies"
+    );
     ok(&mut s, r#"semantic store faq text "q" answer 42 ttl 0"#);
     assert_eq!(ok(&mut s, "semantic clear faq"), "Cleared 1 cached answer(s).");
     assert!(fails(&mut s, "semantic lookup faq").contains("text, its vector, or both"));
@@ -100,6 +103,69 @@ fn get_similar_reuses_the_results_of_a_near_identical_query() {
     let q = json!({ "op": "similar", "target": "doc:*.embedding", "vector": [1, 0.01, 0], "limit": 1 });
     let r = kivadb::api::handle(&mut s, &q).unwrap();
     assert!(r["cached"].as_f64().unwrap() > 0.99, "{r}");
+}
+
+/// The token a missed lookup printed.
+fn since(line: &str) -> u64 {
+    line.rsplit("since ").next().and_then(|t| t.trim_end_matches(')').parse().ok()).expect(line)
+}
+
+#[test]
+fn answers_go_when_their_data_expires_or_changes_while_they_are_computed() {
+    let dir = TempDir::new("semantic_deps");
+    let mut s = session(&dir);
+
+    // A document that leaves with its TTL takes its answers with it.
+    ok(&mut s, r#"set promo:1 {"price": 10} ttl 1"#);
+    ok(&mut s, r#"semantic store faq text "Price of the promo?" answer "10" depends "promo:1""#);
+    ok(&mut s, r#"semantic store faq text "Any promo?" answer "yes" depends "promo:*""#);
+    ok(&mut s, r#"semantic store faq text "Hours?" answer "9-17" depends "shop:hours""#);
+    assert!(ok(&mut s, "semantic stats").contains("3 entries"));
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(ok(&mut s, r#"semantic lookup faq text "Any promo?""#).starts_with("Miss"));
+    assert!(ok(&mut s, r#"semantic lookup faq text "Price of the promo?""#).starts_with("Miss"));
+    assert!(ok(&mut s, r#"semantic lookup faq text "Hours?""#).starts_with("Hit"));
+    assert!(ok(&mut s, "semantic stats").contains("2 invalidated by writes, 1 dependencies"));
+
+    // The model answers from shop:hours, which changes before the answer is stored.
+    let miss = ok(&mut s, r#"semantic lookup faq text "Open on Sunday?""#);
+    ok(&mut s, r#"set shop:hours {"sunday": false}"#);
+    let late =
+        format!(r#"semantic store faq text "Open on Sunday?" answer "yes" depends "shop:*" since {}"#, since(&miss));
+    assert_eq!(
+        ok(&mut s, &late),
+        "Not stored: shop:hours changed after the lookup, so this answer may be built from old data."
+    );
+    assert!(ok(&mut s, r#"semantic lookup faq text "Open on Sunday?""#).starts_with("Miss"));
+    // Nothing it depends on changed: kept.
+    let miss = ok(&mut s, r#"semantic lookup faq text "Open on Sunday?""#);
+    ok(&mut s, r#"set user:1 {"name": "Fordi"}"#);
+    let fine =
+        format!(r#"semantic store faq text "Open on Sunday?" answer "no" depends "shop:*" since {}"#, since(&miss));
+    assert!(ok(&mut s, &fine).starts_with("Stored as faq:"));
+    assert!(fails(&mut s, r#"semantic store faq text "q" answer 1 since soon"#).contains("since"));
+
+    // Emptying the workspace drops every answer, and every token given before.
+    let miss = ok(&mut s, r#"semantic lookup faq text "Closed?""#);
+    ok(&mut s, "del all keys");
+    assert_eq!(ok(&mut s, "semantic stats"), "No semantic cache in this workspace yet.");
+    let late = format!(r#"semantic store faq text "Closed?" answer "no" since {}"#, since(&miss));
+    assert!(ok(&mut s, &late).contains("too old to check"));
+
+    // The same from a program.
+    let miss = kivadb::api::handle(&mut s, &json!({ "op": "semantic", "cache": "llm", "text": "Stock?" })).unwrap();
+    ok(&mut s, r#"set stock:1 {"n": 0}"#);
+    let store = json!({ "op": "semantic", "action": "store", "cache": "llm", "text": "Stock?", "answer": 5,
+                        "depends": ["stock:*"], "since": miss["since"] });
+    let r = kivadb::api::handle(&mut s, &store).unwrap();
+    assert_eq!((r["stored"].as_bool(), r["id"].is_null()), (Some(false), true), "{r}");
+    assert_eq!(r["stale"], "stock:1 changed");
+    let mut store = store;
+    store["since"] = kivadb::api::handle(&mut s, &json!({ "op": "semantic", "cache": "llm", "text": "Stock?" }))
+        .unwrap()["since"]
+        .clone();
+    let r = kivadb::api::handle(&mut s, &store).unwrap();
+    assert_eq!((r["stored"].as_bool(), r["id"].as_str()), (Some(true), Some("llm:1")), "{r}");
 }
 
 #[test]
@@ -178,4 +244,30 @@ fn a_cache_in_front_of_a_slow_model_saves_most_of_its_calls() {
     assert!(hits >= 390, "only {hits} of the 400 rewordings were recognised");
     assert_eq!(calls, 500 - hits);
     assert!(with_cache < without_cache * 3 / 10, "{with_cache:?} with the cache, {without_cache:?} without");
+}
+
+/// What a write costs the cache, with many answers depending on documents.
+/// `cargo test --release --test semantic_cache invalidation_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn invalidation_speed() {
+    use kivadb::semantic_cache::SemanticCache;
+    let c = SemanticCache::default();
+    let n = 10_000;
+    for i in 0..n {
+        let q = Question { text: Some(format!("question {i}")), vector: None };
+        let depends = vec![format!("doc:{i}"), format!("chunk:{}:*", i % 100)];
+        c.store("w", "rag", &q, json!(i), 0, depends, n).unwrap();
+    }
+    let writes = 20_000;
+    let t = Instant::now();
+    for i in 0..writes {
+        c.invalidate("w", &format!("user:{i}"));
+    }
+    let unrelated = t.elapsed() / writes;
+    let t = Instant::now();
+    for i in 0..1000 {
+        c.invalidate("w", &format!("doc:{i}"));
+    }
+    println!("{n} answers: {unrelated:?} per unrelated write, {:?} per write dropping one answer", t.elapsed() / 1000);
 }

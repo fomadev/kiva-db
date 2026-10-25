@@ -352,6 +352,13 @@ impl Instance {
                 inst.on_op(&name, op);
             }
         });
+        // A document gone with its TTL is a change too, for cached answers.
+        let (weak, name) = (self.weak.clone(), workspace.to_string());
+        engine.add_expiry_listener(move |key| {
+            if let Some(inst) = weak.upgrade() {
+                inst.semantic.invalidate(&name, key);
+            }
+        });
         map.insert(workspace.to_string(), engine.clone());
         Ok(engine)
     }
@@ -436,10 +443,10 @@ impl Instance {
         self.pubsub.publish(workspace, op);
         // Cached answers built from data that just changed are stale.
         match op {
-            Op::Set { key, .. } | Op::Del { key } => self.semantic.invalidate(workspace, key),
-            Op::Reset => {
-                self.semantic.clear(workspace, None);
+            Op::Set { key, .. } | Op::Del { key } => {
+                self.semantic.invalidate(workspace, key);
             }
+            Op::Reset => self.semantic.reset(workspace),
         }
         if workspace == "default" {
             self.repl.broadcast(op);
