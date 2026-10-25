@@ -371,6 +371,7 @@ impl Session {
             }
             return Ok(());
         }
+        self.engine.check_room(put_keys(&ops))?;
         self.wrote = self.ws == "default";
         let mut ops = ops;
         if ops.len() == 1 {
@@ -413,7 +414,7 @@ impl Session {
                 TxOp::Del => BatchOp::Del { key },
             })
             .collect();
-        let res = match self.writable() {
+        let res = match self.writable().and_then(|_| self.engine.check_room(put_keys(&ops))) {
             Ok(()) => self.engine.apply_batch(ops, Some(txn.begin_seq)),
             Err(e) => Err(e),
         };
@@ -451,6 +452,14 @@ impl Session {
         txn.savepoints.truncate(pos + 1);
         Ok(())
     }
+}
+
+/// The keys a batch writes (not those it deletes).
+fn put_keys(ops: &[BatchOp]) -> impl Iterator<Item = &str> {
+    ops.iter().filter_map(|op| match op {
+        BatchOp::Put { key, .. } => Some(key.as_str()),
+        BatchOp::Del { .. } => None,
+    })
 }
 
 impl Drop for Session {

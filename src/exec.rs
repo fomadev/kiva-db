@@ -11,6 +11,7 @@ use crate::expr;
 use crate::format::FLAG_COMP_MASK;
 use crate::jsonpath;
 use crate::lexer::{split_by_and, tokenize, Kind, Token};
+use crate::query;
 use crate::session::{Need, Session};
 use crate::util::{b64_decode, fmt_time, hex_decode, human_size, now_secs};
 use crate::value::{fmt_f64, is_valid_number, Type, Value};
@@ -368,7 +369,29 @@ fn literal_json(text: &str, quoted: bool) -> Result<Json, String> {
     }
 }
 
-/// Parses `<pattern>.<field> <op> <value>`; spaces around the operator are optional.
+/// Refuses a word of a query that belongs to something the language leaves
+/// out (joins, `and`, `group by`...), saying what to do instead.
+fn refuse_unsupported(t: Option<&Token>) -> R {
+    match t {
+        Some(t) if t.kind == Kind::Comma => Err(query::Unsupported::Join.message().to_string()),
+        Some(t) if t.is_bare() => match query::unsupported_word(&t.text) {
+            Some(u) => Err(format!("'{}': {}", t.text, u.message())),
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+/// An unquoted value: a literal, never a field of other documents.
+fn condition_value(text: &str) -> Result<Json, String> {
+    if query::is_field_reference(text) {
+        return Err(format!("'{text}' names a field of other documents: {}", query::Unsupported::Join.message()));
+    }
+    literal_json(text, false)
+}
+
+/// Parses `<pattern>.<field> <op> <value>`; spaces around the operator are
+/// optional. One pattern, one condition: see [`crate::query`].
 fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
     const USAGE: &str = "expected a condition such as: user:*.role = \"admin\"";
     let t0 = c.next().ok_or(USAGE)?;
@@ -383,18 +406,20 @@ fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
             op_text = t0.text[pos..pos + len].to_string();
             let rest = &t0.text[pos + len..];
             if !rest.is_empty() {
-                value = Some(literal_json(rest, false)?);
+                value = Some(condition_value(rest)?);
             }
         }
     }
     if op_text.is_empty() {
-        let t1 = c.next().filter(|t| t.is_bare()).ok_or(USAGE)?;
+        let t1 = c.next();
+        refuse_unsupported(t1)?;
+        let t1 = t1.filter(|t| t.is_bare()).ok_or(USAGE)?;
         let (pos, len) = find_op(&t1.text).filter(|(p, _)| *p == 0).ok_or(USAGE)?;
         let _ = pos;
         op_text = t1.text[..len].to_string();
         let rest = &t1.text[len..];
         if !rest.is_empty() {
-            value = Some(literal_json(rest, false)?);
+            value = Some(condition_value(rest)?);
         }
     }
     let value = match value {
@@ -402,13 +427,25 @@ fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
         None => {
             let t = c.next().ok_or(USAGE)?;
             match t.kind {
-                Kind::Bare | Kind::DQuote | Kind::SQuote => literal_json(&t.text, t.is_quoted())?,
+                Kind::Bare => condition_value(&t.text)?,
+                Kind::DQuote | Kind::SQuote => literal_json(&t.text, true)?,
+                Kind::Json => {
+                    let j = serde_json::from_str::<Json>(&t.text).unwrap_or(Json::Null);
+                    query::check_value(&j)?;
+                    return Err(USAGE.into());
+                }
                 _ => return Err(USAGE.into()),
             }
         }
     };
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
     let (pattern, field) = split_target(&target)?;
+    query::check_field(&field)?;
+    // A second condition, a join or a pipeline right after the first one.
+    match c.peek() {
+        Some(t) if t.kind == Kind::Comma => return Err(query::Unsupported::Operator.message().into()),
+        t => refuse_unsupported(t)?,
+    }
     Ok(Cond { pattern, field, op, value })
 }
 
@@ -416,7 +453,15 @@ fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
 pub(crate) fn split_target(target: &str) -> Result<(String, String), String> {
     const NEED: &str = "expected both a key pattern and a field: <pattern>.<field>, e.g. doc:*.embedding";
     let from = target.rfind('*').map(|i| i + 1).unwrap_or(0);
-    let dot = target[from..].find('.').map(|i| i + from).ok_or(NEED)?;
+    let Some(dot) = target[from..].find('.').map(|i| i + from) else {
+        // `user:*.na*`: the last wildcard is in the field.
+        if let Some(first) = target.find('*') {
+            if let Some(dot) = target[first..].find('.') {
+                query::check_field(&target[first + dot + 1..])?;
+            }
+        }
+        return Err(NEED.into());
+    };
     let (pattern, field) = (target[..dot].to_string(), target[dot + 1..].to_string());
     if pattern.is_empty() || field.is_empty() {
         return Err(NEED.into());
@@ -471,6 +516,7 @@ const HELP: &str = r#"
 
   MAINTENANCE:
   stats | compact | check [repair] | hint info | encryption
+  memory [pin|unpin "<pattern>"]    : Memory use; keep the values of some keys in RAM.
   backup to "<file.tar.gz>" [workspace <n>] : Archive the home or a workspace (admin).
   autocompact on|off|status|threshold <N>
   compress lz4|zlib|none            : Re-encode the whole workspace.
@@ -1107,6 +1153,7 @@ impl Session {
         let mut c = Cur::new(a);
         let cond = parse_cond(&mut c)?;
         let tail = parse_tail(&mut c)?;
+        refuse_unsupported(c.peek())?;
         c.finish(&format!("{verb} where <pattern>.<field> <op> <value> [limit N]"))?;
         let (rows, _) = self.engine.query(&cond, tail.limit)?;
         match verb {
@@ -1221,15 +1268,16 @@ impl Session {
             "Usage: explain get where ... | explain count where ... | explain range <A> to <B> | explain get <key>";
         let mut c = Cur::new(a);
         if c.eat("distributed") {
-            return Err(
-                "distributed queries are not available: this edition runs as a single node with replicas.".into()
-            );
+            return Err(query::Unsupported::Distributed.message().into());
         }
         let verb = c.next().ok_or(USAGE)?;
         let total = self.engine.len();
         out.say("Query Plan");
         if (verb.is_kw("get") || verb.is_kw("count") || verb.is_kw("sum")) && c.eat("where") {
             let cond = parse_cond(&mut c)?;
+            parse_tail(&mut c)?;
+            refuse_unsupported(c.peek())?;
+            c.finish(USAGE)?;
             let plan = self.engine.explain(&cond);
             out.say(format!("  Filter    : {}.{} {} {}", cond.pattern, cond.field, cond.op.symbol(), cond.value));
             out.say(format!("  Strategy  : {}", plan.strategy));
@@ -1587,6 +1635,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,
         "semantic" if sub("store") || sub("clear") => Need::Write,
+        "memory" if sub("pin") || sub("unpin") => Need::Admin,
         // Compacting only rewrites one's own file: allowed at home.
         "compact" => Need::Owner,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"

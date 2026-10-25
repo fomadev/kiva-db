@@ -162,8 +162,12 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
         }
         "query" | "explain" => {
             sess.check(Need::Read)?;
+            // One pattern, one condition: see crate::query.
+            crate::query::check_request(req).map_err(KivaError::Invalid)?;
             let target = str_field(req, "target")?;
             let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
+            crate::query::check_field(&field).map_err(KivaError::Invalid)?;
+            crate::query::check_value(&req["value"]).map_err(KivaError::Invalid)?;
             let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
                 .ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
             let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };

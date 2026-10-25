@@ -320,6 +320,7 @@ impl Instance {
             } else {
                 0
             },
+            max_memory_bytes: (c.get_u64("storage", "max_memory_mb") as usize).saturating_mul(1024 * 1024),
             // Keys are read once, at start: changing them needs a restart.
             keys: self.keys.clone(),
             require_encryption: self.keys.is_some() && c.get_bool("encryption", "required"),
@@ -419,6 +420,7 @@ impl Instance {
             e.set_auto_compact(o.auto_compact, o.compact_threshold);
             e.set_compression(o.compression);
             e.set_cache_limit(o.cache_bytes);
+            e.set_memory_limit(o.max_memory_bytes);
         }
     }
 

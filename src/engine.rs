@@ -114,6 +114,8 @@ pub struct EngineOptions {
     pub background: bool,
     /// Memory budget of the value cache in bytes; 0 = no cache.
     pub cache_bytes: usize,
+    /// Memory bound of this workspace in bytes; 0 = no bound. See [`Engine::check_room`].
+    pub max_memory_bytes: usize,
     /// Encryption at rest: new records are encrypted with the current key.
     pub keys: Option<Arc<Keys>>,
     /// Refuse unencrypted records (and an unencrypted index snapshot).
@@ -132,6 +134,7 @@ impl Default for EngineOptions {
             sync_writes: false,
             background: true,
             cache_bytes: 0,
+            max_memory_bytes: 0,
             keys: None,
             require_encryption: false,
         }
@@ -393,6 +396,43 @@ impl SecIndex {
     }
 }
 
+/// Memory taken by one key in the in-memory index: its bytes, the entry and
+/// the B-tree node overhead.
+fn key_cost(key: &str) -> usize {
+    key.len() + std::mem::size_of::<String>() + std::mem::size_of::<Entry>() + 48
+}
+
+/// Where this workspace's memory goes, in bytes (estimates).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryReport {
+    /// Every key and the position of its value: always in memory.
+    pub keys: usize,
+    pub key_count: usize,
+    /// Secondary indexes.
+    pub secondary: usize,
+    /// Vector indexes and HNSW graphs.
+    pub vectors: usize,
+    /// Values kept in memory by `memory pin`.
+    pub pinned: usize,
+    pub pinned_values: usize,
+    pub pinned_patterns: Vec<String>,
+    /// Values of the value cache: given back first when memory runs short.
+    pub cache: usize,
+    /// `storage.max_memory_mb` in bytes; 0 = no bound.
+    pub limit: usize,
+}
+
+impl MemoryReport {
+    /// What cannot be given back without deleting data or indexes.
+    pub fn resident(&self) -> usize {
+        self.keys + self.secondary + self.vectors + self.pinned
+    }
+
+    pub fn total(&self) -> usize {
+        self.resident() + self.cache
+    }
+}
+
 /// What `indexes` shows about one secondary index.
 #[derive(Clone, Debug)]
 pub struct IndexInfo {
@@ -524,6 +564,12 @@ struct Inner {
     sec: Vec<SecIndex>,
     vecs: Vec<VecIndex>,
     cache: ValueCache,
+    /// Sum of `key_cost` over the index, kept up to date on every change.
+    key_bytes: usize,
+    /// Memory of the vector indexes, refreshed by the maintenance thread
+    /// (walking them on every write would cost too much).
+    vec_bytes: usize,
+    max_memory: usize,
     keys: Option<Arc<Keys>>,
     active_txns: usize,
     /// Versions of keys deleted while a transaction was open.
@@ -899,11 +945,14 @@ impl Inner {
         if e.expires_at > 0 {
             self.ttl_count += 1;
         }
-        if let Some(old) = self.index.insert(key.to_string(), e) {
-            self.live_bytes -= old.rec_len();
-            if old.expires_at > 0 {
-                self.ttl_count -= 1;
+        match self.index.insert(key.to_string(), e) {
+            Some(old) => {
+                self.live_bytes -= old.rec_len();
+                if old.expires_at > 0 {
+                    self.ttl_count -= 1;
+                }
             }
+            None => self.key_bytes += key_cost(key),
         }
         for s in &mut self.sec {
             s.update(key, doc);
@@ -916,6 +965,7 @@ impl Inner {
 
     fn idx_remove(&mut self, key: &str) -> Option<Entry> {
         let old = self.index.remove(key)?;
+        self.key_bytes -= key_cost(key);
         self.live_bytes -= old.rec_len();
         if old.expires_at > 0 {
             self.ttl_count -= 1;
@@ -951,6 +1001,48 @@ impl Inner {
     fn recount(&mut self) {
         self.live_bytes = FILE_HEADER_LEN + self.index.values().map(|e| e.rec_len()).sum::<u64>();
         self.ttl_count = self.index.values().filter(|e| e.expires_at > 0).count();
+        self.key_bytes = self.index.keys().map(|k| key_cost(k)).sum();
+    }
+
+    fn refresh_vec_bytes(&mut self) {
+        self.vec_bytes = self.vecs.iter().map(|v| v.memory_bytes()).sum();
+    }
+
+    fn memory(&self) -> MemoryReport {
+        let n = self.index.len();
+        let avg_key = self.key_bytes.checked_div(n).map_or(0, |b| b - key_cost(""));
+        // Per indexed document: the key twice (reverse map and value set),
+        // the value, and the nodes holding them.
+        let per_doc = 2 * (avg_key + std::mem::size_of::<String>()) + std::mem::size_of::<SKey>() + 64;
+        MemoryReport {
+            keys: self.key_bytes,
+            key_count: n,
+            secondary: self.sec.iter().map(|s| s.rev.len() * per_doc).sum(),
+            vectors: self.vec_bytes,
+            pinned: self.cache.pinned_bytes(),
+            pinned_values: self.cache.pinned_len(),
+            pinned_patterns: self.cache.patterns().to_vec(),
+            cache: self.cache.bytes(),
+            limit: self.max_memory,
+        }
+    }
+
+    /// Reads into memory the values of the live keys matching `pattern`.
+    fn warm_pinned(&mut self, pattern: &str) {
+        let prefix = glob_prefix(pattern).to_string();
+        let now = now_secs();
+        let keys: Vec<(String, Entry)> = self
+            .index
+            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .take_while(|(k, _)| k.starts_with(&prefix))
+            .filter(|(k, e)| !e.is_expired(now) && glob_match(pattern, k))
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
+        for (k, e) in keys {
+            if let Ok(v) = self.read_value(&k, &e) {
+                self.cache.put(&k, e.version, &v, e.raw_size as usize);
+            }
+        }
     }
 
     fn purge_expired(&mut self, now: i64) -> usize {
@@ -1144,6 +1236,9 @@ impl Engine {
             sec: Vec::new(),
             vecs: Vec::new(),
             cache: ValueCache::new(opts.cache_bytes),
+            key_bytes: 0,
+            vec_bytes: 0,
+            max_memory: opts.max_memory_bytes,
             keys: opts.keys.clone(),
             active_txns: 0,
             tomb_versions: HashMap::new(),
@@ -1190,6 +1285,12 @@ impl Engine {
                         }
                     }
                 }
+                for p in meta["pinned"].as_array().cloned().unwrap_or_default() {
+                    if let Some(p) = p.as_str() {
+                        inner.cache.pin(p);
+                        inner.warm_pinned(p);
+                    }
+                }
                 for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
                         if let Ok(segs) = jsonpath::parse_path(f) {
@@ -1202,6 +1303,7 @@ impl Engine {
                 }
             }
         }
+        inner.refresh_vec_bytes();
         inner.load.ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let signal = Arc::new(Signal { wake: Mutex::new(false), cv: Condvar::new(), stop: AtomicBool::new(false) });
@@ -1394,7 +1496,11 @@ impl Engine {
             Value::Doc(j) => Some(j),
             _ => None,
         };
+        let version = entry.version;
         inner.idx_insert(key, entry, doc);
+        if inner.cache.is_pinned(key) {
+            inner.cache.put(key, version, value, raw.len());
+        }
         inner.dirty_ops += 1;
         self.emit(&Op::Set { key: key.to_string(), ty: value.ty(), raw, msgpack, timestamp, expires_at, created });
         Ok(created)
@@ -1533,6 +1639,11 @@ impl Engine {
                     entry.version = seq;
                     let (msgpack, timestamp, expires_at) = (entry.is_msgpack(), entry.timestamp, entry.expires_at);
                     inner.idx_insert(&key, entry, doc.as_ref());
+                    if inner.cache.is_pinned(&key) {
+                        if let Ok(v) = Value::decode(ty, &raw, msgpack) {
+                            inner.cache.put(&key, seq, &v, raw.len());
+                        }
+                    }
                     self.emit(&Op::Set { key, ty, raw, msgpack, timestamp, expires_at, created });
                 }
                 Staged::Del { key } => {
@@ -1977,6 +2088,9 @@ impl Engine {
                     g.rebuild();
                 }
             }
+            if inner.ticks.is_multiple_of(5) {
+                inner.refresh_vec_bytes();
+            }
             // Writing a large graph costs more than replaying the few writes it
             // misses at the next start: save it after many changes, not often.
             let changes = inner.graph_changes();
@@ -2094,7 +2208,11 @@ impl Engine {
                 def
             })
             .collect();
-        let text = serde_json::to_string_pretty(&serde_json::json!({ "indexes": defs, "vector_indexes": vecs }))?;
+        let mut meta = serde_json::json!({ "indexes": defs, "vector_indexes": vecs });
+        if !inner.cache.patterns().is_empty() {
+            meta["pinned"] = inner.cache.patterns().into();
+        }
+        let text = serde_json::to_string_pretty(&meta)?;
         fs::write(sidecar(&self.path, "meta"), text)?;
         Ok(())
     }
@@ -2149,6 +2267,96 @@ impl Engine {
                 values: s.map.distinct(),
             })
             .collect()
+    }
+
+    // -- memory -------------------------------------------------------------
+
+    /// Where this workspace's memory goes.
+    pub fn memory(&self) -> MemoryReport {
+        let mut inner = self.lock();
+        inner.refresh_vec_bytes();
+        inner.memory()
+    }
+
+    /// Sets the memory bound in bytes; 0 removes it.
+    pub fn set_memory_limit(&self, bytes: usize) {
+        self.lock().max_memory = bytes;
+    }
+
+    /// Checks that writing `keys` fits in the memory bound. Changing a key
+    /// that exists is always allowed, and so is deleting: only new keys are
+    /// refused once the bound is reached, after the value cache has given
+    /// its memory back. Replicas never refuse what their master sent.
+    pub fn check_room<'a>(&self, keys: impl IntoIterator<Item = &'a str>) -> Result<()> {
+        let mut inner = self.lock();
+        if inner.max_memory == 0 {
+            return Ok(());
+        }
+        let now = now_secs();
+        let new: Vec<&str> =
+            keys.into_iter().filter(|k| !inner.index.get(*k).is_some_and(|e| !e.is_expired(now))).collect();
+        if new.is_empty() {
+            return Ok(());
+        }
+        let needed: usize = new.iter().map(|k| key_cost(k)).sum();
+        let mut m = inner.memory();
+        if m.total() + needed > inner.max_memory && m.cache > 0 {
+            inner.cache.drop_evictable();
+            m = inner.memory();
+        }
+        if m.resident() + needed > inner.max_memory {
+            return Err(KivaError::Other(format!(
+                "OOM: this workspace reached its memory bound ({} of {} used), so new keys are refused. \
+                 Delete keys or expired data, drop an index, or raise storage.max_memory_mb.",
+                crate::util::human_size(m.resident() as u64),
+                crate::util::human_size(inner.max_memory as u64)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Keeps in memory the values of the keys matching `pattern`, now and
+    /// after every write, whether the value cache is on or not. Returns the
+    /// number of values and their size.
+    pub fn pin(&self, pattern: &str) -> Result<(usize, usize)> {
+        let mut inner = self.lock();
+        if inner.cache.patterns().iter().any(|p| p == pattern) {
+            return Err(KivaError::Exists(format!("'{pattern}' is already pinned")));
+        }
+        if inner.max_memory > 0 {
+            // Values to read, at their stored size: refuse before loading them.
+            let prefix = glob_prefix(pattern).to_string();
+            let wanted: usize = inner
+                .index
+                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                .take_while(|(k, _)| k.starts_with(&prefix))
+                .filter(|(k, _)| glob_match(pattern, k) && !inner.cache.is_pinned(k))
+                .map(|(k, e)| e.raw_size as usize + k.len() + 96)
+                .sum();
+            let m = inner.memory();
+            if m.resident() + wanted > inner.max_memory {
+                return Err(KivaError::Other(format!(
+                    "OOM: pinning '{pattern}' needs about {} and would pass the memory bound ({} of {} used).",
+                    crate::util::human_size(wanted as u64),
+                    crate::util::human_size(m.resident() as u64),
+                    crate::util::human_size(inner.max_memory as u64)
+                )));
+            }
+        }
+        let before = (inner.cache.pinned_len(), inner.cache.pinned_bytes());
+        inner.cache.pin(pattern);
+        inner.warm_pinned(pattern);
+        self.save_meta(&inner)?;
+        Ok((inner.cache.pinned_len() - before.0, inner.cache.pinned_bytes() - before.1))
+    }
+
+    pub fn unpin(&self, pattern: &str) -> Result<bool> {
+        let mut inner = self.lock();
+        let removed = inner.cache.unpin(pattern);
+        if removed {
+            self.save_meta(&inner)?;
+        }
+        Ok(removed)
     }
 
     // -- value cache --------------------------------------------------------
