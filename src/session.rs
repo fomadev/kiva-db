@@ -220,7 +220,11 @@ impl Session {
         if !s.enabled || q.exact {
             return Ok((self.engine.similar(q)?, None));
         }
-        let name = format!("similar {}.{} {} {} {}", q.pattern, q.field, q.metric.name(), q.limit, q.ef);
+        let mut name = format!("similar {}.{} {} {} {}", q.pattern, q.field, q.metric.name(), q.limit, q.ef);
+        // Another filter is another question, however close the vectors.
+        for c in &q.filter {
+            name.push_str(&format!(" where {} {} {}", c.field, c.op.symbol(), c.value));
+        }
         let question = Question { text: None, vector: Some(q.vector.clone()) };
         if let Lookup::Hit { similarity, answer, .. } =
             self.inst.semantic.lookup(&self.ws, &name, &question, s.threshold)?
@@ -240,6 +244,7 @@ impl Session {
                 approximate: answer["approximate"].as_bool().unwrap_or(false),
                 examined: 0,
                 compared: 0,
+                filter: None,
             };
             return Ok((r, Some(similarity)));
         }

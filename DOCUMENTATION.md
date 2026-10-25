@@ -1601,11 +1601,12 @@ kiva> get similar doc:*.embedding to [0, 0, 1] limit 1
 doc:3: 0.9785 {"title":"Rust programming","embedding":[0.0,0.2,0.95]}
 (1 results, cosine metric, 3 vectors compared, vector index)
 kiva> indexes
-doc:* (embedding) - vector index, 3 vectors, 3 dimensions
+doc:* (embedding) - vector index, 3 vectors, 3 dimensions, 243 bytes in memory
+Vector memory: 243 bytes of 8.00 GB (0.0%, vector.max_ram_mb)
 ```
 
-* The first vector indexed fixes the number of dimensions. Documents whose vector has another length are skipped and counted (`indexes` shows how many).
-* Memory needed: about 4 bytes per number, so 100 000 vectors of 768 dimensions take about 300 MB.
+* The first vector indexed fixes the number of dimensions. Documents whose vector has another length are skipped and counted (`indexes` shows how many). So are documents whose field holds something else than numbers, such as the text itself: KivaDB does not compute embeddings ([12.11](#1211-what-the-vector-search-leaves-to-your-application)).
+* Memory needed: about 4 bytes per number, so 100 000 vectors of 768 dimensions take about 300 MB. `indexes` shows what each index takes, and the bound of [12.10](#1210-memory-bounds) keeps the total within the machine's RAM.
 * The definition is saved; the index is rebuilt when KivaDB starts. `drop vector index on doc: (embedding)` removes it.
 
 This index is **exact**: every vector is compared, so the results are always the true closest ones.
@@ -1662,7 +1663,7 @@ Building the graph took 57 s (155 s for the evenly spread vectors); stopping and
 
 ### 12.7 From programs
 
-The structured request `similar` returns the same results as JSON (`{"op": "similar", "target": "doc:*.embedding", "vector": [...], "limit": 5, "metric": "cosine"}`, plus `"ef"` and `"exact"`; the answer says `"approximate": true` when an HNSW index answered), on port 2911 or with `POST /v1/api`. The Node.js driver has `db.similar(target, vector, {limit, metric, ef, exact})`, and Kiva Studio has a Similarity tab in its Query screen.
+The structured request `similar` returns the same results as JSON (`{"op": "similar", "target": "doc:*.embedding", "vector": [...], "limit": 5, "metric": "cosine"}`, plus `"ef"` and `"exact"`; the answer says `"approximate": true` when an HNSW index answered), on port 2911 or with `POST /v1/api`. A `"filter"` keeps only some documents ([12.9](#129-filtering-on-other-fields)): `{"lang": "fr"}` for equalities, or `[{"field": "year", "cmp": ">=", "value": 2020}]` for comparisons; the answer's `"filter"` says how it was applied. The Node.js driver has `db.similar(target, vector, {limit, metric, ef, exact})`, and Kiva Studio has a Similarity tab in its Query screen.
 
 
 ### 12.8 Semantic cache: reuse answers to the same question
@@ -1693,10 +1694,66 @@ Hit (similarity 1.0000, faq:1): "Kinshasa"
 * **Several caches**, by name (`faq`, `support`, `llm`...), per workspace. A cache holds vectors of one length: those of one model.
 * **Similarity**: cosine, through an HNSW graph ([12.5](#125-approximate-index-hnsw-for-large-collections)). `semantic.cache.threshold` (0.98) decides what counts as the same question; lower it and different questions start to share answers. The right value depends on your embedding model: look at the similarities `semantic lookup` reports for a few rewordings and a few different questions, and set the threshold between the two.
 * **Freshness**: an answer lives `semantic.cache.ttl` seconds (300; `ttl` per entry, `ttl 0` = until invalidated). An answer built from your data names it with `depends`: as soon as a key matching one of those patterns is written or deleted, the answer is dropped. Storing the same question again replaces its answer. Beyond `semantic.cache.max_entries` (10 000 per cache), the oldest answers go first.
-* **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
+* **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) (and the same filter) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
 * The cache lives in memory: it is not saved, replicated or backed up, and fills again after a restart.
 
 **How much it saves.** Measured (release build) on 2 000 cached questions of 128 dimensions: a lookup takes about 0.13 ms. Of 500 questions (400 rewordings of known ones, 100 new), the 400 rewordings were all recognised with the right answer and the 100 new ones all went to the model: 80 % fewer model calls. The test `a_cache_in_front_of_a_slow_model_saves_most_of_its_calls` in `tests/semantic_cache.rs` repeats it.
+
+### 12.9 Filtering on other fields
+
+A search often concerns only part of the documents: those in one language, of one customer, from recent years. `where` keeps the documents whose other fields pass every condition, joined by `and`:
+
+```text
+kiva> get similar doc:*.embedding to [1, 0, 0] where lang = "fr" and year >= 2020 limit 5 return title
+doc:1: 0.9938 {"title":"Kinshasa guide"}
+(1 results, cosine metric, 3 vectors compared, vector index; filter tested on the closest vectors first, 2 documents read)
+```
+
+* A condition is `<field> <op> <value>` with the six comparisons of [Chapter 11](#chapter-11--queries-and-indexes) (`= != > >= < <=`). The field belongs to the documents searched; it may repeat their pattern (`doc:*.lang`). A document without the field does not pass.
+* Only `and`: the filter is simple on purpose. For `or`, run one search per alternative and merge the results. Text search and sparse (keyword) vectors combined with the dense ones are not part of it.
+* The last line says how the filter was applied, chosen by KivaDB:
+
+| Situation | How | Result |
+| :--- | :--- | :--- |
+| A secondary index ([11.4](#114-indexes--making-queries-fast)) serves one of the conditions, and leaves few documents | **Pre-filtering**: only the documents that index gives are compared, after the other conditions | Exact, even with HNSW |
+| An exact vector index | **Post-filtering**: the vectors are ranked, then the documents are read closest first until enough pass | Exact |
+| An HNSW index | The graph is searched, the documents it finds are tested, and the search asks for more until enough pass or the graph is exhausted | Approximate |
+| No vector index | Each document read is tested before its vector is compared | Exact |
+
+With HNSW, "few" means at most a tenth of the graph: a narrower filter is answered faster and exactly by comparing its documents, a broader one by the graph. A filter that few documents pass, without a secondary index on its field, makes an HNSW search explore much of the graph and read many documents: create an index on that field (`create index on doc:* (lang)`).
+
+From programs: `"filter"` in the structured request ([12.7](#127-from-programs)), `FILTER <field> <op> <value>` (repeatable) in `KIVA.SIMILAR` ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)).
+
+### 12.10 Memory bounds
+
+Vector indexes live in memory only. So that they cannot exhaust the machine's RAM, `vector.max_ram_mb` bounds the memory the vector indexes of a workspace may take:
+
+| Value | Bound |
+| :--- | :--- |
+| `auto` (default) | Half the machine's RAM, or half the memory limit of the container (Docker, Kubernetes) when it is lower |
+| A number | That many megabytes |
+| `0` | None of their own (`storage.max_memory_mb` still counts them) |
+
+* **Writes.** A write that would add a vector past the bound is refused, and nothing is written:
+  ```text
+  Error: OOM: the vector indexes of this workspace reached their memory bound (16.00 KB of 16.00 KB used), so new vectors are refused. Delete documents, drop a vector index, or raise vector.max_ram_mb.
+  ```
+  What adds no vector always goes through: replacing the vector of a document in an exact index, documents without a vector, other keys, deletes. A deleted vector gives its memory back at once in an exact index, at the next rebuild of the graph with HNSW.
+* **Creating an index.** The build stops as soon as it passes the room left, and the index is not created: `the vector index on big:* (embedding) stopped building after <n> vectors in <size>. OOM: ...`. An index too large is refused before it fills the memory.
+* **`storage.max_memory_mb`** ([18.6](#186-a-memory-bound)) counts the vectors too, and refuses a vector past it even for a document that already exists.
+* **What is never refused**: loading the indexes at start, and what a master sends to its replica.
+* `indexes` and `memory` show the memory used and the bound. `config set vector.max_ram_mb 4096` applies at once.
+* The figures are estimates that count each graph link as full, so the real use stays below them.
+
+### 12.11 What the vector search leaves to your application
+
+KivaDB's vector search is that of a database that also holds the documents, not of a dedicated vector engine. Its limits are deliberate:
+
+* **Embeddings come from your application.** KivaDB stores and compares the vectors it is given, as arrays of numbers; it never calls a model. Text sent where a vector is expected is refused with `KivaDB does not compute embeddings: ...`, in the shell, the structured requests and `KIVA.SIMILAR`. Compute vectors with your model (OpenAI, Mistral, Ollama, sentence-transformers...) and store them in a field of the document. One index holds vectors of one length: those of one model.
+* **In memory, on one machine.** The vectors of an index, exact or HNSW, are in RAM: the graph is saved to disk to start faster, but searched in memory. There is no on-disk index and no compression of the vectors (product or scalar quantization). A workspace is not split across machines (no sharding): replicas hold full copies, for reading and failover ([Chapter 25](#chapter-25--replication)). The collection must fit in the RAM of one machine: about 4 bytes per number, plus the graph links ([12.5](#125-approximate-index-hnsw-for-large-collections)), within `vector.max_ram_mb`.
+* **Simple filters.** Conditions joined by `and` ([12.9](#129-filtering-on-other-fields)); no `or`, no full-text search, no hybrid search mixing keyword and dense vectors.
+
+As a rule of thumb, up to a few million vectors of a few hundred dimensions, on one machine, with filters on a few fields, KivaDB covers the need without a second system. Beyond, or for hybrid search, a dedicated vector engine is the right tool, and KivaDB can keep the documents.
 
 **From programs.** The structured request `{"op": "semantic", "action": "lookup" | "store", "cache": "faq", "text": "...", "vector": [...], "threshold": 0.98, "answer": ..., "ttl": 300, "depends": ["geo:*"]}` answers `{"hit": true, "answer": ..., "similarity": 0.995, "id": "faq:1"}` or `{"hit": false, "best": 0.6}`. In Node.js:
 
@@ -1917,6 +1974,9 @@ enabled = true
 port = 6379
 max_collection_members = 100000
 
+[vector]
+max_ram_mb = auto
+
 [tls]
 enabled = true
 required = false
@@ -1997,6 +2057,7 @@ network.port = 2911
 | `resp.enabled` | `true` | Start the Redis-compatible listener ([Chapter 23](#chapter-23--redis-compatibility)) | next start |
 | `resp.port` | `6379` | Its port | next start |
 | `resp.max_collection_members` | `100000` | Members a Redis set, sorted set or list may hold ([23.8](#238-sets-and-sorted-sets)); `0` = no limit | immediately |
+| `vector.max_ram_mb` | `auto` | Memory the vector indexes of a workspace may take: `auto` = half the RAM (or of the container's limit), `0` = no bound of their own ([12.10](#1210-memory-bounds)) | immediately |
 | `tls.enabled` | `true` | Accept encrypted connections ([16.11](#1611-encrypted-connections-tls)) | next start |
 | `tls.required` | `false` | Refuse plain connections from other machines | immediately |
 | `tls.cert`, `tls.key` | empty | Your own certificate and key; empty: KivaDB's own | next start |
@@ -2609,7 +2670,7 @@ kiva> memory
 Memory of workspace 'default' (estimates)
   Keys              : 379 bytes (3 keys)
   Secondary indexes : 0 bytes
-  Vector indexes    : 0 bytes
+  Vector indexes    : 0 bytes of 8.00 GB (0.0%, vector.max_ram_mb)
   Pinned values     : 131 bytes (1 values)
   Value cache       : 0 bytes (given back first)
   Total             : 510 bytes
@@ -3347,7 +3408,7 @@ game:lb: {"redis":"zset","members":{"amani":120,"baraka":180,"chiku":200}} [obje
 An application that already talks to KivaDB through a Redis library can use the vector search of [Chapter 12](#chapter-12--vector-search-for-ai) and the semantic cache of [12.8](#128-semantic-cache-reuse-answers-to-the-same-question) on the same connection, with two commands of its own:
 
 ```text
-KIVA.SIMILAR <pattern>.<field> <vector as JSON> [LIMIT n] [METRIC cosine|dot|l2] [EF n] [EXACT]
+KIVA.SIMILAR <pattern>.<field> <vector as JSON> [FILTER <field> <op> <value>]... [LIMIT n] [METRIC cosine|dot|l2] [EF n] [EXACT]
 KIVA.API <request as JSON>
 ```
 
@@ -3361,7 +3422,7 @@ KIVA.API <request as JSON>
    3) "{\"title\":\"Goma guide\",\"embedding\":[0.1,0.9,0.0]}"
 ```
 
-* `KIVA.SIMILAR` answers one `[key, score, document]` triple per result, closest first. The score is a double in RESP3 and text in RESP2. It uses the vector index (exact or HNSW) when there is one, as `get similar` does.
+* `KIVA.SIMILAR` answers one `[key, score, document]` triple per result, closest first. The score is a double in RESP3 and text in RESP2. It uses the vector index (exact or HNSW) when there is one, as `get similar` does. Each `FILTER` adds a condition the documents must pass, as `where` does ([12.9](#129-filtering-on-other-fields)): `FILTER lang = fr FILTER year >= 2020`. The value is a number, `true`, `false` or `null` when it reads as one, otherwise text.
 * `KIVA.API` runs any structured request of [20.4](#204-structured-requests-for-tools) and answers its JSON result as text: `similar`, `query`, `semantic` (lookup and store), `stats`...
 
 With redis-py, for a cache of LLM answers:
@@ -4629,7 +4690,7 @@ KivaDB 1.5.1 keeps the whole database on each node, with replicas and automatic 
 
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
-* **Vector indexes on disk.** Vector indexes, exact or HNSW, live in memory: the vectors must fit in RAM ([12.5](#125-approximate-index-hnsw-for-large-collections)).
+* **Vector indexes on disk, and dedicated vector engine features.** Vector indexes, exact or HNSW, live in memory, bounded by `vector.max_ram_mb`: the vectors must fit in the RAM of one machine. No vector quantization, no hybrid (keyword and vector) search, filters joined by `and` only, embeddings computed by the application ([12.10, 12.11](#1210-memory-bounds)).
 * **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing (refused with a clear error), sets and sorted sets are meant for thousands of members per key, not millions (bounded by `resp.max_collection_members`), and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).

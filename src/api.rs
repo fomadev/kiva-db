@@ -24,6 +24,30 @@ fn invalid(msg: impl Into<String>) -> KivaError {
     KivaError::Invalid(msg.into())
 }
 
+/// The filter of a vector search: `{"field": value, ...}` for equalities,
+/// or `[{"field": f, "cmp": ">=", "value": v}, ...]`; every condition must hold.
+fn vector_filter(j: &Json, pattern: &str) -> Result<Vec<crate::engine::Cond>> {
+    let cond = |field: &str, cmp: &str, value: &Json| -> Result<crate::engine::Cond> {
+        let field = field.strip_prefix(pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
+        crate::query::check_field(field).map_err(KivaError::Invalid)?;
+        crate::query::check_value(value).map_err(KivaError::Invalid)?;
+        let op = crate::engine::CmpOp::parse(cmp).ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
+        Ok(crate::engine::Cond { pattern: pattern.to_string(), field: field.to_string(), op, value: value.clone() })
+    };
+    match j {
+        Json::Null => Ok(Vec::new()),
+        Json::Object(m) => m.iter().map(|(f, v)| cond(f, "=", v)).collect(),
+        Json::Array(a) => a
+            .iter()
+            .map(|c| {
+                let field = c["field"].as_str().ok_or_else(|| invalid("each filter condition needs a \"field\""))?;
+                cond(field, c["cmp"].as_str().unwrap_or("="), &c["value"])
+            })
+            .collect(),
+        _ => Err(invalid("\"filter\" is an object of equalities or an array of conditions")),
+    }
+}
+
 fn str_field<'a>(req: &'a Json, name: &str) -> Result<&'a str> {
     req[name].as_str().ok_or_else(|| invalid(format!("missing field \"{name}\"")))
 }
@@ -187,6 +211,9 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             sess.check(Need::Read)?;
             let target = str_field(req, "target")?;
             let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
+            if req["vector"].is_string() {
+                return Err(invalid(crate::vector::NOT_EMBEDDINGS));
+            }
             let vector = crate::vector::from_json(&req["vector"])
                 .ok_or_else(|| invalid("\"vector\" must be a non-empty array of numbers"))?;
             let metric = match req["metric"].as_str() {
@@ -199,6 +226,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             let mut q = crate::engine::VectorQuery::new(&pattern, &field, vector, metric, limit);
             q.ef = req["ef"].as_u64().unwrap_or(0).min(100_000) as usize;
             q.exact = req["exact"].as_bool().unwrap_or(false);
+            q.filter = vector_filter(&req["filter"], &pattern)?;
             let (r, cached) = sess.similar_cached(&q)?;
             let rows: Vec<Json> =
                 r.rows.iter().map(|(k, score, doc)| json!({ "key": k, "score": score, "value": doc })).collect();
@@ -208,6 +236,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "compared": r.compared,
                 "indexed": r.indexed,
                 "approximate": r.approximate,
+                "filter": r.filter,
                 "cached": cached
             }))
         }

@@ -391,8 +391,24 @@ fn redis_clients_reach_vector_search_and_the_semantic_cache() {
         matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1, 0, 0]", "METRIC", "l2", "EXACT"]), Reply::Array(Some(r)) if r.len() == 3)
     );
     assert!(
-        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "oops"]), Reply::Error(e) if e.contains("JSON array"))
+        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[oops"]), Reply::Error(e) if e.contains("JSON array"))
     );
+    // Text instead of a vector: the embedding is the application's to compute.
+    assert!(
+        matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "a guide to Kinshasa"]), Reply::Error(e) if e.contains("does not compute embeddings"))
+    );
+    // FILTER: conditions on the documents' other fields, all of which hold.
+    let Reply::Array(Some(rows)) =
+        call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1, 0, 0]", "FILTER", "title", "=", "Goma guide"])
+    else {
+        panic!("not an array");
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(&rows[0], Reply::Array(Some(r)) if matches!(&r[0], Reply::Bulk(Some(k)) if k == b"doc:2")));
+    assert!(matches!(
+        call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1, 0, 0]", "FILTER", "title", "~", "x"]),
+        Reply::Error(e) if e.contains("cmp must be")
+    ));
     assert!(
         matches!(call(&mut c, &["KIVA.SIMILAR", "doc:*.embedding", "[1,0,0]", "LIMIT"]), Reply::Error(e) if e.contains("needs a value"))
     );
