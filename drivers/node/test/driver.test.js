@@ -38,14 +38,23 @@ async function waitFor(port) {
   throw new Error("KivaDB did not start");
 }
 
+// Waits for the server to exit before removing its home: on Windows, its
+// files stay open until then, and the removal fails with ENOTEMPTY.
+async function stop(server, home) {
+  if (server.exitCode === null && server.signalCode === null) {
+    await new Promise((resolve) => {
+      server.once("exit", resolve);
+      server.kill();
+    });
+  }
+  fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not built (set KIVADB_BIN)" }, async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "kivadb-node-"));
   const port = await freePort();
   const server = spawn(binary, ["serve", "--home", home, "--port", String(port), "--no-http", "--no-resp"], { stdio: "ignore" });
-  t.after(() => {
-    server.kill();
-    fs.rmSync(home, { recursive: true, force: true });
-  });
+  t.after(() => stop(server, home));
   await waitFor(port);
 
   await t.test("refuses an empty password for a remote host", async () => {
@@ -136,10 +145,7 @@ test("the driver encrypts the connection with TLS", { skip: !binary && "KivaDB i
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "kivadb-node-tls-"));
   const port = await freePort();
   const server = spawn(binary, ["serve", "--home", home, "--port", String(port), "--no-http", "--no-resp"], { stdio: "ignore" });
-  t.after(() => {
-    server.kill();
-    fs.rmSync(home, { recursive: true, force: true });
-  });
+  t.after(() => stop(server, home));
   await waitFor(port);
   const shown = execFileSync(binary, ["--home", home, "tls"]).toString();
   const fingerprint = /SHA-256\s*:\s*(\S+)/.exec(shown)[1];
