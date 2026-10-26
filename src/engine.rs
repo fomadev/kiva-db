@@ -265,6 +265,8 @@ pub enum SKey {
     Bool(bool),
     Num(OrdF64),
     Str(String),
+    /// The values of the fields of an index on several fields.
+    Tuple(Vec<SKey>),
 }
 
 impl SKey {
@@ -280,6 +282,16 @@ impl SKey {
 
     fn same_kind(&self, o: &SKey) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(o)
+    }
+
+    fn to_json(&self) -> Json {
+        match self {
+            SKey::Null => Json::Null,
+            SKey::Bool(b) => Json::Bool(*b),
+            SKey::Num(n) => crate::query::num(n.0),
+            SKey::Str(s) => Json::String(s.clone()),
+            SKey::Tuple(parts) => Json::Array(parts.iter().map(SKey::to_json).collect()),
+        }
     }
 }
 
@@ -313,7 +325,8 @@ impl IndexKind {
     fn serves(self, op: CmpOp) -> bool {
         match self {
             IndexKind::BTree => op != CmpOp::Ne,
-            IndexKind::Hash => op == CmpOp::Eq,
+            // `like` tests each distinct value: no order needed.
+            IndexKind::Hash => matches!(op, CmpOp::Eq | CmpOp::In | CmpOp::Like | CmpOp::ILike),
         }
     }
 }
@@ -336,6 +349,13 @@ impl Postings {
         match self {
             Postings::Tree(m) => m.get(sk),
             Postings::Hash(m) => m.get(sk),
+        }
+    }
+
+    fn for_each(&self, mut f: impl FnMut(&SKey, &BTreeSet<String>)) {
+        match self {
+            Postings::Tree(m) => m.iter().for_each(|(k, v)| f(k, v)),
+            Postings::Hash(m) => m.iter().for_each(|(k, v)| f(k, v)),
         }
     }
 
@@ -371,20 +391,24 @@ impl Postings {
 
 struct SecIndex {
     pattern: String,
+    /// The field, or the fields joined by `, ` for an index on several.
     field: String,
-    path: Vec<jsonpath::Seg>,
+    paths: Vec<Vec<jsonpath::Seg>>,
     kind: IndexKind,
+    /// Two documents of the pattern may not hold the same value.
+    unique: bool,
     map: Postings,
     rev: HashMap<String, SKey>,
 }
 
 impl SecIndex {
-    fn new(pattern: &str, field: &str, path: Vec<jsonpath::Seg>, kind: IndexKind) -> SecIndex {
+    fn new(pattern: &str, field: &str, paths: Vec<Vec<jsonpath::Seg>>, kind: IndexKind, unique: bool) -> SecIndex {
         SecIndex {
             pattern: pattern.to_string(),
             field: field.to_string(),
-            path,
+            paths,
             kind,
+            unique,
             map: Postings::new(kind),
             rev: HashMap::new(),
         }
@@ -393,6 +417,29 @@ impl SecIndex {
     fn clear(&mut self) {
         self.map = Postings::new(self.kind);
         self.rev.clear();
+    }
+
+    /// The indexed value of `doc`. On several fields, a document lacking
+    /// one of them, or holding an array or an object there, is not indexed.
+    fn value(&self, doc: &Json) -> Option<SKey> {
+        let one = |path: &Vec<jsonpath::Seg>| jsonpath::get(doc, path).and_then(SKey::from_json);
+        match self.paths.as_slice() {
+            [path] => one(path),
+            paths => paths.iter().map(one).collect::<Option<Vec<SKey>>>().map(SKey::Tuple),
+        }
+    }
+
+    /// The keys other than `key` that hold `sk`, when the index is unique.
+    /// A null is a value like any other; a document lacking a field holds
+    /// nothing.
+    fn holders<'a>(&'a self, key: &'a str, sk: &SKey) -> impl Iterator<Item = &'a String> + 'a {
+        let set = if self.unique { self.map.get(sk) } else { None };
+        set.into_iter().flatten().filter(move |k| k.as_str() != key)
+    }
+
+    /// `user:* (email)`, as errors and plans name the index.
+    fn describe(&self) -> String {
+        format!("{} ({})", self.pattern, self.field)
     }
 
     fn remove(&mut self, key: &str) {
@@ -405,7 +452,7 @@ impl SecIndex {
         if !glob_match(&self.pattern, key) {
             return;
         }
-        let sk = doc.and_then(|d| jsonpath::get(d, &self.path)).and_then(SKey::from_json);
+        let sk = doc.and_then(|d| self.value(d));
         // A write that leaves the indexed field as it was costs nothing more.
         if self.rev.get(key) == sk.as_ref() {
             return;
@@ -464,13 +511,18 @@ impl MemoryReport {
 #[derive(Clone, Debug)]
 pub struct IndexInfo {
     pub pattern: String,
+    /// The field, or the fields joined by `, ` for a unique index on several.
     pub field: String,
     pub kind: IndexKind,
+    pub unique: bool,
     /// Documents that have the field.
     pub documents: usize,
     /// Distinct values of the field.
     pub values: usize,
 }
+
+/// Fields one unique index may cover.
+pub const MAX_UNIQUE_FIELDS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CmpOp {
@@ -480,9 +532,21 @@ pub enum CmpOp {
     Ge,
     Lt,
     Le,
+    /// One of the values of a list: `city in ["Goma", "Bukavu"]`.
+    In,
+    /// A text pattern: `%` stands for any run of characters, `_` for one.
+    Like,
+    /// `like`, capitals and small letters being the same.
+    ILike,
 }
 
+/// Values one `in` list may hold.
+pub const MAX_IN_VALUES: usize = 1024;
+
 impl CmpOp {
+    /// The operators, as error messages list them.
+    pub const LIST: &'static str = "= != > >= < <= in like ilike";
+
     pub fn parse(s: &str) -> Option<CmpOp> {
         Some(match s {
             "=" | "==" => CmpOp::Eq,
@@ -491,6 +555,9 @@ impl CmpOp {
             ">=" => CmpOp::Ge,
             "<" => CmpOp::Lt,
             "<=" => CmpOp::Le,
+            _ if s.eq_ignore_ascii_case("in") => CmpOp::In,
+            _ if s.eq_ignore_ascii_case("like") => CmpOp::Like,
+            _ if s.eq_ignore_ascii_case("ilike") => CmpOp::ILike,
             _ => return None,
         })
     }
@@ -503,7 +570,15 @@ impl CmpOp {
             CmpOp::Ge => ">=",
             CmpOp::Lt => "<",
             CmpOp::Le => "<=",
+            CmpOp::In => "in",
+            CmpOp::Like => "like",
+            CmpOp::ILike => "ilike",
         }
+    }
+
+    /// Whether the operator is a word (`in`, `like`), written between spaces.
+    pub fn is_word(self) -> bool {
+        matches!(self, CmpOp::In | CmpOp::Like | CmpOp::ILike)
     }
 }
 
@@ -527,6 +602,14 @@ pub struct Plan {
 
 pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
     use std::cmp::Ordering::*;
+    match (op, a, b) {
+        (CmpOp::In, _, Json::Array(list)) => return list.iter().any(|v| compare_json(a, CmpOp::Eq, v)),
+        (CmpOp::Like | CmpOp::ILike, Json::String(text), Json::String(pattern)) => {
+            return like_match(text, pattern, op == CmpOp::ILike)
+        }
+        (CmpOp::In | CmpOp::Like | CmpOp::ILike, _, _) => return false,
+        _ => {}
+    }
     let ord = match (a, b) {
         (Json::Number(x), Json::Number(y)) => match (x.as_f64(), y.as_f64()) {
             (Some(x), Some(y)) => x.partial_cmp(&y),
@@ -552,7 +635,83 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
         (Some(o), CmpOp::Ge) => o != Less,
         (Some(o), CmpOp::Lt) => o == Less,
         (Some(o), CmpOp::Le) => o != Greater,
+        (Some(_), CmpOp::In | CmpOp::Like | CmpOp::ILike) => unreachable!("answered above"),
     }
+}
+
+/// One element of a `like` pattern.
+enum LikePart {
+    /// `%`: any run of characters, none included.
+    Any,
+    /// `_`: one character.
+    One,
+    Char(char),
+}
+
+fn like_parts(pattern: &str) -> Vec<LikePart> {
+    let mut parts = Vec::new();
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        parts.push(match c {
+            '%' => LikePart::Any,
+            '_' => LikePart::One,
+            // `\%`, `\_` and `\\` stand for the character itself.
+            '\\' => LikePart::Char(chars.next().unwrap_or('\\')),
+            c => LikePart::Char(c),
+        });
+    }
+    parts
+}
+
+/// Whether `text` matches the `like` pattern. With `fold`, capitals and
+/// small letters are the same, in every alphabet (`É` matches `é`).
+pub fn like_match(text: &str, pattern: &str, fold: bool) -> bool {
+    let (text, pattern) =
+        if fold { (text.to_lowercase(), pattern.to_lowercase()) } else { (text.into(), pattern.into()) };
+    let t: Vec<char> = text.chars().collect();
+    let p = like_parts(&pattern);
+    // Greedy, going back to the last `%` on a mismatch: at most
+    // len(text) * len(pattern) steps, usually about len(text).
+    let (mut ti, mut pi) = (0, 0);
+    let mut last_any: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        match p.get(pi) {
+            Some(LikePart::Any) => {
+                last_any = Some((pi, ti));
+                pi += 1;
+            }
+            Some(LikePart::One) => {
+                ti += 1;
+                pi += 1;
+            }
+            Some(LikePart::Char(c)) if *c == t[ti] => {
+                ti += 1;
+                pi += 1;
+            }
+            _ => match last_any {
+                // The last `%` takes one more character.
+                Some((ap, at)) => {
+                    pi = ap + 1;
+                    ti = at + 1;
+                    last_any = Some((ap, at + 1));
+                }
+                None => return false,
+            },
+        }
+    }
+    p[pi..].iter().all(|x| matches!(x, LikePart::Any))
+}
+
+/// What every text matching the `like` pattern starts with: its characters
+/// before the first wildcard.
+pub fn like_prefix(pattern: &str) -> String {
+    like_parts(pattern)
+        .into_iter()
+        .map_while(|x| match x {
+            LikePart::Char(c) => Some(c),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A graph search pre-filters through a secondary index only when the
@@ -1207,6 +1366,42 @@ impl Inner {
         left
     }
 
+    /// Refuses writes that would give two documents the same value in a
+    /// unique index. `writes` holds each key written with the document it
+    /// will hold (`None`: deleted, or no longer a document); keys written
+    /// together are judged by their new values, never their old ones.
+    fn check_unique(&self, writes: &[(&str, Option<&Json>)]) -> Result<()> {
+        let now = now_ms();
+        for s in self.sec.iter().filter(|s| s.unique) {
+            let mut taken: HashMap<SKey, &str> = HashMap::new();
+            for &(key, doc) in writes {
+                if !glob_match(&s.pattern, key) {
+                    continue;
+                }
+                let Some(sk) = doc.and_then(|d| s.value(d)) else {
+                    continue;
+                };
+                let other = taken.get(&sk).copied().or_else(|| {
+                    s.holders(key, &sk)
+                        .find(|k| {
+                            !writes.iter().any(|(w, _)| w == k)
+                                && self.index.get(k.as_str()).is_some_and(|e| !e.is_expired(now))
+                        })
+                        .map(String::as_str)
+                });
+                if let Some(other) = other {
+                    return Err(KivaError::Exists(format!(
+                        "'{key}' not written: '{other}' already holds {} in the unique index on {}",
+                        sk.to_json(),
+                        s.describe()
+                    )));
+                }
+                taken.insert(sk, key);
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses a write that would take the vector indexes past their bound,
     /// or past the workspace's memory bound. Vector indexes live in memory
     /// only, so this is what stops them from exhausting the machine's RAM.
@@ -1541,9 +1736,17 @@ impl Engine {
                 }
                 for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
                     if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
-                        if let Ok(segs) = jsonpath::parse_path(f) {
+                        // An index on several fields lists them in "fields".
+                        let paths: std::result::Result<Vec<_>, String> = match def["fields"].as_array() {
+                            Some(fields) => {
+                                fields.iter().map(|f| jsonpath::parse_path(f.as_str().unwrap_or_default())).collect()
+                            }
+                            None => jsonpath::parse_path(f).map(|segs| vec![segs]),
+                        };
+                        if let Ok(paths) = paths {
                             let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
-                            inner.sec.push(SecIndex::new(p, f, segs, kind));
+                            let unique = def["unique"].as_bool().unwrap_or(false);
+                            inner.sec.push(SecIndex::new(p, f, paths, kind, unique));
                             let i = inner.sec.len() - 1;
                             inner.rebuild_sec(i);
                         }
@@ -1859,6 +2062,7 @@ impl Engine {
         let arriving = self.arriving();
         let mut inner = self.lock();
         if check {
+            inner.check_unique(&[(key, as_doc(value))])?;
             inner.check_vector_room(inner.vector_growth(key, as_doc(value)))?;
         }
         let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
@@ -1892,6 +2096,7 @@ impl Engine {
         let Some(new) = new else {
             return Ok(Some((out, false)));
         };
+        inner.check_unique(&[(key, as_doc(&new))])?;
         inner.check_vector_room(inner.vector_growth(key, as_doc(&new)))?;
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
         self.after_write(&inner);
@@ -2046,6 +2251,26 @@ impl Engine {
                     return Err(KivaError::Conflict(format!("key '{key}' was modified by another session")));
                 }
             }
+        }
+
+        if inner.sec.iter().any(|s| s.unique) {
+            // What each key holds once the whole batch is applied.
+            let mut last: Vec<(&str, Option<&Json>)> = Vec::new();
+            let mut slot: HashMap<&str, usize> = HashMap::new();
+            for op in &ops {
+                let (key, doc) = match op {
+                    BatchOp::Put { key, value, .. } => (key.as_str(), as_doc(value)),
+                    BatchOp::Del { key } => (key.as_str(), None),
+                };
+                match slot.get(key) {
+                    Some(&i) => last[i].1 = doc,
+                    None => {
+                        slot.insert(key, last.len());
+                        last.push((key, doc));
+                    }
+                }
+            }
+            inner.check_unique(&last)?;
         }
 
         enum Staged {
@@ -2685,6 +2910,12 @@ impl Engine {
                 if s.kind != IndexKind::BTree {
                     def["kind"] = s.kind.name().into();
                 }
+                if s.unique {
+                    def["unique"] = true.into();
+                }
+                if s.paths.len() > 1 {
+                    def["fields"] = s.field.split(", ").collect::<Vec<_>>().into();
+                }
                 def
             })
             .collect();
@@ -2728,20 +2959,62 @@ impl Engine {
 
     /// Like `create_index`, choosing how the values are kept.
     pub fn create_index_with(&self, pattern: &str, field: &str, kind: IndexKind) -> Result<usize> {
-        let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
-        if path.is_empty() {
+        self.create_index_on(pattern, &[field], kind, false)
+    }
+
+    /// Creates an index on one field, or a unique index on one or several
+    /// fields (`(type, parent, name)`: no two documents of the pattern hold
+    /// the same three values). A unique index is refused while two
+    /// documents hold the same value. Returns the number of documents
+    /// indexed.
+    pub fn create_index_on(&self, pattern: &str, fields: &[&str], kind: IndexKind, unique: bool) -> Result<usize> {
+        if fields.is_empty() || fields.iter().any(|f| f.trim().is_empty()) {
             return Err(KivaError::Invalid("an index needs a field name".into()));
         }
+        if fields.len() > 1 && !unique {
+            return Err(KivaError::Invalid(
+                "an index on several fields must be unique (create unique index ...): queries use \
+                 indexes on one field, and combine them for 'and'"
+                    .into(),
+            ));
+        }
+        if fields.len() > MAX_UNIQUE_FIELDS {
+            return Err(KivaError::Invalid(format!("a unique index has at most {MAX_UNIQUE_FIELDS} fields")));
+        }
+        let paths =
+            fields.iter().map(|f| jsonpath::parse_path(f).map_err(KivaError::Invalid)).collect::<Result<Vec<_>>>()?;
+        let field = fields.join(", ");
         let mut inner = self.lock();
         if let Some(s) = inner.sec.iter().find(|s| s.pattern == pattern && s.field == field) {
             return Err(KivaError::Exists(format!(
-                "index on {pattern} ({field}) already exists ({}); drop it first to change its kind",
+                "index on {pattern} ({field}) already exists ({}{}); drop it first to change it",
+                if s.unique { "unique, " } else { "" },
                 s.kind.name()
             )));
         }
-        inner.sec.push(SecIndex::new(pattern, field, path, kind));
+        inner.sec.push(SecIndex::new(pattern, &field, paths, kind, unique));
         let i = inner.sec.len() - 1;
         inner.rebuild_sec(i);
+        if unique {
+            let s = &inner.sec[i];
+            let mut twice = None;
+            s.map.for_each(|sk, keys| {
+                if twice.is_none() && keys.len() > 1 {
+                    let mut k = keys.iter();
+                    twice = Some((k.next().cloned(), k.next().cloned(), sk.to_json()));
+                }
+            });
+            if let Some((a, b, value)) = twice {
+                let what = s.describe();
+                inner.sec.pop();
+                return Err(KivaError::Exists(format!(
+                    "cannot create the unique index on {what}: {} and {} both hold {value}. \
+                     Change one of them, then create the index again.",
+                    a.unwrap_or_default(),
+                    b.unwrap_or_default()
+                )));
+            }
+        }
         let n = inner.sec[i].rev.len();
         self.save_meta(&inner)?;
         Ok(n)
@@ -2766,6 +3039,7 @@ impl Engine {
                 pattern: s.pattern.clone(),
                 field: s.field.clone(),
                 kind: s.kind,
+                unique: s.unique,
                 documents: s.rev.len(),
                 values: s.map.distinct(),
             })
@@ -3413,28 +3687,83 @@ impl Engine {
         Ok(VectorResult { rows, indexed: index.is_some(), approximate, examined, compared, filter: how })
     }
 
-    /// The index that can answer `cond`; for `=`, a hash index is preferred.
+    /// The index that can answer `cond`: for `=` and `in`, a hash index is
+    /// preferred; for `like` with text before its first wildcard, a B-tree.
     fn find_index(inner: &Inner, cond: &Cond) -> Option<usize> {
-        // Only a scalar value can be looked up.
-        SKey::from_json(&cond.value)?;
-        let usable =
-            |s: &SecIndex| s.kind.serves(cond.op) && s.field == cond.field && pattern_covers(&s.pattern, &cond.pattern);
-        let hash = inner.sec.iter().position(|s| s.kind == IndexKind::Hash && usable(s));
-        hash.or_else(|| inner.sec.iter().position(usable))
+        if !Self::indexable(cond) {
+            return None;
+        }
+        let usable = |s: &SecIndex| {
+            s.paths.len() == 1
+                && s.kind.serves(cond.op)
+                && s.field == cond.field
+                && pattern_covers(&s.pattern, &cond.pattern)
+        };
+        let prefixed = cond.op == CmpOp::Like && cond.value.as_str().is_some_and(|p| !like_prefix(p).is_empty());
+        let preferred = if prefixed { IndexKind::BTree } else { IndexKind::Hash };
+        let first = inner.sec.iter().position(|s| s.kind == preferred && usable(s));
+        first.or_else(|| inner.sec.iter().position(usable))
     }
 
+    /// The keys whose indexed value satisfies `cond`, sorted. Exact: the
+    /// vector search takes them as the documents passing `cond`.
     fn index_candidates(idx: &SecIndex, cond: &Cond) -> Vec<String> {
-        let Some(sk) = SKey::from_json(&cond.value) else {
-            return Vec::new();
-        };
         let mut out = Vec::new();
         let mut push = |set: &BTreeSet<String>| out.extend(set.iter().cloned());
-        if cond.op == CmpOp::Eq {
-            if let Some(set) = idx.map.get(&sk) {
-                push(set);
+        match cond.op {
+            CmpOp::Eq => {
+                if let Some(set) = SKey::from_json(&cond.value).and_then(|sk| idx.map.get(&sk)) {
+                    push(set);
+                }
+                return out;
             }
-            return out;
+            CmpOp::In => {
+                for v in cond.value.as_array().into_iter().flatten() {
+                    if let Some(set) = SKey::from_json(v).and_then(|sk| idx.map.get(&sk)) {
+                        push(set);
+                    }
+                }
+                out.sort();
+                out.dedup();
+                return out;
+            }
+            CmpOp::Like | CmpOp::ILike => {
+                let Some(pattern) = cond.value.as_str() else {
+                    return out;
+                };
+                let fold = cond.op == CmpOp::ILike;
+                let matching = |sk: &SKey| matches!(sk, SKey::Str(t) if like_match(t, pattern, fold));
+                let prefix = if fold { String::new() } else { like_prefix(pattern) };
+                match &idx.map {
+                    // The values that start with the pattern's text are
+                    // next to each other in a B-tree.
+                    Postings::Tree(map) if !prefix.is_empty() => {
+                        let from = SKey::Str(prefix.clone());
+                        for (sk, set) in map.range(from..) {
+                            if !matches!(sk, SKey::Str(t) if t.starts_with(&prefix)) {
+                                break;
+                            }
+                            if matching(sk) {
+                                push(set);
+                            }
+                        }
+                    }
+                    // Otherwise every distinct value is tested: still
+                    // without reading a document.
+                    map => map.for_each(|sk, set| {
+                        if matching(sk) {
+                            push(set)
+                        }
+                    }),
+                }
+                out.sort();
+                return out;
+            }
+            _ => {}
         }
+        let Some(sk) = SKey::from_json(&cond.value) else {
+            return out;
+        };
         // Only a B-tree is ever chosen for a range.
         let Postings::Tree(map) = &idx.map else {
             return out;
@@ -3458,10 +3787,21 @@ impl Engine {
                     push(set);
                 }
             }
-            CmpOp::Eq | CmpOp::Ne => {}
+            _ => {}
         }
         out.sort();
         out
+    }
+
+    /// Whether an index on the field of `cond` could answer it: false for
+    /// `!=`, and for a value that cannot be looked up.
+    pub fn indexable(cond: &Cond) -> bool {
+        match cond.op {
+            CmpOp::Ne => false,
+            CmpOp::In => cond.value.as_array().is_some_and(|l| l.iter().all(|v| SKey::from_json(v).is_some())),
+            CmpOp::Like | CmpOp::ILike => cond.value.is_string(),
+            _ => SKey::from_json(&cond.value).is_some(),
+        }
     }
 
     /// How `cond` would be executed, without running it.

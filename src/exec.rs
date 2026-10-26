@@ -517,11 +517,12 @@ impl QueryParser {
             c.next();
             return Ok(e);
         }
-        let cond = parse_one_cond(c, self.pattern.as_deref())?;
+        let (cond, negated) = parse_one_cond(c, self.pattern.as_deref())?;
         if self.pattern.is_none() {
             self.pattern = Some(cond.pattern.clone());
         }
-        Expr::test(cond)
+        let e = Expr::test(cond)?;
+        Ok(if negated { Expr::negate(e) } else { e })
     }
 }
 
@@ -530,7 +531,14 @@ impl QueryParser {
 fn parse_filter(c: &mut Cur, pattern: &str) -> Result<Vec<Cond>, String> {
     let mut filter = Vec::new();
     loop {
-        filter.push(parse_one_cond(c, Some(pattern))?);
+        let (cond, negated) = parse_one_cond(c, Some(pattern))?;
+        if negated {
+            return Err(format!(
+                "a vector filter cannot use 'not {}': filter on the values you want instead",
+                cond.op.symbol()
+            ));
+        }
+        filter.push(cond);
         if !c.eat("and") {
             break;
         }
@@ -543,8 +551,9 @@ fn parse_filter(c: &mut Cur, pattern: &str) -> Result<Vec<Cond>, String> {
     Ok(filter)
 }
 
-/// One condition. With `pattern`, the target is a field of its documents.
-fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
+/// One condition, and whether it was written `not in`, `not like` or `not
+/// ilike`. With `pattern`, the target is a field of its documents.
+fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), String> {
     const USAGE: &str = "expected a condition such as: user:*.role = \"admin\"";
     let t0 = c.next().ok_or(USAGE)?;
     let mut target = t0.text.clone();
@@ -562,6 +571,20 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
             }
         }
     }
+    // `in`, `like`, `ilike`, each of them after `not`.
+    let word_op =
+        |t: Option<&Token>| t.filter(|t| t.is_bare()).and_then(|t| CmpOp::parse(&t.text)).filter(|o| o.is_word());
+    let mut negated = false;
+    if op_text.is_empty() {
+        if c.peek().is_some_and(|t| t.is_kw("not")) && word_op(c.rest().get(1)).is_some() {
+            c.next();
+            negated = true;
+        }
+        if let Some(op) = word_op(c.peek()) {
+            c.next();
+            op_text = op.symbol().to_string();
+        }
+    }
     if op_text.is_empty() {
         let t1 = c.next();
         refuse_unsupported(t1)?;
@@ -574,6 +597,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
             value = Some(condition_value(rest)?);
         }
     }
+    let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
     let value = match value {
         Some(v) => v,
         None => {
@@ -582,15 +606,13 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
                 Kind::Bare => condition_value(&t.text)?,
                 Kind::DQuote | Kind::SQuote => literal_json(&t.text, true)?,
                 Kind::Json => {
-                    let j = serde_json::from_str::<Json>(&t.text).unwrap_or(Json::Null);
-                    query::check_value(&j)?;
-                    return Err(USAGE.into());
+                    serde_json::from_str::<Json>(&t.text).map_err(|e| format!("Invalid JSON literal: {e}"))?
                 }
                 _ => return Err(USAGE.into()),
             }
         }
     };
-    let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
+    query::check_value(op, &value)?;
     let (pattern, field) = match pattern {
         Some(p) => {
             let field = match target.strip_prefix(p).and_then(|f| f.strip_prefix('.')) {
@@ -608,7 +630,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
         None => split_target(&target)?,
     };
     query::check_field(&field)?;
-    Ok(Cond { pattern, field, op, value })
+    Ok((Cond { pattern, field, op, value }, negated))
 }
 
 /// Splits `<pattern>.<field>`: the field starts at the first '.' after the last wildcard.
@@ -646,7 +668,9 @@ const HELP: &str = r#"
   DATA:
   set [t] <key> <val> [ttl <sec>]   : Create a key (fails if it exists;
                                       'if not exists' skips it instead).
-  update [t] <key> <val>            : Replace the value of an existing key (type-safe).
+  add <prefix> <val> [ttl <sec>]    : Create a key named <prefix> + a new identifier
+                                      (add place: {...} -> place:6720f9c3a1b2c3d4e5f60718).
+  update [t] <key> <val>          : Replace the value of an existing key (type-safe).
   get [t] <k1> [and <k2>...]        : Read values. 'get user:1.name' reads one field.
   has [t] <key> | typeof <key>      : Existence / type checks.
   del [t] <key> [if exists]         : Delete keys. 'del all keys' wipes the workspace (admin).
@@ -663,9 +687,11 @@ const HELP: &str = r#"
   json type|len|keys <key> [<.path>]  : Inspect a document.
   get where <condition> [limit N] [return f1, f2]
   count|sum|avg|min|max where ... [group by f] : Aggregates; also <verb> <pat>.<field> [where ...].
-  conditions: <pat>.<f> <op> <v> [and|or ...], not, ( ) (op: = != > >= < <=).
+  conditions: <pat>.<f> <op> <v> [and|or ...], not, ( ) (op: = != > >= < <=),
+              <f> [not] in [v1, v2...], <f> [not] like|ilike "Kin%" (ilike: any case).
   create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
                                     Also <pat>.<field>; drop index, indexes.
+  create unique index on <pat> (<f1>[, <f2>...]) : Refuse two documents with the same values.
   get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
@@ -745,7 +771,8 @@ impl Session {
         }
 
         // An error inside a transaction aborts it.
-        const DATA_WRITES: &[&str] = &["set", "update", "del", "change", "bump", "json", "convert", "eval", "script"];
+        const DATA_WRITES: &[&str] =
+            &["set", "add", "update", "del", "change", "bump", "json", "convert", "eval", "script"];
         if self.txn.is_some() && out.has_err() && DATA_WRITES.contains(&cmd.as_str()) {
             self.rollback();
             out.err("Transaction rolled back (an error occurred inside the transaction).");
@@ -809,6 +836,7 @@ impl Session {
             "typeof" => self.chain(t, out, Session::typeof_one),
             "change" => self.cmd_change(a, out),
             "bump" => self.cmd_bump(a, out),
+            "add" => self.cmd_add(a, out),
             "print" => self.cmd_print(&line[t[0].end..], out),
             "scan" => self.cmd_scan(a, out),
             "keys" => self.cmd_keys(a, out),
@@ -1139,6 +1167,46 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// `add place: {...}`: stores the value under the prefix followed by a
+    /// new identifier ([`crate::util::new_id`]) and says which key it is.
+    fn cmd_add(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "add <prefix> <value> [ttl <sec>]";
+        let mut c = Cur::new(a);
+        let (Some(pt), Some(vt)) = (c.next(), c.next()) else {
+            return Err(format!("Syntax error. Missing prefix or value.\nUsage: {USAGE}"));
+        };
+        let mut ttl = 0i64;
+        if c.eat("ttl") {
+            ttl = uint(c.next(), "TTL")? as i64;
+            if ttl <= 0 {
+                return Err("ValueError: TTL must be a positive integer.".into());
+            }
+        }
+        if let Some(extra) = c.peek() {
+            return Err(format!("Invalid add syntax near '{}'\nUsage: {USAGE}", extra.text));
+        }
+        if !matches!(pt.kind, Kind::Bare | Kind::Backtick) {
+            return Err(format!("The prefix '{}' is bare text, such as place: (no quotes).", pt.text));
+        }
+        let key = self.new_key(&pt.text)?;
+        let value = parse_value(vt, None, &key)?;
+        self.kv_put(&key, value, deadline_in(ttl), false)?;
+        out.say(format!("OK: {key} saved."));
+        Ok(())
+    }
+
+    /// `prefix` followed by a new identifier: a key that does not exist.
+    pub(crate) fn new_key(&mut self, prefix: &str) -> Result<String, String> {
+        for _ in 0..8 {
+            let key = format!("{prefix}{}", crate::util::new_id());
+            validate_key_name(&key)?;
+            if !self.kv_exists(&key)? {
+                return Ok(key);
+            }
+        }
+        Err(format!("could not find a free key after {prefix}: every one tried exists"))
     }
 
     fn cmd_bump(&mut self, a: &[Token], out: &mut Out) -> R {
@@ -1508,7 +1576,10 @@ impl Session {
                 let mut tips: Vec<String> = Vec::new();
                 for cond in q.expr.iter().flat_map(|e| e.positive_conditions()) {
                     let tip = format!("create index on {} ({})", cond.pattern, cond.field);
-                    if cond.op != CmpOp::Ne && self.engine.explain(cond).index.is_none() && !tips.contains(&tip) {
+                    if crate::engine::Engine::indexable(cond)
+                        && self.engine.explain(cond).index.is_none()
+                        && !tips.contains(&tip)
+                    {
                         tips.push(tip);
                     }
                 }
@@ -1867,8 +1938,8 @@ fn required(cmd: &str, t: &[Token]) -> Need {
     let sub = |kw: &str| t.get(1).is_some_and(|x| x.is_kw(kw));
     match cmd {
         "auth" | "login" | "help" | "h" | "exit" | "quit" | "ping" | "version" | "clear" | "cls" => Need::None,
-        "set" | "update" | "del" | "change" | "bump" | "begin" | "commit" | "rollback" | "savepoint" | "convert"
-        | "eval" | "wait" => Need::Write,
+        "set" | "add" | "update" | "del" | "change" | "bump" | "begin" | "commit" | "rollback" | "savepoint"
+        | "convert" | "eval" | "wait" => Need::Write,
         "json" if !["get", "type", "len", "keys"].iter().any(|k| sub(k)) => Need::Write,
         "script" if sub("run") => Need::Write,
         "script" if sub("load") || sub("delete") => Need::Admin,

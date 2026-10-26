@@ -24,7 +24,7 @@
 //! refuses them with what to do instead, rather than with a generic syntax
 //! error.
 
-use crate::engine::{compare_json, CmpOp, Cond};
+use crate::engine::{compare_json, CmpOp, Cond, MAX_IN_VALUES};
 use crate::jsonpath::{self, Seg};
 use serde_json::{Map, Value as Json};
 use std::cmp::Ordering;
@@ -50,7 +50,7 @@ pub enum Unsupported {
     Pipeline,
     /// A query sent to several servers or shards.
     Distributed,
-    /// `in`, `like`, `between`...: not one of the six comparisons.
+    /// `between`, `contains`...: not one of the comparisons.
     Operator,
 }
 
@@ -75,8 +75,9 @@ impl Unsupported {
                  (replicas hold copies, see 'replica status'), so a query never spans several servers."
             }
             Unsupported::Operator => {
-                "the comparison operators are = != > >= < <=, with one value; for several values, join \
-                 comparisons with 'or'."
+                "the comparison operators are = != > >= < <= with one value, in [...] with a list of \
+                 values, like and ilike with a text pattern (% for any text, _ for one character); for a \
+                 range, join two comparisons with 'and'."
             }
         }
     }
@@ -98,7 +99,7 @@ pub fn unsupported_word(word: &str) -> Option<Unsupported> {
         "shard" | "shards" | "node" | "nodes" | "cluster" | "across" | "partition" | "distributed" => {
             Unsupported::Distributed
         }
-        "in" | "like" | "ilike" | "between" | "contains" | "matches" | "regexp" | "is" => Unsupported::Operator,
+        "between" | "contains" | "matches" | "regexp" | "rlike" | "is" => Unsupported::Operator,
         _ => return None,
     })
 }
@@ -139,14 +140,30 @@ pub fn check_field(field: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The value of the condition: one string, number, boolean or null.
-pub fn check_value(value: &Json) -> Result<(), String> {
-    match value {
-        Json::Array(_) | Json::Object(_) => Err(format!(
+/// The value of the condition: one string, number, boolean or null; for
+/// `in`, a list of them; for `like` and `ilike`, a text pattern.
+pub fn check_value(op: CmpOp, value: &Json) -> Result<(), String> {
+    let scalar = |v: &Json| !matches!(v, Json::Array(_) | Json::Object(_));
+    match op {
+        CmpOp::In => match value.as_array() {
+            Some(list) if list.is_empty() => Err("'in' needs at least one value: in [\"Goma\", \"Bukavu\"]".into()),
+            Some(list) if list.len() > MAX_IN_VALUES => {
+                Err(format!("an 'in' list holds at most {MAX_IN_VALUES} values, this one has {}", list.len()))
+            }
+            Some(list) if list.iter().all(scalar) => Ok(()),
+            Some(_) => Err("the values of an 'in' list are strings, numbers, booleans or null".into()),
+            None => Err(format!("'in' takes a list of values, such as in [\"Goma\", \"Bukavu\"], not {value}")),
+        },
+        CmpOp::Like | CmpOp::ILike if value.is_string() => Ok(()),
+        CmpOp::Like | CmpOp::ILike => Err(format!(
+            "'{}' takes a quoted text pattern, such as \"Kin%\" (% for any text, _ for one character), not {value}",
+            op.symbol()
+        )),
+        _ if scalar(value) => Ok(()),
+        _ => Err(format!(
             "a condition compares with one string, number, boolean or null, not with an array or an object: {}",
             Unsupported::Operator.message()
         )),
-        _ => Ok(()),
     }
 }
 
@@ -181,7 +198,7 @@ pub enum Expr {
 impl Expr {
     pub fn test(cond: Cond) -> Result<Expr, String> {
         check_field(&cond.field)?;
-        check_value(&cond.value)?;
+        check_value(cond.op, &cond.value)?;
         let path = jsonpath::parse_path(&cond.field)?;
         Ok(Expr::Test(Test { cond, path }))
     }
@@ -324,14 +341,16 @@ impl Expr {
                     }
                     let field = f.as_str().ok_or("\"field\" must be a string")?;
                     let cmp = CmpOp::parse(m.get("cmp").and_then(Json::as_str).unwrap_or("="))
-                        .ok_or("cmp must be one of = != > >= < <=")?;
+                        .ok_or(format!("cmp must be one of {}", CmpOp::LIST))?;
                     let value = m.get("value").ok_or(format!("the condition on {field} needs a \"value\""))?;
                     return leaf(field, cmp, value.clone());
                 }
                 if m.is_empty() {
                     return Err(SHAPE.into());
                 }
-                Ok(Expr::and(m.iter().map(|(k, v)| leaf(k, CmpOp::Eq, v.clone())).collect::<Result<_, _>>()?))
+                // `{"city": ["Goma", "Bukavu"]}`: one of the values.
+                let op = |v: &Json| if v.is_array() { CmpOp::In } else { CmpOp::Eq };
+                Ok(Expr::and(m.iter().map(|(k, v)| leaf(k, op(v), v.clone())).collect::<Result<_, _>>()?))
             }
             _ => Err(SHAPE.into()),
         }
@@ -726,7 +745,9 @@ mod tests {
         assert_eq!(unsupported_word("join"), Some(Unsupported::Join));
         assert_eq!(unsupported_word("order"), Some(Unsupported::Pipeline));
         assert_eq!(unsupported_word("@node2"), Some(Unsupported::Distributed));
-        assert_eq!(unsupported_word("in"), Some(Unsupported::Operator));
+        assert_eq!(unsupported_word("between"), Some(Unsupported::Operator));
+        assert_eq!(unsupported_word("in"), None);
+        assert_eq!(unsupported_word("ilike"), None);
         assert_eq!(unsupported_word("limit"), None);
         assert_eq!(unsupported_word("return"), None);
 
@@ -738,13 +759,54 @@ mod tests {
         assert!(check_field("address.city").is_ok());
         assert!(check_field("tags[*]").is_err());
         assert!(check_field("a..b").is_err());
-        assert!(check_value(&json!("x")).is_ok());
-        assert!(check_value(&json!(["a", "b"])).is_err());
+        assert!(check_value(CmpOp::Eq, &json!("x")).is_ok());
+        assert!(check_value(CmpOp::Eq, &json!(["a", "b"])).is_err());
+        assert!(check_value(CmpOp::In, &json!(["a", 2, null])).is_ok());
+        assert!(check_value(CmpOp::In, &json!([])).is_err());
+        assert!(check_value(CmpOp::In, &json!([["a"]])).is_err());
+        assert!(check_value(CmpOp::In, &json!("a")).is_err());
+        assert!(check_value(CmpOp::Like, &json!("Kin%")).is_ok());
+        assert!(check_value(CmpOp::ILike, &json!(3)).is_err());
 
         assert!(is_field_reference("order:*.user"));
         assert!(is_field_reference("user:2.age"));
         assert!(!is_field_reference("3.5"));
         assert!(!is_field_reference("admin"));
+    }
+
+    #[test]
+    fn like_patterns() {
+        use crate::engine::{like_match, like_prefix};
+        for (text, pattern, fold, want) in [
+            ("Kinshasa", "Kin%", false, true),
+            ("Kinshasa", "kin%", false, false),
+            ("Kinshasa", "kin%", true, true),
+            ("Kinshasa", "%sha%", false, true),
+            ("Kinshasa", "K_nshasa", false, true),
+            ("Kinshasa", "K_shasa", false, false),
+            ("", "%", false, true),
+            ("", "_", false, false),
+            ("abcabc", "%abc", false, true),
+            ("aaab", "%a%b", false, true),
+            ("aaab", "%a%c", false, false),
+            ("50% off", "50\\%%", false, true),
+            ("50 off", "50\\%%", false, false),
+            ("a_b", "a\\_b", false, true),
+            ("axb", "a\\_b", false, false),
+            ("ÉLISABETHVILLE", "élisabeth%", true, true),
+            ("Mbandaka", "%ka", false, true),
+        ] {
+            assert_eq!(like_match(text, pattern, fold), want, "{text} like {pattern} (fold {fold})");
+        }
+        assert_eq!(like_prefix("Kin%sha"), "Kin");
+        assert_eq!(like_prefix("50\\%_"), "50%");
+        assert_eq!(like_prefix("%a"), "");
+        let e = Expr::and(vec![cond("city", "in", json!(["Goma", "Bukavu"])), cond("name", "ilike", json!("a%"))]);
+        assert_eq!(e.to_string(), r#"city in ["Goma","Bukavu"] and name ilike "a%""#);
+        assert!(e.matches(&json!({"city": "Goma", "name": "Amani"})));
+        assert!(!e.matches(&json!({"city": "Uvira", "name": "Amani"})));
+        let n = Expr::from_json(&json!({"not": {"city": ["Goma"]}}), "u:*").unwrap();
+        assert_eq!(n.to_string(), r#"not city in ["Goma"]"#);
     }
 
     #[test]

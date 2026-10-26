@@ -660,7 +660,10 @@ fn vector_filters_limits_and_embeddings_from_the_shell_and_the_api() {
         .contains("'and' only"));
     assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where user:*.lang = "fr""#)
         .contains("fields of the documents of doc:*"));
-    assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang in "fr""#).contains("operators"));
+    assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang in "fr""#).contains("list of values"));
+    assert!(
+        fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where year between 1 and 2"#).contains("operators")
+    );
 
     // KivaDB receives vectors; text to embed is the application's job.
     assert!(fails(&mut s, r#"get similar doc:*.embedding to "a guide to Kinshasa""#)

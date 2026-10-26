@@ -280,7 +280,9 @@ fn queries_refuse_joins_and_sorting_pipelines_with_an_explanation() {
         (r#"get where user:*.role = "dev" group by role"#, "sorting pipelines"),
         (r#"get where user:*.role = "dev" limit 5 order by age"#, "sorting pipelines"),
         (r#"count where user:*.role = "dev" group by role order by role"#, "sorting pipelines"),
-        (r#"get where user:*.role in ["dev", "admin"]"#, "comparison operators"),
+        (r#"get where user:*.age between 20 and 30"#, "comparison operators"),
+        (r#"get where user:*.role in "dev""#, "takes a list of values"),
+        (r#"get where user:*.role like 3"#, "quoted text pattern"),
         (r#"get where user:*.role = "dev", "admin""#, "comparison operators"),
         (r#"sum where user:*.age > 20 @node2"#, "distributed queries"),
         (r#"sum where user:*.role = "dev" and age > 1"#, "say which one sum reads"),
@@ -1177,6 +1179,12 @@ fn indexed_and_scanned_queries_give_the_same_answers() {
         r#"p:*.role = "sales" and not (age > 50 or city = 1)"#,
         r#"p:*.city = 0 or city = 5 or role = "admin" and age <= 25"#,
         r#"not p:*.role = "dev""#,
+        r#"p:*.role in ["dev", "ops"] and age > 30"#,
+        r#"p:*.city in [0, 4, "4"] or role in ["admin"]"#,
+        r#"p:*.role not in ["dev", "sales"]"#,
+        r#"p:*.role like "d%" or role like "%ps""#,
+        r#"p:*.role ilike "A_M%" and age < 40"#,
+        r#"p:*.role not ilike "%E%""#,
     ];
     let run_all = |s: &mut Session| -> Vec<String> {
         let mut out = Vec::new();
@@ -1195,4 +1203,226 @@ fn indexed_and_scanned_queries_give_the_same_answers() {
     assert!(plan.contains("INDEX MERGE"), "{plan}");
     assert_eq!(run_all(&mut s), scanned);
     assert!(scanned[0].ends_with("matches)") && !scanned[0].starts_with("(0"), "{}", scanned[0]);
+}
+
+#[test]
+fn in_like_and_ilike_compare_with_lists_and_text_patterns() {
+    let dir = TempDir::new("in-like");
+    let mut s = kiva(&dir);
+    for (i, (name, kind)) in [
+        ("Kinshasa", "VILLE"),
+        ("Kintambo", "COMMUNE"),
+        ("kinkole", "QUARTIER"),
+        ("Goma", "VILLE"),
+        ("Élisabethville", "VILLE"),
+        ("100% Bandal", "QUARTIER"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        ok(&mut s, &format!(r#"set place:{i} {{"name": "{name}", "type": "{kind}", "parent": {}}}"#, i % 3));
+    }
+    ok(&mut s, r#"set place:9 {"name": ["not", "text"], "type": null}"#);
+    let keys = |s: &mut Session, q: &str| -> Vec<String> {
+        let out = ok(s, &format!("get where {q}"));
+        out.lines().filter_map(|l| l.split(':').nth(1).map(|n| format!("place:{n}"))).collect()
+    };
+    let cases: [(&str, &[&str]); 11] = [
+        (r#"place:*.type in ["VILLE", "COMMUNE"]"#, &["place:0", "place:1", "place:3", "place:4"]),
+        (r#"place:*.parent in [0, 2]"#, &["place:0", "place:2", "place:3", "place:5"]),
+        (r#"place:*.type not in ["VILLE"]"#, &["place:1", "place:2", "place:5", "place:9"]),
+        (r#"place:*.type in [null]"#, &["place:9"]),
+        (r#"place:*.name like "Kin%""#, &["place:0", "place:1"]),
+        (r#"place:*.name ilike "kin%""#, &["place:0", "place:1", "place:2"]),
+        (r#"place:*.name ilike "GOMA""#, &["place:3"]),
+        (r#"place:*.name ilike "é%""#, &["place:4"]),
+        (r#"place:*.name like "%a_a""#, &["place:0"]),
+        (r#"place:*.name like "100\% %""#, &["place:5"]),
+        // A name that is not text fails like, so not like holds.
+        (r#"place:*.name not like "%a%" and type != "QUARTIER""#, &["place:9"]),
+    ];
+    let check = |s: &mut Session| {
+        for (q, want) in cases {
+            assert_eq!(keys(s, q), want, "{q}");
+        }
+    };
+    check(&mut s);
+    ok(&mut s, "create index on place: (type) using hash");
+    ok(&mut s, "create index on place: (name)");
+    ok(&mut s, "create index on place: (parent)");
+    check(&mut s);
+    let plan = ok(&mut s, r#"explain get where place:*.type in ["VILLE", "COMMUNE"]"#);
+    assert!(plan.contains("INDEX SCAN") && plan.contains("using hash") && plan.contains("4 of 7"), "{plan}");
+    let plan = ok(&mut s, r#"explain get where place:*.name like "Kin%""#);
+    assert!(plan.contains("place:* (name)") && plan.contains("2 of 7"), "{plan}");
+    // ilike tests each distinct value of the index, without reading the documents.
+    let plan = ok(&mut s, r#"explain get where place:*.name ilike "kin%""#);
+    assert!(plan.contains("INDEX SCAN") && plan.contains("3 of 7"), "{plan}");
+    assert!(ok(&mut s, r#"explain get where place:*.type not in ["VILLE"]"#).contains("PREFIX SCAN"));
+
+    for (q, why) in [
+        (r#"get where place:*.type in []"#, "at least one value"),
+        (r#"get where place:*.type in [["VILLE"]]"#, "strings, numbers, booleans or null"),
+        (r#"get where place:*.name like Kin"#, "must be quoted"),
+        (r#"get where place:*.name ilike ["a"]"#, "quoted text pattern"),
+    ] {
+        let err = fails(&mut s, q);
+        assert!(err.contains(why), "`{q}`: {err}");
+    }
+    let many: Vec<String> = (0..=kivadb::engine::MAX_IN_VALUES).map(|i| i.to_string()).collect();
+    let err = fails(&mut s, &format!("get where place:*.parent in [{}]", many.join(", ")));
+    assert!(err.contains("at most 1024 values"), "{err}");
+
+    // Aggregates, vector filters and structured requests take them too.
+    assert_eq!(ok(&mut s, r#"count where place:*.name ilike "%ville""#), "Count: 1");
+    ok(&mut s, r#"set doc:1 {"lang": "fr", "v": [1, 0]}"#);
+    ok(&mut s, r#"set doc:2 {"lang": "ln", "v": [0.9, 0.1]}"#);
+    ok(&mut s, r#"set doc:3 {"lang": "en", "v": [0.8, 0.2]}"#);
+    let found = ok(&mut s, r#"get similar doc:*.v to [1, 0] where lang in ["fr", "ln"] limit 5"#);
+    assert!(found.contains("doc:1") && found.contains("doc:2") && !found.contains("doc:3"), "{found}");
+    assert!(fails(&mut s, r#"get similar doc:*.v to [1, 0] where lang not in ["en"]"#).contains("not in"));
+
+    let api = |s: &mut Session, req: serde_json::Value| kivadb::api::handle(s, &req).unwrap();
+    let r =
+        api(&mut s, serde_json::json!({"op": "query", "target": "place:*", "where": {"type": ["VILLE", "COMMUNE"]}}));
+    assert_eq!(r["rows"].as_array().unwrap().len(), 4);
+    let r = api(
+        &mut s,
+        serde_json::json!({"op": "query", "target": "place:*", "where": {"field": "name", "cmp": "ilike", "value": "KIN%"}}),
+    );
+    assert_eq!(r["rows"].as_array().unwrap().len(), 3);
+    let r = api(&mut s, serde_json::json!({"op": "query", "target": "place:*.name", "cmp": "like", "value": "G%"}));
+    assert_eq!(r["rows"][0]["key"], "place:3");
+    let r = api(
+        &mut s,
+        serde_json::json!({"op": "similar", "target": "doc:*.v", "vector": [1, 0], "filter": {"lang": ["en"]}}),
+    );
+    assert_eq!(r["results"][0]["key"], "doc:3");
+}
+
+#[test]
+fn unique_indexes_refuse_a_second_document_with_the_same_values() {
+    let dir = TempDir::new("unique");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set user:1 {"email": "amani@exemple.cd"}"#);
+    ok(&mut s, r#"set user:2 {"email": "amani@exemple.cd"}"#);
+    let err = fails(&mut s, "create unique index on user: (email)");
+    assert!(err.contains("user:1 and user:2 both hold \"amani@exemple.cd\""), "{err}");
+    assert!(ok(&mut s, "indexes").contains("No secondary indexes"), "the refused index is not kept");
+    ok(&mut s, r#"update user:2 {"email": "bisimwa@exemple.cd"}"#);
+    assert_eq!(
+        ok(&mut s, "create unique index on user: (email) using hash"),
+        "Unique index created on user:* (email) using hash: 2 documents indexed."
+    );
+    let err = fails(&mut s, r#"set user:3 {"email": "amani@exemple.cd"}"#);
+    assert!(err.contains("'user:3' not written: 'user:1' already holds \"amani@exemple.cd\""), "{err}");
+    assert!(err.contains("unique index on user:* (email)"), "{err}");
+    assert!(fails(&mut s, r#"update user:2 {"email": "amani@exemple.cd"}"#).contains("already holds"));
+    assert!(fails(&mut s, r#"json set user:2 .email "amani@exemple.cd""#).contains("already holds"));
+    // Writing a document again with its own value, or without the field, is allowed.
+    ok(&mut s, r#"update user:1 {"email": "amani@exemple.cd", "age": 30}"#);
+    // A document without the field holds nothing; null is a value like the others.
+    ok(&mut s, r#"set user:4 {"name": "no email"} and user:5 {"name": "none either"} and user:6 {"email": null}"#);
+    assert!(fails(&mut s, r#"set user:13 {"email": null}"#).contains("already holds null"));
+    // Other patterns are not concerned.
+    ok(&mut s, r#"set admin:1 {"email": "amani@exemple.cd"}"#);
+
+    // A transaction is judged by what the keys hold at its end.
+    ok(&mut s, "begin");
+    ok(&mut s, r#"update user:1 {"email": "bisimwa@exemple.cd"}"#);
+    ok(&mut s, r#"update user:2 {"email": "amani@exemple.cd"}"#);
+    ok(&mut s, "commit");
+    assert_eq!(ok(&mut s, "get user:2.email"), "user:2.email: amani@exemple.cd [string]");
+    ok(&mut s, "begin");
+    ok(&mut s, r#"set user:7 {"email": "chance@exemple.cd"}"#);
+    ok(&mut s, r#"set user:8 {"email": "chance@exemple.cd"}"#);
+    assert!(fails(&mut s, "commit").contains("already holds"));
+    assert_eq!(ok(&mut s, "has user:7"), "No: Key 'user:7' does not exist.");
+    // A deleted or expired document frees its value.
+    ok(&mut s, "del user:1");
+    ok(&mut s, r#"set user:9 {"email": "bisimwa@exemple.cd"} ttl 1"#);
+    std::thread::sleep(Duration::from_millis(1100));
+    ok(&mut s, r#"set user:10 {"email": "bisimwa@exemple.cd"}"#);
+
+    // On several fields: the same name may come back under another parent.
+    ok(&mut s, r#"set place:1 {"type": "VILLE", "parent": null, "nameLower": "goma"}"#);
+    ok(&mut s, r#"set place:2 {"type": "QUARTIER", "parent": "place:1", "nameLower": "katindo"}"#);
+    assert!(fails(&mut s, "create index on place: (type, parent)").contains("must be unique"));
+    assert_eq!(
+        ok(&mut s, "create unique index on place: (type, parent, nameLower)"),
+        "Unique index created on place:* (type, parent, nameLower): 2 documents indexed."
+    );
+    ok(&mut s, r#"set place:3 {"type": "QUARTIER", "parent": "place:9", "nameLower": "katindo"}"#);
+    let err = fails(&mut s, r#"set place:4 {"type": "QUARTIER", "parent": "place:1", "nameLower": "katindo"}"#);
+    assert!(err.contains(r#"already holds ["QUARTIER","place:1","katindo"]"#), "{err}");
+    // Two towns without a parent are two documents with the same values.
+    assert!(fails(&mut s, r#"set place:5 {"type": "VILLE", "parent": null, "nameLower": "goma"}"#)
+        .contains("already holds"));
+    // A document lacking one of the fields is not constrained.
+    ok(&mut s, r#"set place:5 {"type": "VILLE", "nameLower": "goma"}"#);
+    // Queries do not use an index on several fields.
+    assert!(ok(&mut s, r#"explain get where place:*.type = "VILLE""#).contains("PREFIX SCAN"));
+    let list = ok(&mut s, "indexes");
+    assert!(list.contains("place:* (type, parent, nameLower) - unique, 3 documents indexed"), "{list}");
+    assert!(list.contains("user:* (email) - unique, hash, "), "{list}");
+
+    // The constraint holds after a restart, and is dropped like any index.
+    drop(s);
+    let mut s = kiva(&dir);
+    assert!(fails(&mut s, r#"set user:11 {"email": "amani@exemple.cd"}"#).contains("already holds"));
+    assert!(fails(&mut s, r#"set place:6 {"type": "QUARTIER", "parent": "place:1", "nameLower": "katindo"}"#)
+        .contains("already holds"));
+    assert_eq!(
+        ok(&mut s, "drop index on place: (type, parent, nameLower)"),
+        "Index on place:* (type, parent, nameLower) dropped."
+    );
+    ok(&mut s, r#"set place:6 {"type": "QUARTIER", "parent": "place:1", "nameLower": "katindo"}"#);
+    // A structured write answers the conflict like `set`.
+    let err = kivadb::api::handle(
+        &mut s,
+        &serde_json::json!({"op": "put", "key": "user:12", "type": "object", "value": {"email": "amani@exemple.cd"}}),
+    )
+    .unwrap_err();
+    assert!(matches!(err, kivadb::error::KivaError::Exists(_)), "{err}");
+}
+
+#[test]
+fn add_names_a_new_key_after_its_prefix() {
+    let dir = TempDir::new("add");
+    let mut s = kiva(&dir);
+    let key = |out: String| out.strip_prefix("OK: ").and_then(|o| o.strip_suffix(" saved.")).unwrap().to_string();
+    let a = key(ok(&mut s, r#"add place: {"name": "Goma"}"#));
+    let b = key(ok(&mut s, r#"add place: {"name": "Bukavu"} ttl 60"#));
+    let id = a.strip_prefix("place:").unwrap();
+    assert_eq!(id.len(), 24, "{a}");
+    assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{a}");
+    assert!(a < b, "later identifiers sort after: {a} {b}");
+    assert_eq!(ok(&mut s, &format!("get {a}.name")), format!("{a}.name: Goma [string]"));
+    assert!(ok(&mut s, &format!("scan {b}")).contains(&b));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let secs = u64::from_str_radix(&id[..8], 16).unwrap();
+    assert!(now.abs_diff(secs) <= 2, "the identifier starts with the time: {id}");
+    ok(&mut s, r#"add counter 3"#);
+    assert!(fails(&mut s, r#"add "place:" {}"#).contains("bare text"));
+    assert!(fails(&mut s, "add place:").contains("Missing prefix or value"));
+    assert!(fails(&mut s, r#"add pla*ce: {}"#).contains("forbidden character"));
+
+    // In a transaction, the key exists at the commit.
+    ok(&mut s, "begin");
+    let c = key(ok(&mut s, r#"add place: {"name": "Uvira"}"#));
+    ok(&mut s, "rollback");
+    assert_eq!(ok(&mut s, &format!("has {c}")), format!("No: Key '{c}' does not exist."));
+
+    let r =
+        kivadb::api::handle(&mut s, &serde_json::json!({"op": "add", "prefix": "place:", "value": {"name": "Kindu"}}))
+            .unwrap();
+    let k = r["key"].as_str().unwrap();
+    assert_eq!(k, format!("place:{}", r["id"].as_str().unwrap()));
+    assert_eq!(r["type"], "object");
+    assert_eq!(ok(&mut s, &format!("get {k}.name")), format!("{k}.name: Kindu [string]"));
+    let err = kivadb::api::handle(&mut s, &serde_json::json!({"op": "add", "prefix": "n:", "value": 3})).unwrap_err();
+    assert!(err.to_string().contains("\"type\" is needed"), "{err}");
+    // Unique indexes apply to added documents.
+    ok(&mut s, "create unique index on place: (name)");
+    assert!(fails(&mut s, r#"add place: {"name": "Goma"}"#).contains("already holds"));
 }

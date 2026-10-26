@@ -89,7 +89,12 @@ impl Session {
                 }
                 let has_vectors = !vectors.is_empty();
                 for i in list {
-                    let how = if i.kind == IndexKind::Hash { "hash, " } else { "" };
+                    let how = match (i.unique, i.kind) {
+                        (true, IndexKind::Hash) => "unique, hash, ",
+                        (true, _) => "unique, ",
+                        (false, IndexKind::Hash) => "hash, ",
+                        (false, _) => "",
+                    };
                     out.say(format!(
                         "{} ({}) - {how}{} documents indexed, {} distinct values",
                         i.pattern, i.field, i.documents, i.values
@@ -232,6 +237,9 @@ impl Session {
                 return Err(format!("Usage: {USAGE}"));
             }
             let (pattern, field) = parse_index_target(&mut c, USAGE)?;
+            if field.contains(", ") {
+                return Err(format!("a vector index covers one field.\nUsage: {USAGE}"));
+            }
             let mut ef_search = 0;
             let kind = if c.eat("using") {
                 if !c.eat("hnsw") {
@@ -288,8 +296,12 @@ impl Session {
                 )),
             }
             Ok(())
-        } else if c.eat("index") {
-            const USAGE: &str = "create index on <pattern> (<field>) [using btree|hash]";
+        } else if c.peek().is_some_and(|t| t.is_kw("index") || t.is_kw("unique")) {
+            const USAGE: &str = "create [unique] index on <pattern> (<field>[, <field>...]) [using btree|hash]";
+            let unique = c.eat("unique");
+            if !c.eat("index") {
+                return Err(format!("Usage: {USAGE}"));
+            }
             let (pattern, field) = parse_index_target(&mut c, USAGE)?;
             let kind = if c.eat("using") {
                 IndexKind::parse(&word(c.next(), "an index kind")?).ok_or("the index kind must be btree or hash")?
@@ -297,9 +309,11 @@ impl Session {
                 IndexKind::BTree
             };
             c.finish(USAGE)?;
-            let n = self.engine.create_index_with(&pattern, &field, kind)?;
+            let fields: Vec<&str> = field.split(", ").collect();
+            let n = self.engine.create_index_on(&pattern, &fields, kind, unique)?;
             let how = if kind == IndexKind::Hash { " using hash" } else { "" };
-            out.say(format!("Index created on {pattern} ({field}){how}: {n} documents indexed."));
+            let what = if unique { "Unique index" } else { "Index" };
+            out.say(format!("{what} created on {pattern} ({field}){how}: {n} documents indexed."));
             Ok(())
         } else if c.eat("trigger") {
             const USAGE: &str = "create trigger [name] on set|update|del \"<pattern>\" run \"<script>\"";
@@ -334,7 +348,7 @@ impl Session {
             out.say(format!("Trigger '{name}' created: on {event} \"{pattern}\" run \"{script_name}\"."));
             Ok(())
         } else {
-            Err("Usage: create user ... | create index on <pattern> (<field>) | create trigger ...".into())
+            Err("Usage: create user ... | create [unique] index on <pattern> (<field>) | create trigger ...".into())
         }
     }
 
@@ -498,7 +512,7 @@ impl Session {
             out.say(format!("Vector index on {pattern} ({field}) dropped."));
             Ok(())
         } else if c.eat("index") {
-            let (pattern, field) = parse_index_spec(&mut c, "drop index on <pattern> (<field>)")?;
+            let (pattern, field) = parse_index_spec(&mut c, "drop index on <pattern> (<field>[, <field>...])")?;
             if !self.engine.drop_index(&pattern, &field)? {
                 return Err(format!("no index on {pattern} ({field})."));
             }
@@ -1477,11 +1491,18 @@ fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), Stri
     let target = word(c.next(), "a key pattern")?;
     let (mut pattern, field) = if c.peek().is_some_and(|t| t.kind == Kind::LParen) {
         c.next();
-        let field = word(c.next(), "a field name")?;
-        if !c.next().is_some_and(|t| t.kind == Kind::RParen) {
-            return Err(format!("Usage: {usage}"));
+        // `(type, parent, name)`: the fields of a unique index, joined by `, `.
+        let mut fields = vec![word(c.next(), "a field name")?.trim_start_matches('.').to_string()];
+        loop {
+            match c.next() {
+                Some(t) if t.kind == Kind::RParen => break,
+                Some(t) if t.kind == Kind::Comma => {
+                    fields.push(word(c.next(), "a field name")?.trim_start_matches('.').to_string())
+                }
+                _ => return Err(format!("Usage: {usage}")),
+            }
         }
-        (target, field)
+        (target, fields.join(", "))
     } else {
         crate::exec::split_target(&target).map_err(|_| format!("Usage: {usage}"))?
     };

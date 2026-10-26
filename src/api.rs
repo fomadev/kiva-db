@@ -58,7 +58,7 @@ fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
     }
     let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
     let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
-        .ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
+        .ok_or_else(|| invalid(format!("cmp must be one of {}", crate::engine::CmpOp::LIST)))?;
     let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };
     Query::single(cond).map_err(KivaError::Invalid)
 }
@@ -67,13 +67,14 @@ fn vector_filter(j: &Json, pattern: &str) -> Result<Vec<crate::engine::Cond>> {
     let cond = |field: &str, cmp: &str, value: &Json| -> Result<crate::engine::Cond> {
         let field = field.strip_prefix(pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
         crate::query::check_field(field).map_err(KivaError::Invalid)?;
-        crate::query::check_value(value).map_err(KivaError::Invalid)?;
-        let op = crate::engine::CmpOp::parse(cmp).ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
+        let op = crate::engine::CmpOp::parse(cmp)
+            .ok_or_else(|| invalid(format!("cmp must be one of {}", crate::engine::CmpOp::LIST)))?;
+        crate::query::check_value(op, value).map_err(KivaError::Invalid)?;
         Ok(crate::engine::Cond { pattern: pattern.to_string(), field: field.to_string(), op, value: value.clone() })
     };
     match j {
         Json::Null => Ok(Vec::new()),
-        Json::Object(m) => m.iter().map(|(f, v)| cond(f, "=", v)).collect(),
+        Json::Object(m) => m.iter().map(|(f, v)| cond(f, if v.is_array() { "in" } else { "=" }, v)).collect(),
         Json::Array(a) => a
             .iter()
             .map(|c| {
@@ -213,6 +214,24 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             sess.kv_put(key, value, expires_at, meta.msgpack)?;
             Ok(json!({ "key": key, "type": ty.name() }))
         }
+        "add" => {
+            // A new key: the prefix followed by an identifier KivaDB makes.
+            let prefix = str_field(req, "prefix")?;
+            let ty = match req["type"].as_str() {
+                Some(t) => Type::from_name(t).ok_or_else(|| invalid("unknown type"))?,
+                None if req["value"].is_array() => Type::Array,
+                None if req["value"].is_object() => Type::Object,
+                None => return Err(invalid("\"type\" is needed for a value that is not an array or an object")),
+            };
+            let value = value_in(ty, &req["value"])?;
+            let expires_at = match req["ttl"].as_i64() {
+                Some(t) if t > 0 => deadline_in(t),
+                _ => 0,
+            };
+            let key = sess.new_key(prefix).map_err(KivaError::Invalid)?;
+            sess.kv_put(&key, value, expires_at, false)?;
+            Ok(json!({ "key": key, "id": &key[prefix.len()..], "type": ty.name() }))
+        }
         "del" => {
             let key = str_field(req, "key")?;
             let deleted = sess.kv_del(key)?;
@@ -231,7 +250,9 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 let plan = sess.engine.explain_query(&q);
                 let suggestion = plan.index.is_none().then(|| {
                     let conds = q.expr.iter().flat_map(|e| e.positive_conditions());
-                    let missing = conds.into_iter().find(|c| sess.engine.explain(c).index.is_none());
+                    let missing = conds
+                        .into_iter()
+                        .find(|c| crate::engine::Engine::indexable(c) && sess.engine.explain(c).index.is_none());
                     missing.map(|c| format!("create index on {} ({})", c.pattern, c.field))
                 });
                 return Ok(json!({ "plan": plan_json(&plan), "suggestion": suggestion.flatten() }));
