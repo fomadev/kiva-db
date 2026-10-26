@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+#[path = "resp_blocking.rs"]
+mod blocking;
 #[path = "resp_classic.rs"]
 mod classic;
 #[path = "resp_commands.rs"]
@@ -55,7 +57,9 @@ mod commands;
 mod json;
 #[path = "resp_sets.rs"]
 mod sets;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "resp_streams.rs"]
+mod streams;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_ARGS: usize = 1024 * 1024;
 const MAX_BULK: usize = 512 * 1024 * 1024;
@@ -98,9 +102,16 @@ pub struct Shared {
     scripts: Mutex<HashMap<String, String>>,
     /// Connections listening to channels.
     pub hub: crate::pubsub::Hub,
+    /// Connections waiting in a blocking command.
+    waiters: blocking::Waiters,
 }
 
 impl Shared {
+    /// A write was committed somewhere: connections waiting for data look again.
+    pub fn wake(&self) {
+        self.waiters.wake();
+    }
+
     fn script(&self, sha: &str) -> Option<String> {
         self.scripts.lock().unwrap_or_else(|e| e.into_inner()).get(&sha.to_ascii_lowercase()).cloned()
     }
@@ -535,9 +546,30 @@ impl Conn {
         }
         // Inside MULTI, commands are queued until EXEC.
         if let Some(queue) = self.queued.as_mut() {
-            if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT") {
+            if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT" | "WATCH") {
                 queue.push(args.to_vec());
                 return Reply::Simple("QUEUED".into());
+            }
+        }
+        // Commands that wait do it without the turn, so that the others run.
+        if self.queued.is_none() {
+            if name == "WAIT" {
+                return self.wait_replicas(args).unwrap_or_else(|e| e);
+            }
+            let waits = match name.as_str() {
+                "XREAD" | "XREADGROUP" => matches!(self.stream_block(args), Ok(Some(_))),
+                n => blocking::is_blocking(n),
+            };
+            if waits {
+                let args = {
+                    let inst = self.sess.inst.clone();
+                    let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
+                    match self.resolve_last_ids(args) {
+                        Ok(a) => a,
+                        Err(e) => return e,
+                    }
+                };
+                return self.block(&name, &args);
             }
         }
         let inst = self.sess.inst.clone();
@@ -802,12 +834,42 @@ impl Conn {
                 Ok(Reply::ok())
             }
             "DISCARD" => match self.queued.take() {
-                Some(_) => Ok(Reply::ok()),
+                Some(_) => {
+                    self.sess.unwatch();
+                    Ok(Reply::ok())
+                }
                 None => Err(Reply::err("DISCARD without MULTI")),
             },
-            "EXEC" => self.exec(),
-            // WATCH itself is refused by the filter: there is nothing to undo.
-            "UNWATCH" => Ok(Reply::ok()),
+            "EXEC" => {
+                let r = self.exec();
+                self.sess.unwatch();
+                r
+            }
+            // EXEC answers nil when one of these keys changes before it.
+            "WATCH" => {
+                arity(args, 2)?;
+                if self.queued.is_some() {
+                    return Err(Reply::err("WATCH inside MULTI is not allowed"));
+                }
+                self.sess.check(Need::Read)?;
+                let keys = args[1..].iter().map(|a| key(a)).collect::<std::result::Result<Vec<_>, _>>()?;
+                self.sess.watch(&keys);
+                Ok(Reply::ok())
+            }
+            // Inside MULTI or a script: one try, no wait.
+            "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "BLMOVE" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX" | "BZMPOP" => {
+                Ok(self.try_blocking(name, args)?.unwrap_or_else(|| self.timed_out(name)))
+            }
+            "XREAD" | "XREADGROUP" => Ok(self.stream_read(name, args)?.unwrap_or(Reply::Array(None))),
+            "WAIT" => {
+                arity(args, 3)?;
+                let n = usize::try_from(int(&args[1])?).map_err(|_| Reply::err("value is out of range"))?;
+                Ok(Reply::Int(self.sess.inst.repl.wait(n, Duration::ZERO) as i64))
+            }
+            "UNWATCH" => {
+                self.sess.unwatch();
+                Ok(Reply::ok())
+            }
             "SUBSCRIBE" | "PSUBSCRIBE" => {
                 arity(args, 2)?;
                 let outbox = self.outbox.as_ref().ok_or_else(no_outbox)?;
@@ -1356,6 +1418,9 @@ impl Conn {
                 if let Some(r) = self.run_json(name, args) {
                     return r;
                 }
+                if let Some(r) = self.run_streams(name, args) {
+                    return r;
+                }
                 Err(commands::unknown(args))
             }
         }
@@ -1637,6 +1702,13 @@ impl Conn {
         }
         if self.sess.txn.is_some() {
             return Err(Reply::err("a transaction is already open on this session"));
+        }
+        // A watched key changed already: nothing runs. (The commit checks
+        // again, under the same lock as its writes.)
+        if let Some((e, w)) = &self.sess.watch {
+            if e.watch_conflict(w).is_some() {
+                return Ok(Reply::Array(None));
+            }
         }
         let begun = self.sess.begin();
         let in_txn = begun.is_ok();

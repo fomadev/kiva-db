@@ -71,6 +71,8 @@ pub struct Session {
     pub subs: Vec<String>,
     /// Set when the session wrote (every workspace is replicated).
     pub wrote: bool,
+    /// Keys watched by Redis `WATCH`, with the engine they belong to.
+    pub watch: Option<(Arc<Engine>, Vec<crate::engine::WatchedKey>)>,
 }
 
 impl Session {
@@ -88,6 +90,7 @@ impl Session {
             events,
             subs: Vec::new(),
             wrote: false,
+            watch: None,
         };
         if !s.inst.auth_required() {
             s.become_root();
@@ -431,8 +434,18 @@ impl Session {
                 TxOp::Del => BatchOp::Del { key },
             })
             .collect();
+        // Watched keys of the same workspace are checked with the writes;
+        // those of another one (WATCH, then SELECT) just before.
+        let (same, other) = match &self.watch {
+            Some((e, w)) if Arc::ptr_eq(e, &self.engine) => (Some(w.as_slice()), None),
+            Some((e, w)) => (None, e.watch_conflict(w)),
+            None => (None, None),
+        };
         let res = match self.writable().and_then(|_| self.engine.check_room(put_keys(&ops))) {
-            Ok(()) => self.engine.apply_batch(ops, Some(txn.begin_seq)),
+            Ok(()) if other.is_some() => {
+                Err(KivaError::Conflict(format!("the watched key '{}' changed", other.unwrap_or_default())))
+            }
+            Ok(()) => self.engine.apply_batch_watched(ops, Some(txn.begin_seq), same),
             Err(e) => Err(e),
         };
         self.engine.txn_end();
@@ -479,8 +492,35 @@ fn put_keys(ops: &[BatchOp]) -> impl Iterator<Item = &str> {
     })
 }
 
+impl Session {
+    /// Watches `keys` of the current workspace (Redis `WATCH`); the next
+    /// commit fails as a conflict if one of them changes meanwhile.
+    pub fn watch(&mut self, keys: &[String]) {
+        match &mut self.watch {
+            Some((e, w)) if Arc::ptr_eq(e, &self.engine) => {
+                // Already watching here: the engine holds one watch already.
+                let more = self.engine.watch(keys);
+                self.engine.unwatch();
+                w.extend(more);
+            }
+            _ => {
+                self.unwatch();
+                self.watch = Some((self.engine.clone(), self.engine.watch(keys)));
+            }
+        }
+    }
+
+    /// Forgets the watched keys (`UNWATCH`, and after `EXEC` or `DISCARD`).
+    pub fn unwatch(&mut self) {
+        if let Some((e, _)) = self.watch.take() {
+            e.unwatch();
+        }
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
+        self.unwatch();
         self.rollback();
         if !self.subs.is_empty() {
             self.inst.pubsub.unsubscribe(self.id, None);

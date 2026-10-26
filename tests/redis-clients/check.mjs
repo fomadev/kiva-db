@@ -39,10 +39,11 @@ await step("ioredis: confirmed registration removes the entry", async () => {
   assert.equal(await io.del("pre_reg:a@x.cd"), 1);
   assert.equal(await io.get("pre_reg:a@x.cd"), null);
 });
-await step("ioredis: unconfirmed registration disappears by itself", async () => {
-  await io.set("pre_reg:late@x.cd", "{}", "PX", 1200);
-  // KivaDB keeps expiry times to the second: gone at most 1 s after the requested time.
-  await new Promise((r) => setTimeout(r, 1200 + 1100));
+await step("ioredis: unconfirmed registration disappears by itself, to the millisecond", async () => {
+  await io.set("pre_reg:late@x.cd", "{}", "PX", 300);
+  const left = await io.pttl("pre_reg:late@x.cd");
+  assert.ok(left > 200 && left <= 300, `pttl ${left}`);
+  await new Promise((r) => setTimeout(r, 350));
   assert.equal(await io.get("pre_reg:late@x.cd"), null);
 });
 await step("ioredis: attempt counters with INCR + EXPIRE NX, window does not slide", async () => {
@@ -244,6 +245,60 @@ await step("node-redis (RESP3): subscriber made with duplicate()", async () => {
   assert.deepEqual(await got, ["lp:texts:changed", "all"]);
   await listener.unsubscribe("lp:texts:changed");
   await listener.quit();
+});
+
+// --- Blocking queues, WATCH, streams ---------------------------------------------
+await step("ioredis: a worker blocked in BLPOP gets the job pushed by another client", async () => {
+  const worker = new Redis(url(0));
+  await worker.ping();
+  const job = worker.blpop("q:block", 5);
+  await new Promise((r) => setTimeout(r, 100));
+  await io.rpush("q:block", "send-mail:42");
+  assert.deepEqual(await job, ["q:block", "send-mail:42"]);
+  assert.equal(await worker.blpop("q:block", 0.2), null);
+  worker.disconnect();
+});
+await step("node-redis: WATCH, then EXEC fails when another client changed the key", async () => {
+  const other = pay.duplicate();
+  await other.connect();
+  await pay.set("pay:stock", "5");
+  await pay.watch("pay:stock");
+  await other.set("pay:stock", "4");
+  await assert.rejects(pay.multi().set("pay:stock", "3").exec(), (e) => e.constructor.name === "WatchError");
+  assert.equal(await pay.get("pay:stock"), "4");
+  await pay.watch("pay:stock");
+  assert.deepEqual(await pay.multi().decr("pay:stock").exec(), [3]);
+  await other.quit();
+});
+await step("ioredis: WATCH with MULTI answers null when the key changed", async () => {
+  const other = new Redis(url(0));
+  await io.set("acct:1", "100");
+  await io.watch("acct:1");
+  await other.incrby("acct:1", 10);
+  assert.equal(await io.multi().set("acct:1", "0").exec(), null);
+  assert.equal(await io.get("acct:1"), "110");
+  other.disconnect();
+});
+await step("node-redis (RESP3): stream with a consumer group, read, acknowledged", async () => {
+  await pay.xGroupCreate("pay:events", "billing", "$", { MKSTREAM: true });
+  const id = await pay.xAdd("pay:events", "*", { type: "paid", amount: "1500" });
+  const read = await pay.xReadGroup("billing", "worker-1", { key: "pay:events", id: ">" }, { COUNT: 10 });
+  assert.equal(read[0].name, "pay:events");
+  assert.deepEqual(read[0].messages, [{ id, message: { type: "paid", amount: "1500" } }]);
+  assert.equal((await pay.xPending("pay:events", "billing")).pending, 1);
+  assert.equal(await pay.xAck("pay:events", "billing", id), 1);
+  assert.equal(await pay.xLen("pay:events"), 1);
+  assert.deepEqual(await pay.xRange("pay:events", "-", "+"), [{ id, message: { type: "paid", amount: "1500" } }]);
+});
+await step("ioredis: XREAD BLOCK waits for the next entry", async () => {
+  const reader = new Redis(url(0));
+  // Connected first: "$" means the last entry when XREAD starts.
+  await reader.ping();
+  const next = reader.xread("BLOCK", 5000, "STREAMS", "events", "$");
+  await new Promise((r) => setTimeout(r, 100));
+  const id = await io.xadd("events", "MAXLEN", "~", 1000, "*", "type", "login", "user", "amani");
+  assert.deepEqual(await next, [["events", [[id, ["type", "login", "user", "amani"]]]]]);
+  reader.disconnect();
 });
 
 await pay.quit();

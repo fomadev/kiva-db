@@ -25,11 +25,13 @@ const MARK: &str = "redis";
 /// insertion order with constant-time lookups.
 type Members = Map<String, Json>;
 
-/// `"set"` or `"zset"` when `j` is one of these, `None` for a plain object.
+/// `"set"`, `"zset"` or `"stream"` when `j` is one of these, `None` for a
+/// plain object.
 pub(super) fn marked(j: &Json) -> Option<&'static str> {
     match j.get(MARK)?.as_str()? {
         "set" if j["members"].is_array() => Some("set"),
         "zset" if j["members"].is_object() => Some("zset"),
+        "stream" if j["entries"].is_array() => Some("stream"),
         _ => None,
     }
 }

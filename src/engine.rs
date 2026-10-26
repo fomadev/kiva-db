@@ -85,6 +85,15 @@ pub enum Op {
     Reset,
 }
 
+/// A key watched by Redis `WATCH`, with the engine sequence at that time.
+#[derive(Clone, Debug)]
+pub struct WatchedKey {
+    pub key: String,
+    pub since: u64,
+    /// It held a live value: expiring counts as a change.
+    pub existed: bool,
+}
+
 pub enum BatchOp {
     Put { key: String, value: Value, expires_at: i64, msgpack: bool },
     Del { key: String },
@@ -1750,9 +1759,62 @@ impl Engine {
     /// With `begin_seq`, the batch is rejected if any of its keys was
     /// modified by someone else after that sequence number.
     pub fn apply_batch(&self, ops: Vec<BatchOp>, begin_seq: Option<u64>) -> Result<()> {
+        self.apply_batch_watched(ops, begin_seq, None)
+    }
+
+    /// Starts watching `keys` (Redis `WATCH`): a later
+    /// [`Engine::apply_batch_watched`] given the result fails when one of
+    /// them was written, deleted or expired meanwhile. Until
+    /// [`Engine::unwatch`], deletions are remembered as for a transaction.
+    pub fn watch(&self, keys: &[String]) -> Vec<WatchedKey> {
+        let mut inner = self.lock();
+        inner.active_txns += 1;
+        let now = now_ms();
+        let since = inner.seq;
+        keys.iter().map(|k| WatchedKey { key: k.clone(), since, existed: inner.live(k, now).is_some() }).collect()
+    }
+
+    /// Ends one [`Engine::watch`].
+    pub fn unwatch(&self) {
+        self.txn_end();
+    }
+
+    /// The first watched key that changed since it was watched, if any.
+    pub fn watch_conflict(&self, watched: &[WatchedKey]) -> Option<String> {
+        let mut inner = self.lock();
+        Self::changed(&mut inner, watched, now_ms())
+    }
+
+    fn changed(inner: &mut Inner, watched: &[WatchedKey], now: i64) -> Option<String> {
+        watched
+            .iter()
+            .find(|w| {
+                let ver = inner
+                    .index
+                    .get(&w.key)
+                    .map(|e| e.version)
+                    .or_else(|| inner.tomb_versions.get(&w.key).copied())
+                    .unwrap_or(0);
+                // Written, deleted, emptied with the database, or expired.
+                ver > w.since || inner.reset_seq > w.since || (w.existed && inner.live(&w.key, now).is_none())
+            })
+            .map(|w| w.key.clone())
+    }
+
+    /// [`Engine::apply_batch`], refused as a conflict when one of the
+    /// `watched` keys changed: checked under the same lock as the writes.
+    pub fn apply_batch_watched(
+        &self,
+        ops: Vec<BatchOp>,
+        begin_seq: Option<u64>,
+        watched: Option<&[WatchedKey]>,
+    ) -> Result<()> {
         let mut inner = self.lock();
         let now = now_ms();
         let ts = now / 1000;
+        if let Some(key) = watched.and_then(|w| Self::changed(&mut inner, w, now)) {
+            return Err(KivaError::Conflict(format!("the watched key '{key}' changed")));
+        }
         if let Some(begin) = begin_seq {
             if inner.reset_seq > begin {
                 return Err(KivaError::Conflict("the database was reset during the transaction".into()));

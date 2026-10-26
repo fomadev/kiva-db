@@ -2928,7 +2928,7 @@ All integers are little-endian.
 | type | `u8` | 1 | 1 string, 2 number, 3 boolean, 4 null, 5 array, 6 object, 7 bytes |
 | flags | `u8` | 1 | See below |
 | timestamp | `i64` | 8 | When it was written (seconds since 1970) |
-| expires_at | `i64` | 8 | When it expires; 0 = never |
+| expires_at | `i64` | 8 | When it expires, Unix time in milliseconds; 0 = never. Files written by KivaDB 1.5 and earlier hold seconds: values below 10^11 are read as seconds |
 | key | bytes | k_size | The key, UTF-8 |
 | value | bytes | v_size | The value |
 
@@ -3392,9 +3392,11 @@ KivaDB values read through Redis: strings, numbers, booleans, null and bytes com
 | Keys | `DEL`, `UNLINK`, `EXISTS`, `TYPE`, `TOUCH`, `KEYS`, `SCAN`, `RENAME`, `RENAMENX`, `COPY` (`REPLACE`), `EXPIRE`, `PEXPIRE`, `EXPIREAT`, `PEXPIREAT` (all with `NX`, `XX`, `GT`, `LT`), `TTL`, `PTTL`, `EXPIRETIME`, `PEXPIRETIME`, `PERSIST`, `DBSIZE`, `FLUSHDB`, `FLUSHALL` |
 | Hashes | `HSET`, `HMSET`, `HSETNX`, `HGET`, `HMGET`, `HGETALL`, `HKEYS`, `HVALS`, `HLEN`, `HEXISTS`, `HSTRLEN`, `HDEL`, `HINCRBY`, `HINCRBYFLOAT`, `HSCAN` (`MATCH`, `NOVALUES`), `HRANDFIELD` (`WITHVALUES`) |
 | Lists | `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`, `RPOP`, `LMPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LPOS` (`RANK`, `COUNT`, `MAXLEN`), `LSET`, `LINSERT`, `LREM`, `LTRIM`, `LMOVE`, `RPOPLPUSH` |
+| Blocking | `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `BLMOVE`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX`, `BZMPOP`, `WAIT` ([23.12](#2312-blocking-commands-and-watch)) |
+| Streams | `XADD` (`NOMKSTREAM`, `MAXLEN`, `MINID`), `XLEN`, `XRANGE`, `XREVRANGE`, `XDEL`, `XTRIM`, `XSETID`, `XREAD` (`BLOCK`), `XGROUP`, `XREADGROUP` (`BLOCK`, `NOACK`), `XACK`, `XPENDING`, `XCLAIM`, `XAUTOCLAIM`, `XINFO` ([23.13](#2313-streams)) |
 | Sets | `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`, `SMISMEMBER`, `SCARD`, `SPOP`, `SRANDMEMBER`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SINTERCARD`, `SSCAN` ([23.8](#238-sets-and-sorted-sets)) |
 | Sorted sets | `ZADD` (`NX`, `XX`, `GT`, `LT`, `CH`, `INCR`), `ZINCRBY`, `ZREM`, `ZSCORE`, `ZMSCORE`, `ZCARD`, `ZCOUNT`, `ZLEXCOUNT`, `ZRANK`, `ZREVRANK` (`WITHSCORE`), `ZRANGE` (`BYSCORE`, `BYLEX`, `REV`, `LIMIT`, `WITHSCORES`), `ZRANGESTORE`, `ZREVRANGE`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZRANGEBYLEX`, `ZREVRANGEBYLEX`, `ZPOPMIN`, `ZPOPMAX`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZREMRANGEBYLEX`, `ZRANDMEMBER`, `ZSCAN`, `ZUNION`, `ZINTER`, `ZDIFF`, `ZUNIONSTORE`, `ZINTERSTORE`, `ZDIFFSTORE`, `ZINTERCARD` |
-| Transactions | `MULTI`, `EXEC`, `DISCARD` |
+| Transactions | `MULTI`, `EXEC`, `DISCARD`, `WATCH`, `UNWATCH` ([23.12](#2312-blocking-commands-and-watch)) |
 | Scripts | `EVAL`, `EVALSHA`, `EVAL_RO`, `EVALSHA_RO`, `SCRIPT LOAD`, `SCRIPT EXISTS`, `SCRIPT FLUSH` ([23.5](#235-lua-scripts-eval)) |
 | Publish/subscribe | `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT` ([23.7](#237-publish-and-subscribe)) |
 | JSON | `JSON.SET` (`NX`, `XX`), `JSON.GET`, `JSON.MGET`, `JSON.DEL`, `JSON.FORGET`, `JSON.TYPE`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.STRLEN`, `JSON.ARRLEN`, `JSON.OBJLEN`, `JSON.OBJKEYS`, `JSON.ARRAPPEND`, `JSON.ARRINSERT` ([23.11](#2311-json-documents-redisjson-commands)) |
@@ -3428,24 +3430,21 @@ For the families left out on purpose, the same message adds why, and what to use
 
 | Family | Commands | Instead |
 | :--- | :--- | :--- |
-| Blocking | `BLPOP`, `BRPOP`, `BRPOPLPUSH`, `BLMOVE`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX`, `BZMPOP`, `WAIT`, `WAITAOF` | The non-blocking command (`LPOP`, `ZPOPMIN`...) and a retry, or `SUBSCRIBE` to a channel the producer publishes to |
-| Streams | `XADD`, `XREAD`, `XREADGROUP`, `XRANGE`, `XLEN`, `XACK`, `XGROUP`... | A list as a queue (`RPUSH`, `LPOP`), or `PUBLISH` / `SUBSCRIBE` |
-| `WATCH` | `WATCH` (`UNWATCH` answers `OK`) | `MULTI ... EXEC` alone: it runs as a KivaDB transaction and `EXEC` answers nil if another client changed the same keys ([23.4](#234-logins-databases-roles)) |
 | Cluster | `CLUSTER`, `READONLY`, `READWRITE`, `ASKING`, `SPUBLISH`, `SSUBSCRIBE` | Connect as to a standalone Redis: one server holds a workspace's data |
 | Functions | `FUNCTION`, `FCALL`, `FCALL_RO` | `EVAL`, `EVALSHA` ([23.5](#235-lua-scripts-eval)) |
 | Replication | `REPLICAOF`, `SLAVEOF`, `SYNC`, `PSYNC`, `FAILOVER` | KivaDB's own replication: `replica start` ([Chapter 25](#chapter-25--replication)) |
 | Modules | `MODULE` | JSON documents and `KIVA.SIMILAR` are built in |
 
 ```text
-127.0.0.1:6379> BLPOP jobs 0
-(error) ERR unknown command 'BLPOP', with args beginning with: 'jobs' '0' (KivaDB does not support blocking commands: a connection never waits for data. Use the non-blocking command (LPOP, RPOP, ZPOPMIN, ZPOPMAX) and retry, or SUBSCRIBE to a channel the producer PUBLISHes to.)
+127.0.0.1:6379> FCALL refill 1 stock
+(error) ERR unknown command 'FCALL', with args beginning with: 'refill' '1' 'stock' (KivaDB does not support Redis functions: send the Lua code with EVAL or EVALSHA.)
 ```
 
 A refused command inside `MULTI` is not queued, and the whole transaction is then discarded: `EXEC` answers `EXECABORT`, as in Redis, and nothing of it is applied. Inside a script, `redis.call` raises the same error.
 
 **One command at a time.** Like Redis, KivaDB runs the Redis commands of all connections one after the other. `INCR` from many clients at once never loses a step, and a `MULTI ... EXEC` block or a script is never interleaved with another client's commands.
 
-**Expiry precision.** KivaDB keeps expiry times to the second. A key set with `EX` expires on time; with `PX` (milliseconds), it may live up to one second longer than asked, never shorter. `PTTL` and `PEXPIRETIME` are derived from the second. For sessions, codes, locks and rate-limit windows counted in seconds or minutes, this makes no difference.
+**Expiry precision.** KivaDB keeps expiry times to the millisecond. A key set with `PX 150`, `PEXPIRE`, `PSETEX` or `PXAT` is gone 150 ms later, not at the next second; `PTTL` and `PEXPIRETIME` answer milliseconds, and `TTL` rounds to the nearest second as Redis does. A key read after its deadline is never returned, and expired keys leave memory within a second ([7.3](#73-what-happens-at-expiry)).
 
 ### 23.4 Logins, databases, roles
 
@@ -3643,6 +3642,79 @@ Secondary indexes ([11.4](#114-indexes--making-queries-fast)) and vector indexes
 * A Redis string read with `JSON.GET` is a JSON string. `JSON.GET` options `INDENT`, `NEWLINE` and `SPACE` are accepted; the answer stays compact.
 
 ---
+
+### 23.12 Blocking commands and WATCH
+
+**Waiting for a job.** `BLPOP` and the other blocking commands take a value when there is one, and otherwise wait until another client (or the shell, the REST API, a script) puts one there, up to their timeout in seconds (`0` waits forever, fractions such as `0.5` work):
+
+```text
+127.0.0.1:6379> BLPOP q:jobs q:urgent 30
+(waits...)                                   other client: RPUSH q:urgent send-mail:42
+1) "q:urgent"
+2) "send-mail:42"
+```
+
+* Keys are tried in the order given. `BRPOP`, `BLMOVE` (reliable queue), `BRPOPLPUSH`, `BLMPOP`, `BZPOPMIN`, `BZPOPMAX` and `BZMPOP` work the same way, with the replies of Redis.
+* A waiting client does not hold up the others: commands keep running one at a time for everyone else.
+* When a value arrives, the waiting clients are woken together, and the first to get its turn takes it: not necessarily the one that waited longest, as Redis would choose. With several workers on one queue, each value still goes to exactly one of them.
+* A client that disconnects while waiting stops waiting: a value pushed afterwards stays in the list for the others.
+* Inside `MULTI` or a script, a blocking command does not wait: it answers at once, with nil when there is nothing, as in Redis.
+* `WAIT numreplicas timeout` waits until that many replicas ([Chapter 25](#chapter-25--replication)) have every write made so far, up to `timeout` milliseconds, and answers how many do.
+
+**Optimistic locking with WATCH.** `WATCH` names keys; the next `EXEC` then runs only if none of them changed in between, and answers nil otherwise, without applying anything:
+
+```text
+127.0.0.1:6379> WATCH stock:42
+OK
+127.0.0.1:6379> GET stock:42
+"5"
+                                             other client: DECR stock:42
+127.0.0.1:6379> MULTI
+OK
+127.0.0.1:6379> SET stock:42 4
+QUEUED
+127.0.0.1:6379> EXEC
+(nil)
+```
+
+* A key counts as changed when it is written, deleted, created, emptied with its database (`FLUSHDB`), or expires, whoever does it: another Redis client, the KivaDB shell, the REST API, a script. The check is made with the writes of `EXEC`, at once: nothing can slip in between.
+* `EXEC` and `DISCARD` end the watch; `UNWATCH` ends it without a transaction. `WATCH` inside `MULTI` is refused, as in Redis.
+* Libraries use it as they do with Redis: `client.watch(...)` then `multi().exec()` in node-redis (a `WatchError` when a key changed), `watch` then `multi().exec()` answering `null` in ioredis.
+* `WATCH` keeps track of deletions until `EXEC`: a watch left open for hours keeps that small record growing. Watch just before the transaction, as Redis applications do.
+
+### 23.13 Streams
+
+A **stream** is a log of entries, each with an id (`<milliseconds>-<sequence>`, increasing) and field-value pairs: events of an application, a queue that several workers share, a history that consumers read at their own pace.
+
+```text
+127.0.0.1:6379> XADD events MAXLEN ~ 10000 * type login user amani
+"1793001014470-0"
+127.0.0.1:6379> XRANGE events - +
+1) 1) "1793001014470-0"
+   2) 1) "type"
+      2) "login"
+      3) "user"
+      4) "amani"
+127.0.0.1:6379> XREAD BLOCK 5000 STREAMS events $
+(waits for the next entry)
+```
+
+**Consumer groups** share a stream among workers: each entry goes to one consumer of the group, stays *pending* until that consumer acknowledges it, and can be taken over by another one when its consumer stopped:
+
+```text
+127.0.0.1:6379> XGROUP CREATE jobs workers $ MKSTREAM
+OK
+127.0.0.1:6379> XREADGROUP GROUP workers w1 COUNT 10 BLOCK 5000 STREAMS jobs >
+...
+127.0.0.1:6379> XACK jobs workers 1793001014470-0
+(integer) 1
+127.0.0.1:6379> XAUTOCLAIM jobs workers w2 60000 0 COUNT 10
+```
+
+* **Commands**: `XADD` (`*`, `<ms>-*` or an explicit id; `NOMKSTREAM`; trimming with `MAXLEN` or `MINID`), `XLEN`, `XRANGE` and `XREVRANGE` (`-`, `+`, a time alone, `(` to exclude, `COUNT`), `XDEL`, `XTRIM`, `XSETID`, `XREAD` (`COUNT`, `BLOCK`, `$`), `XGROUP CREATE | SETID | DESTROY | CREATECONSUMER | DELCONSUMER`, `XREADGROUP` (`>` for new entries, an id for the consumer's own pending ones; `NOACK`, `BLOCK`), `XACK`, `XPENDING` (summary or detailed, `IDLE`, per consumer), `XCLAIM` (`IDLE`, `TIME`, `RETRYCOUNT`, `FORCE`, `JUSTID`), `XAUTOCLAIM`, `XINFO STREAM | GROUPS | CONSUMERS`. Checked with node-redis (RESP3) and ioredis.
+* **Storage.** A stream is a KivaDB object, like a set: written to disk, replicated, encrypted, readable from the shell (`get events`). `TYPE` answers `stream`, and other types' commands on it answer `WRONGTYPE`.
+* **Size.** Each command reads and rewrites the whole stream, so a stream may hold at most `resp.max_collection_members` entries (100 000 by default, [23.8](#238-sets-and-sorted-sets)). Keep it trimmed as Redis applications usually do: `XADD ... MAXLEN ~ 10000`, or `XTRIM`. `~` trims exactly to the number given, which Redis allows (it may keep a few more).
+* `XREAD` and `XREADGROUP` with `BLOCK` wait like `BLPOP` ([23.12](#2312-blocking-commands-and-watch)); `$` means the last id at the moment the command starts.
 
 ## Chapter 24 — Connecting from your programs
 
@@ -4300,7 +4372,7 @@ fn main() -> Result<(), kivadb::KivaError> {
 }
 ```
 
-* `put(key, &value, expires_at, msgpack)`: `expires_at` is a Unix time in seconds (0 = never); `msgpack` chooses the encoding of documents.
+* `put(key, &value, expires_at, msgpack)`: `expires_at` is a Unix time in milliseconds (0 = never; `kivadb::util::deadline_in(seconds)` computes one); `msgpack` chooses the encoding of documents.
 * `Engine` can be shared between threads (`open` returns an `Arc`).
 * Also available: `apply_batch` (atomic groups), `compact`, `check`, `create_index`, `query`, `stats`.
 
@@ -4878,7 +4950,7 @@ KivaDB 1.5.1 keeps the whole database on each node, with replicas and automatic 
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk, and dedicated vector engine features.** Vector indexes, exact or HNSW, live in memory, bounded by `vector.max_ram_mb`: the vectors must fit in the RAM of one machine. 8-bit quantization only (no product quantization), no graph searched from disk, no hybrid (keyword and vector) search, filters joined by `and` only, embeddings computed by the application ([12.10, 12.11](#1210-memory-bounds)).
-* **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing (refused with a clear error), sets and sorted sets are meant for thousands of members per key, not millions (bounded by `resp.max_collection_members`), and expiry times are kept to the second ([23.3](#233-supported-commands)).
+* **The full Redis command set**: sharded publish/subscribe, Redis functions, cluster commands and modules are missing (refused with a clear error); sets, sorted sets, lists and streams are meant for up to tens of thousands of members per key, not millions, since each command rewrites the whole value (bounded by `resp.max_collection_members`); blocked clients are woken together rather than in order ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 
