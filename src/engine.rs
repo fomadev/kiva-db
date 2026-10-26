@@ -16,9 +16,11 @@ use crate::jsonpath;
 use crate::query::{Expr, Query};
 use crate::util::{glob_match, glob_prefix, now_ms, now_secs, random_u64};
 use crate::value::{Type, Value};
+pub use crate::vector::AutoTune;
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
 use serde_json::Value as Json;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -593,6 +595,8 @@ struct Inner {
     file: File,
     file_len: u64,
     file_id: u64,
+    /// A handle of the data file `file_id` for its fsyncs (group commit).
+    sync_file: Option<(u64, Arc<File>)>,
     index: BTreeMap<String, Entry>,
     /// File header plus the records the index currently points to.
     live_bytes: u64,
@@ -640,9 +644,78 @@ struct Signal {
 }
 
 type Listener = Box<dyn Fn(&Op) + Send + Sync>;
+
+/// A write put off: its engine, and where it ended in the data file.
+type PutOff = (Arc<Engine>, (u64, u64));
+
+thread_local! {
+    /// The durable writes of this thread whose disk sync is put off, while
+    /// [`put_off_syncs`] runs.
+    static PUT_OFF: RefCell<Option<Vec<PutOff>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f`, putting off the disk syncs that its writes would wait for
+/// under `storage.sync_writes`. The caller makes them with
+/// [`PendingSyncs::wait`] before it answers.
+///
+/// For a caller that runs its commands one at a time under a lock of its
+/// own (the Redis listener): waiting for the disk while holding that lock
+/// would make every write wait for its own fsync, one after the other. With
+/// the wait after the lock, the writes of all the clients share their
+/// fsyncs (group commit), and each is still on disk before it is answered.
+pub fn put_off_syncs<R>(f: impl FnOnce() -> R) -> (R, PendingSyncs) {
+    // Inside another `put_off_syncs`, the outer one makes the syncs.
+    if PUT_OFF.with(|p| p.borrow().is_some()) {
+        return (f(), PendingSyncs(Vec::new()));
+    }
+    /// Stops putting syncs off, even when `f` panics.
+    struct Collect;
+    impl Drop for Collect {
+        fn drop(&mut self) {
+            PUT_OFF.with(|p| p.borrow_mut().take());
+        }
+    }
+    PUT_OFF.with(|p| *p.borrow_mut() = Some(Vec::new()));
+    let collect = Collect;
+    let r = f();
+    let syncs = PUT_OFF.with(|p| p.borrow_mut().take()).unwrap_or_default();
+    drop(collect);
+    (r, PendingSyncs(syncs))
+}
+
+/// Disk syncs put off by [`put_off_syncs`].
+#[must_use = "the writes are not on disk until wait() returns"]
+pub struct PendingSyncs(Vec<PutOff>);
+
+impl PendingSyncs {
+    /// Whether no write is waiting for the disk.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Waits until every write made in `put_off_syncs` is on disk.
+    pub fn wait(self) -> Result<()> {
+        // Within an engine, the last write ends after the others: syncing
+        // up to it covers them.
+        let mut last: Vec<PutOff> = Vec::new();
+        for (engine, mark) in self.0 {
+            match last.iter_mut().find(|(e, _)| Arc::ptr_eq(e, &engine)) {
+                Some(seen) => seen.1 = mark,
+                None => last.push((engine, mark)),
+            }
+        }
+        for (engine, mark) in last {
+            engine.sync_to(mark)?;
+        }
+        Ok(())
+    }
+}
 type ExpiryListener = Box<dyn Fn(&str) + Send + Sync>;
 
 pub struct Engine {
+    /// The engine itself, for the disk syncs a thread puts off
+    /// ([`put_off_syncs`]).
+    me: Weak<Engine>,
     path: PathBuf,
     inner: Mutex<Inner>,
     listeners: RwLock<Vec<Listener>>,
@@ -651,12 +724,45 @@ pub struct Engine {
     opts: EngineOptions,
     /// `storage.sync_writes`: every write is on disk before it returns.
     sync_writes: AtomicBool,
-    /// How far the data file is known to be on disk. Taken before `inner`
-    /// when both are needed.
+    /// How far the data file is known to be on disk, and whether a writer
+    /// is syncing it. Never held during an fsync, nor while taking `inner`.
     durable: Mutex<Durable>,
+    /// Wakes the writers waiting for an fsync when it ends.
+    synced: Condvar,
+    /// Durable writes that have set off, and those that have appended their
+    /// records: the difference is on its way to the data file.
+    setting_off: AtomicU64,
+    appended: AtomicU64,
     durable_writes: AtomicU64,
     disk_syncs: AtomicU64,
+    /// An HNSW index is being tuned again in the background (`auto`).
+    tuning: AtomicBool,
+    /// Threads waiting for `inner` (see [`Engine::let_waiters_in`]).
+    lock_waiters: AtomicU64,
     _lock: File,
+}
+
+/// How long an fsync waits at most for the writes on their way to join it.
+const MAX_GATHER: Duration = Duration::from_millis(1);
+
+/// A durable write between the moment it sets off and the moment its
+/// records are appended (or it gave up).
+struct Arriving<'a>(&'a Engine);
+
+impl Drop for Arriving<'_> {
+    fn drop(&mut self) {
+        self.0.appended.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// Fsyncs held off by [`Engine::hold_syncs`].
+struct SyncsHeld<'a>(&'a Engine);
+
+impl Drop for SyncsHeld<'_> {
+    fn drop(&mut self) {
+        self.0.durable.lock().unwrap_or_else(|e| e.into_inner()).syncing = false;
+        self.0.synced.notify_all();
+    }
 }
 
 /// The part of the data file `file_id` that an fsync has put on disk.
@@ -664,6 +770,8 @@ pub struct Engine {
 struct Durable {
     file_id: u64,
     len: u64,
+    /// A writer is running an fsync for the others.
+    syncing: bool,
 }
 
 fn sidecar(path: &Path, ext: &str) -> PathBuf {
@@ -1362,6 +1470,7 @@ impl Engine {
             file,
             file_len,
             file_id,
+            sync_file: None,
             index,
             live_bytes: 0,
             expiry: BTreeSet::new(),
@@ -1407,6 +1516,7 @@ impl Engine {
                             inner.vecs.push(VecIndex::with_kind(p, f, segs, kind));
                             let i = inner.vecs.len() - 1;
                             inner.vecs[i].ef_search = def["ef_search"].as_u64().unwrap_or(0) as usize;
+                            inner.vecs[i].auto_tune = AutoTune::from_json(&def["auto_tune"]);
                             let restored = saved.as_mut().and_then(|(since, list)| {
                                 let at = list.iter().position(|s| {
                                     s.pattern == p && s.field == f && VectorIndexKind::Hnsw(s.graph.params) == kind
@@ -1444,7 +1554,8 @@ impl Engine {
         inner.load.ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let signal = Arc::new(Signal { wake: Mutex::new(false), cv: Condvar::new(), stop: AtomicBool::new(false) });
-        let engine = Arc::new(Engine {
+        let engine = Arc::new_cyclic(|me| Engine {
+            me: me.clone(),
             path,
             inner: Mutex::new(inner),
             listeners: RwLock::new(Vec::new()),
@@ -1453,8 +1564,13 @@ impl Engine {
             opts: opts.clone(),
             sync_writes: AtomicBool::new(opts.sync_writes),
             durable: Mutex::new(Durable::default()),
+            synced: Condvar::new(),
+            setting_off: AtomicU64::new(0),
+            appended: AtomicU64::new(0),
             durable_writes: AtomicU64::new(0),
             disk_syncs: AtomicU64::new(0),
+            tuning: AtomicBool::new(false),
+            lock_waiters: AtomicU64::new(0),
             _lock: lock_file,
         });
         if opts.background {
@@ -1466,7 +1582,27 @@ impl Engine {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        match self.inner.try_lock() {
+            Ok(inner) => inner,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.lock_waiters.fetch_add(1, Ordering::AcqRel);
+                let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                self.lock_waiters.fetch_sub(1, Ordering::AcqRel);
+                inner
+            }
+        }
+    }
+
+    /// For a long task that takes the lock again and again (tuning): lets
+    /// the threads waiting for it go first. The lock is not fair, and the
+    /// thread that just released it would otherwise often take it back
+    /// before them, for seconds.
+    fn let_waiters_in(&self) {
+        let until = Instant::now() + Duration::from_millis(20);
+        while self.lock_waiters.load(Ordering::Acquire) > 0 && Instant::now() < until {
+            std::thread::yield_now();
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -1500,6 +1636,7 @@ impl Engine {
         if frag_due || inner.dirty_ops >= self.opts.snapshot_every_ops {
             self.wake();
         }
+        self.retune_if_due(inner);
     }
 
     /// Where the last write ended, when it must reach the disk before the
@@ -1510,34 +1647,108 @@ impl Engine {
 
     /// Group commit: waits until the data file is on disk up to `mark`.
     ///
-    /// The fsync runs outside the engine lock, so other writers keep
-    /// appending meanwhile. Writers that arrive during an fsync wait for it to
-    /// end, then the first of them syncs everything written so far at once:
-    /// with many clients writing, one fsync serves many writes, and each
-    /// write is still on disk before it is acknowledged.
-    fn make_durable(&self, mark: Option<(u64, u64)>) -> Result<()> {
-        let Some((file_id, end)) = mark else { return Ok(()) };
+    /// One writer at a time runs the fsync, outside the engine lock, so the
+    /// others keep appending meanwhile. They wait for it to end: the ones it
+    /// covered return all together, and one of the others runs the next
+    /// fsync, for everything written so far at once. With many clients
+    /// writing, one fsync serves many writes, and each write is still on
+    /// disk before it is acknowledged.
+    fn make_durable(&self, mark: Option<(u64, u64)>, arriving: Option<Arriving>) -> Result<()> {
+        drop(arriving);
+        let Some(mark) = mark else { return Ok(()) };
         self.durable_writes.fetch_add(1, Ordering::Relaxed);
-        let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
-        if d.file_id == file_id && d.len >= end {
-            return Ok(());
+        if let Some(me) = self.me.upgrade() {
+            if PUT_OFF.with(|p| p.borrow_mut().as_mut().map(|syncs| syncs.push((me, mark))).is_some()) {
+                return Ok(());
+            }
         }
-        // Let the writes that queued during the last fsync finish appending,
-        // so that this one covers them too.
+        self.sync_to(mark)
+    }
+
+    fn sync_to(&self, (file_id, end): (u64, u64)) -> Result<()> {
+        let covered = |d: &Durable| d.file_id == file_id && d.len >= end;
+        let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if covered(&d) {
+                return Ok(());
+            }
+            if !d.syncing {
+                break;
+            }
+            d = self.synced.wait(d).unwrap_or_else(|e| e.into_inner());
+        }
+        d.syncing = true;
+        drop(d);
+        // Whatever happens, the next writer can take over.
+        let result = self.run_sync(file_id);
+        let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
+        d.syncing = false;
+        if let Ok(Some(len)) = result {
+            if d.file_id != file_id || d.len < len {
+                (d.file_id, d.len) = (file_id, len);
+            }
+        }
+        drop(d);
+        self.synced.notify_all();
+        result.map(|_| ())
+    }
+
+    /// Syncs the data file `file_id` as far as it is written; returns that
+    /// length, or `None` when the file was replaced meanwhile.
+    fn run_sync(&self, file_id: u64) -> Result<Option<u64>> {
+        // The writes that set off before this fsync (often held up by the
+        // last one) finish appending first, so that this fsync covers them
+        // too. Not for long: a write that is slow to come waits for the next.
+        let target = self.setting_off.load(Ordering::Acquire);
+        let gather = Instant::now();
         std::thread::yield_now();
+        while self.appended.load(Ordering::Acquire) < target && gather.elapsed() < MAX_GATHER {
+            std::thread::yield_now();
+        }
         let (file, len) = {
-            let inner = self.lock();
+            let mut inner = self.lock();
             // A compaction copied the record into a new file and synced it, or
             // a reset wiped it: nothing left to do.
             if inner.file_id != file_id {
-                return Ok(());
+                return Ok(None);
             }
-            (inner.file.try_clone()?, inner.file_len)
+            // The fsync goes through a handle of its own. Through the handle
+            // that writes (or a clone of it), Windows holds the writes back
+            // until the fsync ends, and with them the Redis clients, which
+            // write one at a time: none could join the next fsync.
+            let file = match &inner.sync_file {
+                Some((id, f)) if *id == file_id => f.clone(),
+                _ => {
+                    let f = Arc::new(OpenOptions::new().write(true).open(&self.path)?);
+                    inner.sync_file = Some((file_id, f.clone()));
+                    f
+                }
+            };
+            (file, inner.file_len)
         };
         file.sync_data()?;
         self.disk_syncs.fetch_add(1, Ordering::Relaxed);
-        *d = Durable { file_id, len };
-        Ok(())
+        Ok(Some(len))
+    }
+
+    /// Waits for a running fsync to end and holds off the next ones, until
+    /// the guard is dropped.
+    fn hold_syncs(&self) -> SyncsHeld<'_> {
+        let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
+        while d.syncing {
+            d = self.synced.wait(d).unwrap_or_else(|e| e.into_inner());
+        }
+        d.syncing = true;
+        SyncsHeld(self)
+    }
+
+    /// A write sets off: with `storage.sync_writes`, the next fsync waits
+    /// for it to append its records, until it is dropped.
+    fn arriving(&self) -> Option<Arriving<'_>> {
+        self.sync_writes.load(Ordering::Relaxed).then(|| {
+            self.setting_off.fetch_add(1, Ordering::AcqRel);
+            Arriving(self)
+        })
     }
 
     /// Turns `storage.sync_writes` on or off; it applies to the next write.
@@ -1645,6 +1856,7 @@ impl Engine {
         timestamp: i64,
         check: bool,
     ) -> Result<bool> {
+        let arriving = self.arriving();
         let mut inner = self.lock();
         if check {
             inner.check_vector_room(inner.vector_growth(key, as_doc(value)))?;
@@ -1653,7 +1865,7 @@ impl Engine {
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
         drop(inner);
-        self.make_durable(mark)?;
+        self.make_durable(mark, arriving)?;
         Ok(created)
     }
 
@@ -1670,6 +1882,7 @@ impl Engine {
         key: &str,
         f: impl FnOnce(Value) -> Result<(Option<Value>, T)>,
     ) -> Result<Option<(T, bool)>> {
+        let arriving = self.arriving();
         let mut inner = self.lock();
         let Some(e) = inner.live(key, now_ms()) else {
             return Ok(None);
@@ -1684,7 +1897,7 @@ impl Engine {
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
         drop(inner);
-        self.make_durable(mark)?;
+        self.make_durable(mark, arriving)?;
         Ok(Some((out, true)))
     }
 
@@ -1732,6 +1945,7 @@ impl Engine {
     }
 
     pub fn delete(&self, key: &str) -> Result<bool> {
+        let arriving = self.arriving();
         let mut inner = self.lock();
         if inner.live(key, now_ms()).is_none() {
             return Ok(false);
@@ -1749,7 +1963,7 @@ impl Engine {
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
         drop(inner);
-        self.make_durable(mark)?;
+        self.make_durable(mark, arriving)?;
         Ok(true)
     }
 
@@ -1809,6 +2023,7 @@ impl Engine {
         begin_seq: Option<u64>,
         watched: Option<&[WatchedKey]>,
     ) -> Result<()> {
+        let arriving = self.arriving();
         let mut inner = self.lock();
         let now = now_ms();
         let ts = now / 1000;
@@ -1930,7 +2145,7 @@ impl Engine {
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
         drop(inner);
-        self.make_durable(mark)
+        self.make_durable(mark, arriving)
     }
 
     /// Wipes every key. The data file is recreated from scratch.
@@ -2113,8 +2328,9 @@ impl Engine {
 
         // Phase 3 (locked): bring over whatever was appended meanwhile, then swap.
         // No fsync may hold a handle on the old file while it is replaced.
-        let _durable = self.durable.lock().unwrap_or_else(|e| e.into_inner());
+        let _held = self.hold_syncs();
         let mut inner = self.lock();
+        inner.sync_file = None;
         let before_bytes = inner.file_len;
         if inner.file_id != old_id || inner.closed {
             return Ok(CompactReport { before_bytes, after_bytes: before_bytes, aborted: true, ..Default::default() });
@@ -2338,6 +2554,7 @@ impl Engine {
         if inner.graph_changes() > 0 {
             inner.save_graphs(&self.path);
         }
+        inner.sync_file = None;
         inner.closed = true;
     }
 
@@ -2486,6 +2703,9 @@ impl Engine {
                     }
                     if v.ef_search > 0 {
                         def["ef_search"] = v.ef_search.into();
+                    }
+                    if let Some(a) = &v.auto_tune {
+                        def["auto_tune"] = a.to_json();
                     }
                 }
                 def
@@ -2697,10 +2917,13 @@ impl Engine {
     }
 
     /// Sets the `ef_search` of an HNSW index; 0 goes back to the default.
+    /// A value chosen this way is kept: the index is no longer tuned again
+    /// as it grows (`auto`).
     pub fn set_vector_ef_search(&self, pattern: &str, field: &str, ef: usize) -> Result<()> {
         let mut inner = self.lock();
         let i = Self::graph_index(&inner, pattern, field)?;
         inner.vecs[i].ef_search = ef;
+        inner.vecs[i].auto_tune = None;
         self.save_meta(&inner)
     }
 
@@ -2724,8 +2947,9 @@ impl Engine {
     /// each `ef` of [`TUNE_LADDER`], using up to `sample` of the indexed
     /// vectors as queries, and keeps the smallest `ef` that reaches
     /// `recall` (the largest tried when none does) as the index's
-    /// `ef_search`. The workspace waits while it runs: each query is also
-    /// answered exactly, comparing every vector.
+    /// `ef_search`. Each query is also answered exactly, comparing every
+    /// vector; the engine is locked for one search at a time, so the
+    /// workspace keeps working meanwhile.
     pub fn tune_vector_index(
         &self,
         pattern: &str,
@@ -2735,76 +2959,87 @@ impl Engine {
         sample: usize,
         queries_from: Option<&str>,
     ) -> Result<TuneReport> {
-        let mut inner = self.lock();
-        let i = Self::graph_index(&inner, pattern, field)?;
         let sample = sample.max(1);
-        // Real queries, when the application keeps some: documents holding
-        // a vector in the same field.
-        let mut given: Vec<Vec<f32>> = Vec::new();
-        if let Some(qp) = queries_from {
-            let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
-            let prefix = glob_prefix(qp).to_string();
-            let now = now_ms();
-            let keys: Vec<(String, Entry)> = inner
-                .index
-                .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-                .take_while(|(k, _)| k.starts_with(&prefix))
-                .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(qp, k))
-                .map(|(k, e)| (k.clone(), e.clone()))
-                .collect();
-            let dims = inner.vecs[i].dims;
-            let step = (keys.len() / sample).max(1);
-            for (k, e) in keys.into_iter().step_by(step).take(sample) {
-                if let Value::Doc(doc) = inner.value_of(&k, &e)? {
-                    given.extend(vector::extract(&doc, &path).filter(|v| Some(v.len()) == dims));
+        let (queries, from_data, vectors) = {
+            let mut inner = self.lock();
+            let i = Self::tunable(&inner, pattern, field)?;
+            // Real queries, when the application keeps some: documents
+            // holding a vector in the same field.
+            let mut given: Vec<Vec<f32>> = Vec::new();
+            if let Some(qp) = queries_from {
+                let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
+                let prefix = glob_prefix(qp).to_string();
+                let now = now_ms();
+                let keys: Vec<(String, Entry)> = inner
+                    .index
+                    .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                    .take_while(|(k, _)| k.starts_with(&prefix))
+                    .filter(|(k, e)| e.ty.is_doc() && !e.is_expired(now) && glob_match(qp, k))
+                    .map(|(k, e)| (k.clone(), e.clone()))
+                    .collect();
+                let dims = inner.vecs[i].dims;
+                let step = (keys.len() / sample).max(1);
+                for (k, e) in keys.into_iter().step_by(step).take(sample) {
+                    if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                        given.extend(vector::extract(&doc, &path).filter(|v| Some(v.len()) == dims));
+                    }
+                }
+                if given.is_empty() {
+                    return Err(KivaError::Invalid(format!(
+                        "no document matching {qp} holds a vector in '{field}' with the index's number of dimensions"
+                    )));
                 }
             }
-            if given.is_empty() {
+            let g = inner.vecs[i].graph().expect("graph index");
+            let vectors = g.len();
+            if vectors <= k {
                 return Err(KivaError::Invalid(format!(
-                    "no document matching {qp} holds a vector in '{field}' with the index's number of dimensions"
+                    "tuning needs more than {k} vectors in the index (it has {vectors}): with so few, every search finds them all"
                 )));
             }
-        }
-        let index = &inner.vecs[i];
-        let g = index.graph().expect("graph index");
-        let vectors = g.len();
-        if vectors <= k {
-            return Err(KivaError::Invalid(format!(
-                "tuning needs more than {k} vectors in the index (it has {vectors}): with so few, every search finds them all"
-            )));
-        }
-        let metric = g.params.metric;
-        let from_data = given.is_empty();
-        // Without real queries, indexed vectors stand for them, each searched
-        // as if its own node were not in the graph (leave-one-out): landing
-        // on that node would lead straight to its neighbours and make the
-        // graph look better than it is for a new query.
-        let queries: Vec<(Option<String>, vector::Query)> = if from_data {
-            let step = (vectors / sample).max(1);
-            g.iter()
-                .step_by(step)
-                .take(sample)
-                .map(|(key, v, _)| (Some(key.to_string()), vector::Query::new(v.to_vec(), metric)))
-                .collect()
-        } else {
-            given.into_iter().map(|v| (None, vector::Query::new(v, metric))).collect()
+            let metric = g.params.metric;
+            let from_data = given.is_empty();
+            // Without real queries, indexed vectors stand for them, each
+            // searched as if its own node were not in the graph
+            // (leave-one-out): landing on that node would lead straight to
+            // its neighbours and make the graph look better than it is for
+            // a new query.
+            let queries: Vec<(Option<String>, vector::Query)> = if from_data {
+                let step = (vectors / sample).max(1);
+                g.iter()
+                    .step_by(step)
+                    .take(sample)
+                    .map(|(key, v, _)| (Some(key.to_string()), vector::Query::new(v.to_vec(), metric)))
+                    .collect()
+            } else {
+                given.into_iter().map(|v| (None, vector::Query::new(v, metric))).collect()
+            };
+            (queries, from_data, vectors)
         };
-        let started = Instant::now();
-        let truth: Vec<Vec<String>> = queries
-            .iter()
-            .map(|(own, q)| {
-                let scored = index.scores(&index.pattern, q, |key| Some(key) != own.as_deref());
-                vector::top_k(scored, k, q).into_iter().map(|(key, _)| key).collect()
-            })
-            .collect();
-        let exact_micros = started.elapsed().as_secs_f64() * 1e6 / queries.len().max(1) as f64;
+        // Only the time spent searching is counted, not the waits for the lock.
+        let mut exact = Duration::ZERO;
+        let mut truth: Vec<Vec<String>> = Vec::with_capacity(queries.len());
+        for (own, q) in &queries {
+            self.let_waiters_in();
+            let inner = self.lock();
+            let index = &inner.vecs[Self::tunable(&inner, pattern, field)?];
+            let started = Instant::now();
+            let scored = index.scores(&index.pattern, q, |key| Some(key) != own.as_deref());
+            truth.push(vector::top_k(scored, k, q).into_iter().map(|(key, _)| key).collect());
+            exact += started.elapsed();
+        }
+        let exact_micros = exact.as_secs_f64() * 1e6 / queries.len().max(1) as f64;
         let wanted: usize = truth.iter().map(|t| t.len()).sum();
         let mut steps = Vec::new();
         for &ef in TUNE_LADDER.iter().filter(|&&ef| ef >= k) {
-            let started = Instant::now();
-            let (mut hits, mut compared) = (0, 0);
+            let (mut hits, mut compared, mut spent) = (0, 0, Duration::ZERO);
             for ((own, q), truth) in queries.iter().zip(&truth) {
+                self.let_waiters_in();
+                let inner = self.lock();
+                let g = inner.vecs[Self::tunable(&inner, pattern, field)?].graph().expect("graph index");
+                let started = Instant::now();
                 let found = g.search_hiding(&q.vector, k, ef, |_| true, own.as_deref());
+                spent += started.elapsed();
                 compared += found.compared;
                 hits += found.keys.iter().filter(|k2| truth.contains(k2)).count();
             }
@@ -2813,7 +3048,7 @@ impl Engine {
                 ef,
                 recall: hits as f64 / wanted.max(1) as f64,
                 compared: compared / n,
-                micros: started.elapsed().as_secs_f64() * 1e6 / n as f64,
+                micros: spent.as_secs_f64() * 1e6 / n as f64,
             };
             let done = step.recall >= recall || ef >= vectors;
             steps.push(step);
@@ -2823,9 +3058,69 @@ impl Engine {
         }
         let last = steps.last().expect("one step at least");
         let (chosen, reached) = (last.ef, last.recall >= recall);
+        let mut inner = self.lock();
+        let i = Self::tunable(&inner, pattern, field)?;
         inner.vecs[i].ef_search = chosen;
+        if let Some(auto) = inner.vecs[i].auto_tune.as_mut() {
+            auto.tuned_at = vectors;
+        }
         self.save_meta(&inner)?;
         Ok(TuneReport { steps, chosen, reached, queries: truth.len(), from_data, vectors, exact_micros })
+    }
+
+    /// The HNSW index on `pattern (field)`, while the engine is open.
+    fn tunable(inner: &Inner, pattern: &str, field: &str) -> Result<usize> {
+        if inner.closed {
+            return Err(KivaError::Other("database is closed".into()));
+        }
+        Self::graph_index(inner, pattern, field)
+    }
+
+    /// Keeps an HNSW index tuned as it grows or shrinks (`auto`), or stops
+    /// (`None`). With \`auto\`, the index is tuned again in the background
+    /// each time its number of vectors doubles or halves since the last
+    /// tuning.
+    pub fn set_vector_auto_tune(&self, pattern: &str, field: &str, auto: Option<AutoTune>) -> Result<()> {
+        let mut inner = self.lock();
+        let i = Self::graph_index(&inner, pattern, field)?;
+        inner.vecs[i].auto_tune = auto;
+        self.save_meta(&inner)
+    }
+
+    /// Starts tuning in the background the first index kept tuned whose
+    /// size doubled or halved since its last tuning; one at a time.
+    fn retune_if_due(&self, inner: &Inner) {
+        let Some(v) = inner.vecs.iter().find(|v| v.auto_tune.as_ref().is_some_and(|a| a.due(v.len()))) else {
+            return;
+        };
+        if self.tuning.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(me) = self.me.upgrade() else {
+            self.tuning.store(false, Ordering::Release);
+            return;
+        };
+        let (pattern, field) = (v.pattern.clone(), v.field.clone());
+        let auto = v.auto_tune.clone().expect("due");
+        let started = std::thread::Builder::new().name("kivadb-tune".into()).spawn(move || {
+            let tuned =
+                me.tune_vector_index(&pattern, &field, auto.recall, auto.limit, auto.sample, auto.queries.as_deref());
+            if tuned.is_err() {
+                // Too few vectors left, or no query document: tried again
+                // when the size doubles or halves from here.
+                let mut inner = me.lock();
+                if let Some(v) = inner.vecs.iter_mut().find(|v| v.pattern == pattern && v.field == field) {
+                    let len = v.len();
+                    if let Some(a) = v.auto_tune.as_mut() {
+                        a.tuned_at = len.max(1);
+                    }
+                }
+            }
+            me.tuning.store(false, Ordering::Release);
+        });
+        if started.is_err() {
+            self.tuning.store(false, Ordering::Release);
+        }
     }
 
     pub fn drop_vector_index(&self, pattern: &str, field: &str) -> Result<bool> {
@@ -2859,6 +3154,7 @@ impl Engine {
                 tombstones: v.graph().map_or(0, |g| g.tombstones()),
                 memory_bytes: v.memory_bytes(),
                 ef_search: if v.ef_search == 0 { hnsw::DEFAULT_EF_SEARCH } else { v.ef_search },
+                auto_tune: v.auto_tune.clone(),
             })
             .collect()
     }
@@ -3562,6 +3858,8 @@ pub struct VectorIndexInfo {
     pub memory_bytes: usize,
     /// HNSW: candidates a search keeps when it does not say.
     pub ef_search: usize,
+    /// HNSW: tuned again as it grows (`tune ... auto`).
+    pub auto_tune: Option<AutoTune>,
 }
 
 /// One `ef` tried by [`Engine::tune_vector_index`].

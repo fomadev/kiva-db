@@ -654,3 +654,35 @@ fn synchronous_writes_share_their_disk_syncs() {
     assert_eq!(e.len(), 8 * 90 + 2);
     assert!(e.get("w7:099").unwrap().is_some() && e.get("w7:090").unwrap().is_none());
 }
+
+/// Durable writes from many threads: how many share each fsync.
+/// `cargo test --release --test engine group_commit_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn group_commit_speed() {
+    let dir = TempDir::new("group-commit-speed");
+    let opts = EngineOptions { sync_writes: true, auto_compact: false, ..Default::default() };
+    let e = Engine::open(dir.path().join("store.kiva"), opts).unwrap();
+    for threads in [1, 4, 16, 64] {
+        let before = e.stats();
+        let t = std::time::Instant::now();
+        let writers: Vec<_> = (0..threads)
+            .map(|n| {
+                let e = e.clone();
+                std::thread::spawn(move || {
+                    while t.elapsed() < std::time::Duration::from_secs(2) {
+                        e.put(&format!("k{n}"), &s(&"x".repeat(100)), 0, false).unwrap();
+                    }
+                })
+            })
+            .collect();
+        writers.into_iter().for_each(|w| w.join().unwrap());
+        let st = e.stats();
+        let (writes, syncs) = (st.durable_writes - before.durable_writes, st.disk_syncs - before.disk_syncs);
+        println!(
+            "{threads:>2} threads: {:>6.0} writes/s, {:.1} writes per fsync",
+            writes as f64 / t.elapsed().as_secs_f64(),
+            writes as f64 / syncs as f64
+        );
+    }
+}

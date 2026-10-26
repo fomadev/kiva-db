@@ -3,7 +3,7 @@
 mod common;
 
 use common::{fails, instance, ok, TempDir};
-use kivadb::engine::{Engine, EngineOptions, VectorIndexKind, VectorQuery};
+use kivadb::engine::{AutoTune, Engine, EngineOptions, VectorIndexKind, VectorQuery};
 use kivadb::hnsw::Params as HnswParams;
 use kivadb::session::Session;
 use kivadb::value::Value;
@@ -2278,4 +2278,116 @@ fn redis_streams_and_consumer_groups() {
     // A stream is a KivaDB document, readable from the shell.
     let mut s = Session::new(inst.clone(), true, None);
     assert!(ok(&mut s, "get jobs.redis").contains("stream"));
+}
+
+/// Waits for the background tuning of the first vector index to reach `size`.
+fn tuned_at(e: &Engine, size: usize) -> kivadb::engine::AutoTune {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let a = e.list_vector_indexes()[0].auto_tune.clone().expect("kept tuned");
+        if a.tuned_at == size || std::time::Instant::now() > until {
+            return a;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_hnsw_index_kept_tuned_is_measured_again_as_it_grows_and_shrinks() {
+    let dir = TempDir::new("hnsw_auto_tune");
+    let path = dir.path().join("store.kiva");
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    let vectors = random_vectors(1700, 16, 41);
+    for (i, v) in vectors[..400].iter().enumerate() {
+        embed(&e, &format!("chunk:{i:05}"), v, json!({}));
+    }
+    let small = VectorIndexKind::Hnsw(HnswParams { m: 4, ef_construction: 20, ..Default::default() });
+    e.create_vector_index_with("chunk:*", "embedding", small).unwrap();
+    let auto = AutoTune { recall: 0.95, limit: 10, sample: 30, queries: None, tuned_at: 0 };
+    e.set_vector_auto_tune("chunk:*", "embedding", Some(auto.clone())).unwrap();
+    // Due at once (never tuned): the next write starts it.
+    embed(&e, "chunk:00400", &vectors[400], json!({}));
+    assert_eq!(tuned_at(&e, 401).tuned_at, 401);
+
+    // Not again before the size doubles.
+    for (i, v) in vectors[401..801].iter().enumerate() {
+        embed(&e, &format!("chunk:{:05}", 401 + i), v, json!({}));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(e.list_vector_indexes()[0].auto_tune.as_ref().unwrap().tuned_at, 401, "801 vectors: not yet");
+    embed(&e, "chunk:00801", &vectors[801], json!({}));
+    assert_eq!(tuned_at(&e, 802).tuned_at, 802);
+
+    // Saved with the index.
+    drop(e);
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].auto_tune, Some(AutoTune { tuned_at: 802, ..auto.clone() }));
+
+    // Down to half: measured again.
+    for i in 0..401 {
+        e.delete(&format!("chunk:{i:05}")).unwrap();
+    }
+    assert_eq!(tuned_at(&e, 401).tuned_at, 401);
+
+    // A value set by hand stops it.
+    e.set_vector_ef_search("chunk:*", "embedding", 64).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].auto_tune, None);
+    assert_eq!(e.list_vector_indexes()[0].ef_search, 64);
+}
+
+/// Tuning searches one query at a time: writes go on meanwhile.
+#[test]
+fn tuning_lets_the_workspace_write_meanwhile() {
+    let dir = TempDir::new("hnsw_tune_writes");
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(0)).unwrap();
+    for (i, v) in random_vectors(4000, 64, 9).iter().enumerate() {
+        embed(&e, &format!("chunk:{i:05}"), v, json!({}));
+    }
+    let hnsw = VectorIndexKind::Hnsw(HnswParams { m: 8, ef_construction: 40, ..Default::default() });
+    e.create_vector_index_with("chunk:*", "embedding", hnsw).unwrap();
+    let tuner = {
+        let e = e.clone();
+        std::thread::spawn(move || e.tune_vector_index("chunk:*", "embedding", 1.0, 10, 300, None).unwrap())
+    };
+    let (mut writes, mut slowest) = (0, std::time::Duration::ZERO);
+    while !tuner.is_finished() {
+        let t = std::time::Instant::now();
+        e.put(&format!("other:{writes}"), &Value::Str("x".into()), 0, false).unwrap();
+        slowest = slowest.max(t.elapsed());
+        writes += 1;
+    }
+    let r = tuner.join().unwrap();
+    assert!(writes > 100, "{writes} writes during the tuning ({} steps)", r.steps.len());
+    assert!(slowest < std::time::Duration::from_millis(500), "a write waited {slowest:?}");
+}
+
+#[test]
+fn an_index_kept_tuned_from_the_shell() {
+    let dir = TempDir::new("hnsw_auto_shell");
+    let mut s = Session::new(instance(&dir), true, None);
+    ok(&mut s, "create vector index on doc: (embedding) using hnsw m 8 ef 50");
+    // Empty for now: tuned once it can be.
+    let out = ok(&mut s, "tune vector index on doc: (embedding) recall 0.9 limit 5 sample 20 auto");
+    assert!(out.contains("it will be tuned for a recall of 90 % once it has more"), "{out}");
+    assert!(ok(&mut s, "indexes").contains("tuned again as it grows (recall 90 %, once it has enough vectors)"));
+    for (i, v) in random_vectors(40, 8, 5).iter().enumerate() {
+        ok(&mut s, &format!("set doc:{i:03} {}", json!({ "embedding": v })));
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(60);
+    while !ok(&mut s, "indexes").contains(", last at ") && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let shown = ok(&mut s, "indexes");
+    assert!(shown.contains("tuned again as it grows (recall 90 %, last at "), "{shown}");
+
+    let out = ok(&mut s, "tune vector index on doc: (embedding) limit 5 sample 20 auto");
+    assert!(
+        out.contains("Kept ef_search")
+            && out.contains("measured again in the background when the index reaches 80 or falls to 20 vectors"),
+        "{out}"
+    );
+    let out = ok(&mut s, "tune vector index on doc: (embedding) auto off");
+    assert!(out.contains("keeps its ef_search as it grows"), "{out}");
+    assert!(!ok(&mut s, "indexes").contains("tuned again"));
+    assert!(fails(&mut s, "tune vector index on doc: (embedding) auto off now").contains("Unexpected"));
 }

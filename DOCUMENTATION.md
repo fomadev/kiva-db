@@ -1768,7 +1768,7 @@ Hit (similarity 1.0000, faq:1): "Kinshasa"
 * **Several caches**, by name (`faq`, `support`, `llm`...), per workspace. A cache holds vectors of one length: those of one model.
 * **Similarity**: cosine, through an HNSW graph ([12.5](#125-approximate-index-hnsw-for-large-collections)). `semantic.cache.threshold` (0.98) decides what counts as the same question; lower it and different questions start to share answers. The right value depends on your embedding model: look at the similarities `semantic lookup` reports for a few rewordings and a few different questions, and set the threshold between the two.
 * **Freshness**: an answer lives `semantic.cache.ttl` seconds (300; `ttl` per entry, `ttl 0` = until invalidated). Storing the same question again replaces its answer. Beyond `semantic.cache.max_entries` (10 000 per cache), the oldest answers go first.
-* **Dependencies**: an answer built from your data names it with `depends`, as keys (`"kb:42"`) or patterns (`"kb:*"`, `"user:?"`). As soon as a matching key is written, deleted, or expires with its TTL (at the latest a second after its deadline), the answer is dropped, by any client: shell, structured requests, Redis commands, transactions, triggers. `del all keys` (`FLUSHDB`) drops every answer of the workspace. A write costs the cache one comparison per distinct pattern, and one hash lookup for all the plain keys together, whatever the number of answers: 3 µs per write with 10 000 answers depending on 10 100 keys and patterns, against 14.7 ms when every answer was compared (test `invalidation_speed`, release build).
+* **Dependencies**: an answer built from your data names it with `depends`, as keys (`"kb:42"`) or patterns (`"kb:*"`, `"user:?"`). As soon as a matching key is written, deleted, or expires with its TTL (at the latest a second after its deadline), the answer is dropped, by any client: shell, structured requests, Redis commands, transactions, triggers. `del all keys` (`FLUSHDB`) drops every answer of the workspace. A write costs the cache one hash lookup for all the plain keys together, and one per distinct length of the text before the wildcard of the patterns (`chunk:` in `chunk:*`), whatever the number of answers and patterns: only the patterns whose text begins the key are compared with it. Measured in a release build (test `invalidation_speed`): 0.4 µs per write with 10 000 answers depending on 10 100 keys and patterns, 0.6 µs when each of the 10 000 answers has a pattern of its own (`chunk:<n>:*`), against 435 µs when every pattern was compared and 14.7 ms when every answer was.
 * **Data that changes while the model thinks**: between the lookup that missed and the store, the model works, often for seconds. If a document the answer depends on is written meanwhile, the answer was built from its old version, and storing it would keep a wrong answer until its TTL. Give the store the `since` token the miss printed: if a key matching `depends` changed after it, the answer is not kept (`Not stored: kb:42 changed after the lookup...`), and the next question goes to the model with the new data. Without `since`, the answer is kept as before. A token older than the last 10 000 writes of the workspace, or from before a restart or a `del all keys`, can no longer be checked: the store is refused rather than guessed. `get similar` with `semantic.cache.enabled` does this by itself.
 * **Caching `get similar` itself**: with `config set semantic.cache.enabled true`, a vector search near-identical to one made recently (same pattern, field, metric and limit) (and the same filter) returns the earlier results, marked `semantic cache: a query at similarity ... was answered earlier`; any write under the pattern makes them stale, also one made during the search, whose results are then not kept. `exact` always computes. The results are those of the earlier query, close but not necessarily identical: leave it off when every search must be computed.
 * The cache lives in memory: it is not saved, replicated or backed up, and fills again after a restart.
@@ -1877,7 +1877,23 @@ Kept ef_search 40 for chunk:* (embedding): the smallest that finds 95 % of the t
 * **What it keeps.** The value is saved with the index, survives restarts, and is used by every `get similar`, `KIVA.SIMILAR` and structured `similar` request that does not give its own `ef`. `indexes` shows it: `HNSW vector index (cosine, m 16, ef 200, ef_search 40)`.
 * **When no value reaches the recall**, it keeps the largest it tried and says so: build the graph with more links (`using hnsw m 32 ef 400`), or use `exact`.
 * **By hand.** `tune vector index on chunk: (embedding) ef_search 200` sets it, `ef_search default` goes back to 100, and `create vector index ... using hnsw ef_search 200` sets it at creation. `ef_search` only changes searches: the graph is not rebuilt.
-* **Cost.** Each query is also answered exactly, so tuning takes about `sample` exact searches (9 s on 100 000 vectors), and the workspace waits meanwhile: run it at a quiet time, after loading the data, and again when the data changes a lot. It needs the admin role. An exact index has nothing to tune: it always finds the true closest vectors.
+* **Cost.** Each query is also answered exactly, so tuning takes about `sample` exact searches (9 s on 100 000 vectors). The workspace keeps working meanwhile: tuning takes the lock for one search at a time and lets the waiting writes and reads go first, so a write waits at most about one exact search (7.6 ms at worst during a tuning of 4 000 vectors of 64 dimensions, test `tuning_lets_the_workspace_write_meanwhile`). It needs the admin role. An exact index has nothing to tune: it always finds the true closest vectors.
+
+**Kept tuned as the data grows.** The `ef_search` a graph needs grows with the number of vectors: a value measured on 10 000 vectors misses more on a million. With `auto`, the engine measures it again by itself:
+
+```text
+kiva> tune vector index on chunk: (embedding) recall 0.95 auto
+...
+Kept ef_search 40 for chunk:* (embedding): the smallest that finds 95 % of the true closest vectors.
+It is measured again in the background when the index reaches 200000 or falls to 50000 vectors.
+kiva> indexes
+chunk:* (embedding) - HNSW vector index (cosine, m 16, ef 200, ef_search 40), 100000 vectors, ..., ef_search tuned again as it grows (recall 95 %, last at 100000 vectors)
+```
+
+* The recall, `limit`, `sample` and `queries` are saved with the index. Each time the number of vectors doubles or halves since the last tuning, a write starts a new tuning in the background, one at a time per workspace, which keeps its new `ef_search`.
+* On an index still empty or nearly, `tune ... auto` answers that it will tune once there are more than `limit` vectors, and does it then.
+* `tune ... auto off` keeps the current value from then on; so does `tune ... ef_search N`, a value chosen by hand.
+* A new tuning measures the recall, it does not guess it: the index must hold vectors resembling the queries (or the documents named by `queries`). Between two tunings, a value measured on half the vectors may already miss a little more than asked.
 
 **The graphs file.** Graphs are saved to `<file>.graphs` in a binary format of their own, read back at start instead of being built again (0.6 s for 100 000 vectors of 128 dimensions, against 57 s to build):
 
@@ -2594,7 +2610,22 @@ kiva> stats
 
 `sync_writes = true` asks the disk to confirm every write before KivaDB answers it: an acknowledged write survives a power failure. It applies immediately (`config set sync_writes true`). The default (confirm once per second) is the usual compromise.
 
-**Group commit.** A disk confirmation (fsync) takes about a millisecond on an SSD, often more on Windows or on a hard disk. With `sync_writes`, KivaDB does not make each client wait for its own: the writes that arrive while one fsync is under way are confirmed together by the next one. A single client writes at the speed of the disk, but many clients writing at once share the confirmations, so the total number of writes per second grows with the number of clients instead of staying at one fsync each. Every write is still on disk before it is acknowledged. `stats` shows how well it works:
+**Group commit.** A disk confirmation (fsync) takes about a millisecond on an SSD, often more on Windows or on a hard disk. With `sync_writes`, KivaDB does not make each client wait for its own: the writes that arrive while one fsync is under way are confirmed together by the next one. A single client writes at the speed of the disk, but many clients writing at once share the confirmations, so the total number of writes per second grows with the number of clients instead of staying at one fsync each. Every write is still on disk before it is acknowledged.
+
+* One writer at a time runs the fsync, outside the workspace lock: the others keep appending to the file meanwhile, then wait for its end. The ones it covered return together; one of the others runs the next fsync for all of them.
+* Before syncing, it lets the writes already on their way finish appending, for up to a millisecond, so that they share it.
+* Redis clients ([Chapter 23](#chapter-23--redis-compatibility)) run their commands one at a time, but wait for the disk after their command: the others go on, and their writes join the next fsync.
+
+Measured on Windows with an SSD (release build, writes of 100 bytes):
+
+| Writers | Writes per second | Writes per fsync |
+| :--- | :--- | :--- |
+| 1 thread | 800 | 1 |
+| 16 threads | 8 400 (690 before) | 12 (3 before) |
+| 64 threads | 20 000 (880 before) | 52 (3 before) |
+| 16 Redis clients | about 5 000 (216 before) | |
+
+The tests `group_commit_speed` (`tests/engine.rs`) and `tests/redis-clients/sync-bench.mjs` repeat these measures. `stats` shows how well it works:
 
 ```text
  > Durability           : on disk before each answer (12000 writes, 2210 disk syncs, 5.4 writes per sync)

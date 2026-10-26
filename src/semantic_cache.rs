@@ -34,7 +34,7 @@ use crate::hnsw::{Hnsw, Params};
 use crate::util::{glob_match, now_secs};
 use crate::vector::{Metric, Query};
 use serde_json::{json, Value as Json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 /// Writes remembered per workspace for `since` checks. A token older than
@@ -69,6 +69,7 @@ pub fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
+#[derive(Default)]
 struct Entry {
     answer: Json,
     text: Option<String>,
@@ -95,8 +96,13 @@ struct Space {
     texts: HashMap<String, String>,
     /// Plain key -> entries that depend on it.
     keys: HashMap<String, HashSet<String>>,
-    /// Pattern with `*` or `?` -> entries that depend on it.
-    patterns: HashMap<String, HashSet<String>>,
+    /// Patterns with `*` or `?`, grouped by their text before the first
+    /// wildcard: pattern -> entries that depend on it.
+    patterns: HashMap<String, HashMap<String, HashSet<String>>>,
+    /// The lengths of those texts, with how many groups have each. A write
+    /// looks up the key's beginnings of these lengths only, so it costs a
+    /// few lookups however many patterns there are.
+    literal_lens: BTreeMap<usize, usize>,
     next: u64,
     hits: u64,
     misses: u64,
@@ -104,8 +110,9 @@ struct Space {
     invalidated: u64,
 }
 
-fn is_pattern(p: &str) -> bool {
-    p.contains(['*', '?'])
+/// The text of a pattern before its first wildcard; `None` for a plain key.
+fn literal(p: &str) -> Option<&str> {
+    p.find(['*', '?']).map(|i| &p[..i])
 }
 
 impl Space {
@@ -118,6 +125,7 @@ impl Space {
             texts: HashMap::new(),
             keys: HashMap::new(),
             patterns: HashMap::new(),
+            literal_lens: BTreeMap::new(),
             next: 0,
             hits: 0,
             misses: 0,
@@ -125,12 +133,46 @@ impl Space {
         }
     }
 
-    fn deps(&mut self, pattern: &str) -> &mut HashMap<String, HashSet<String>> {
-        if is_pattern(pattern) {
-            &mut self.patterns
-        } else {
-            &mut self.keys
+    /// Entry `id` depends on the key or pattern `p`.
+    fn add_dep(&mut self, p: &str, id: &str) {
+        let deps = match literal(p) {
+            None => &mut self.keys,
+            Some(lit) => self.patterns.entry(lit.to_string()).or_insert_with(|| {
+                *self.literal_lens.entry(lit.len()).or_default() += 1;
+                HashMap::new()
+            }),
+        };
+        deps.entry(p.to_string()).or_default().insert(id.to_string());
+    }
+
+    fn drop_dep(&mut self, p: &str, id: &str) {
+        let lit = literal(p);
+        let deps = match lit {
+            None => &mut self.keys,
+            Some(lit) => match self.patterns.get_mut(lit) {
+                Some(group) => group,
+                None => return,
+            },
+        };
+        if let Some(ids) = deps.get_mut(p) {
+            ids.remove(id);
+            if ids.is_empty() {
+                deps.remove(p);
+            }
         }
+        if let Some(lit) = lit.filter(|lit| self.patterns.get(*lit).is_some_and(|g| g.is_empty())) {
+            self.patterns.remove(lit);
+            if let Some(n) = self.literal_lens.get_mut(&lit.len()) {
+                *n -= 1;
+                if *n == 0 {
+                    self.literal_lens.remove(&lit.len());
+                }
+            }
+        }
+    }
+
+    fn pattern_count(&self) -> usize {
+        self.patterns.values().map(HashMap::len).sum()
     }
 
     fn remove(&mut self, id: &str) {
@@ -144,13 +186,7 @@ impl Space {
                 self.graph.remove(id);
             }
             for p in &e.depends {
-                let deps = self.deps(p);
-                if let Some(ids) = deps.get_mut(p) {
-                    ids.remove(id);
-                    if ids.is_empty() {
-                        deps.remove(p);
-                    }
-                }
+                self.drop_dep(p, id);
             }
         }
         if self.graph.needs_rebuild() {
@@ -168,12 +204,14 @@ impl Space {
     /// Drops the entries that depend on `key`; returns how many.
     fn invalidate(&mut self, key: &str) -> usize {
         let mut stale: Vec<String> = self.keys.get(key).into_iter().flatten().cloned().collect();
-        for (p, ids) in &self.patterns {
-            // The text before the first wildcard rules most patterns out
-            // without running the matcher.
-            let literal = &p[..p.find(['*', '?']).unwrap_or(p.len())];
-            if key.starts_with(literal) && glob_match(p, key) {
-                stale.extend(ids.iter().cloned());
+        // Only the patterns whose text before the wildcard begins the key
+        // can match it.
+        for &len in self.literal_lens.range(..=key.len()).map(|(len, _)| len) {
+            let Some(group) = key.get(..len).and_then(|lit| self.patterns.get(lit)) else { continue };
+            for (p, ids) in group {
+                if glob_match(p, key) {
+                    stale.extend(ids.iter().cloned());
+                }
             }
         }
         stale.sort();
@@ -429,7 +467,7 @@ impl SemanticCache {
             space.texts.insert(t.clone(), id.clone());
         }
         for p in &depends {
-            space.deps(p).entry(p.clone()).or_default().insert(id.clone());
+            space.add_dep(p, &id);
         }
         space.entries.insert(
             id.clone(),
@@ -498,7 +536,7 @@ impl SemanticCache {
                     hits: s.hits,
                     misses: s.misses,
                     invalidated: s.invalidated,
-                    depends: s.keys.len() + s.patterns.len(),
+                    depends: s.keys.len() + s.pattern_count(),
                 }
             })
             .collect();
@@ -611,6 +649,22 @@ mod tests {
         let s = &c.stats("w")[0];
         assert_eq!((s.entries, s.invalidated, s.depends), (1, 2, 1), "only user:? is left");
         assert!(c.store("w", "rag", &q(Some("d"), None), json!(4), 0, deps(&[""]), 100).is_err());
+    }
+
+    #[test]
+    fn patterns_are_found_by_their_text_before_the_wildcard() {
+        let mut s = Space::new();
+        for (p, id) in [("doc:1*", "a"), ("doc:1?:x", "b"), ("doc:*", "c"), ("*:title", "d"), ("été:*", "e")] {
+            s.add_dep(p, id);
+            s.entries.insert(id.into(), Entry { depends: vec![p.into()], ..Entry::default() });
+        }
+        assert_eq!(s.literal_lens.iter().map(|(l, n)| (*l, *n)).collect::<Vec<_>>(), [(0, 1), (4, 1), (5, 1), (6, 1)]);
+        assert_eq!(s.invalidate("doc:12:x"), 3, "doc:1*, doc:1?:x and doc:*");
+        assert_eq!(s.invalidate("a:title"), 1);
+        assert_eq!(s.invalidate("d"), 0, "shorter than every text but the empty one");
+        assert_eq!(s.invalidate("éxé:"), 0, "a length that cuts a character is skipped");
+        assert_eq!(s.invalidate("été:1"), 1);
+        assert!(s.patterns.is_empty() && s.literal_lens.is_empty(), "groups go with their last pattern");
     }
 
     #[test]

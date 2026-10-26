@@ -270,4 +270,25 @@ fn invalidation_speed() {
         c.invalidate("w", &format!("doc:{i}"));
     }
     println!("{n} answers: {unrelated:?} per unrelated write, {:?} per write dropping one answer", t.elapsed() / 1000);
+
+    // Each answer with a pattern of its own: a write must not try them all.
+    let c = SemanticCache::default();
+    for i in 0..n {
+        let q = Question { text: Some(format!("question {i}")), vector: None };
+        c.store("w", "rag", &q, json!(i), 0, vec![format!("chunk:{i}:*"), format!("tenant:{}:doc:*", i % 50)], n)
+            .unwrap();
+    }
+    let t = Instant::now();
+    for i in 0..writes {
+        c.invalidate("w", &format!("chunk:{}x:{i}", i as usize % n));
+    }
+    let unrelated = t.elapsed() / writes;
+    let t = Instant::now();
+    for i in 0..1000 {
+        c.invalidate("w", &format!("chunk:{i}:part"));
+    }
+    println!(
+        "{n} distinct patterns: {unrelated:?} per unrelated write, {:?} per write dropping one answer",
+        t.elapsed() / 1000
+    );
 }
