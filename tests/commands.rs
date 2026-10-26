@@ -264,23 +264,28 @@ fn queries_ranges_and_indexes() {
 }
 
 #[test]
-fn queries_refuse_joins_combinations_and_pipelines_with_an_explanation() {
+fn queries_refuse_joins_and_sorting_pipelines_with_an_explanation() {
     let dir = TempDir::new("query-rules");
     let mut s = kiva(&dir);
     ok(&mut s, r#"set user:1 {"name": "Alice", "role": "dev", "age": 30}"#);
     ok(&mut s, r#"set order:1 {"user": "user:1", "total": 10}"#);
     let cases = [
-        (r#"get where user:*.role = "dev" and user:*.age > 20"#, "one condition"),
-        (r#"count where user:*.role = "dev" or user:*.age > 20"#, "one condition"),
+        (r#"get where user:*.role = "dev" && user:*.age > 20"#, "combined with the words and, or, not"),
+        (r#"get where (user:*.role = "dev" or age > 20"#, "missing ')'"),
+        (r#"get where user:*.role = "dev")"#, "without its '('"),
+        (r#"get where user:*.role = "dev" and order:*.total > 1"#, "fields of the documents of user:*"),
         ("get where user:* join order:* on user", "joins are not supported"),
         ("get where user:*.name = order:*.user", "names a field of other documents"),
         (r#"get where user:*, order:*.role = "dev""#, "joins are not supported"),
-        (r#"get where user:*.role = "dev" group by role"#, "aggregation pipelines"),
-        (r#"get where user:*.role = "dev" limit 5 order by age"#, "aggregation pipelines"),
+        (r#"get where user:*.role = "dev" group by role"#, "sorting pipelines"),
+        (r#"get where user:*.role = "dev" limit 5 order by age"#, "sorting pipelines"),
+        (r#"count where user:*.role = "dev" group by role order by role"#, "sorting pipelines"),
         (r#"get where user:*.role in ["dev", "admin"]"#, "comparison operators"),
         (r#"get where user:*.role = "dev", "admin""#, "comparison operators"),
         (r#"sum where user:*.age > 20 @node2"#, "distributed queries"),
-        (r#"explain get where user:*.role = "dev" and user:*.age > 1"#, "one condition"),
+        (r#"sum where user:*.role = "dev" and age > 1"#, "say which one sum reads"),
+        (r#"avg user:* where age > 1"#, "both a key pattern and a field"),
+        (r#"count where user:*.role = "dev" group role"#, "expected 'by'"),
         (r#"explain distributed get where user:*.role = "dev""#, "distributed queries"),
     ];
     for (q, why) in cases {
@@ -304,8 +309,9 @@ fn queries_refuse_joins_combinations_and_pipelines_with_an_explanation() {
     assert!(kivadb::api::handle(&mut s, &q(serde_json::json!({}))).is_ok());
     for (extra, why) in [
         (serde_json::json!({"join": "order:*"}), "joins"),
-        (serde_json::json!({"order_by": "age"}), "aggregation"),
-        (serde_json::json!({"and": [{"target": "user:*.age"}]}), "one condition"),
+        (serde_json::json!({"order_by": "age"}), "sorting pipelines"),
+        (serde_json::json!({"and": [{"target": "user:*.age"}]}), "\"where\""),
+        (serde_json::json!({"where": {"age": 1}}), "not both"),
         (serde_json::json!({"value": ["dev", "admin"]}), "not with an array"),
         (serde_json::json!({"target": "user:*.ro*"}), "wildcard"),
     ] {
@@ -1014,4 +1020,179 @@ fn json_documents_from_redis_clients_are_kivadb_documents() {
     assert_eq!(call(&mut c, &["JSON.GET", "greeting"]), bulk(r#""hi""#));
     assert_eq!(call(&mut c, &["JSON.DEL", "user:2"]), Reply::Int(1));
     assert_eq!(call(&mut c, &["EXISTS", "user:2"]), Reply::Int(0));
+}
+
+#[test]
+fn queries_combine_conditions_and_aggregate_per_group() {
+    let dir = TempDir::new("query-logic");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set user:1 {"name": "Alice", "role": "admin", "age": 30, "city": "Kinshasa", "salary": 900}"#);
+    ok(&mut s, r#"set user:2 {"name": "Bob", "role": "dev", "age": 25, "city": "Goma", "salary": 700}"#);
+    ok(&mut s, r#"set user:3 {"name": "Carol", "role": "dev", "age": 41, "city": "Kinshasa", "salary": 1100}"#);
+    ok(&mut s, r#"set user:4 {"name": "Dan", "role": "ops", "age": 35, "salary": "n/a"}"#);
+    ok(&mut s, r#"set order:1 {"user": "user:1", "total": 10}"#);
+    let keys = |out: String| -> Vec<String> {
+        out.lines()
+            .filter(|l| l.starts_with("user:"))
+            .map(|l| l.split(':').take(2).collect::<Vec<_>>().join(":"))
+            .collect()
+    };
+
+    // and, or, not, parentheses; the pattern is named once.
+    let q = r#"get where user:*.age > 26 and (role = "dev" or role = "admin")"#;
+    assert_eq!(keys(ok(&mut s, q)), ["user:1", "user:3"]);
+    assert_eq!(
+        keys(ok(&mut s, r#"get where user:*.role = "dev" or user:*.city = "Kinshasa""#)),
+        ["user:1", "user:2", "user:3"]
+    );
+    // not: also the documents without the field.
+    assert_eq!(keys(ok(&mut s, r#"get where not user:*.city = "Kinshasa""#)), ["user:2", "user:4"]);
+    assert_eq!(
+        keys(ok(&mut s, r#"get where user:*.age >= 30 and not (city = "Goma" or role = "ops")"#)),
+        ["user:1", "user:3"]
+    );
+    // and binds tighter than or.
+    assert_eq!(keys(ok(&mut s, r#"get where user:*.role = "ops" or role = "dev" and age > 30"#)), ["user:3", "user:4"]);
+    assert_eq!(
+        ok(&mut s, r#"get where user:*.role = "dev" and age < 30 return name"#),
+        "user:2: {\"name\":\"Bob\"}\n(1 matches)"
+    );
+
+    // The existing aggregates keep their output.
+    assert_eq!(ok(&mut s, "count where user:*.age > 26"), "Count: 3");
+    assert_eq!(ok(&mut s, "sum where user:*.age > 0"), "Sum: 131 (4 matches)");
+    assert_eq!(ok(&mut s, r#"count where user:*.role = "dev" and city = "Goma""#), "Count: 1");
+    // New ones, on a field other than the condition's.
+    assert_eq!(ok(&mut s, "avg where user:*.age > 0"), "Avg: 32.75 (4 values, 4 matches)");
+    assert_eq!(ok(&mut s, r#"avg user:*.salary where role = "dev""#), "Avg: 900 (2 values, 2 matches)");
+    assert_eq!(ok(&mut s, "avg user:*.salary"), "Avg: 900 (3 values, 4 matches)", "\"n/a\" is not a number");
+    assert_eq!(ok(&mut s, "min user:*.age"), "Min: 25 (4 values, 4 matches)");
+    assert_eq!(ok(&mut s, r#"max user:*.name where not role = "ops""#), "Max: \"Carol\" (3 values, 3 matches)");
+    assert_eq!(ok(&mut s, "count user:*"), "Count: 4");
+    assert_eq!(ok(&mut s, "count user:*.city"), "Count: 3 (4 matches)");
+    // Per group: missing values form the null group, first.
+    assert_eq!(
+        ok(&mut s, "count user:* group by city"),
+        "Count by city (3 groups, 4 matches):\n  null: 1\n  \"Goma\": 1\n  \"Kinshasa\": 2"
+    );
+    assert_eq!(
+        ok(&mut s, r#"avg user:*.age where role != "ops" group by role"#),
+        "Avg of age by role (2 groups, 3 matches):\n  \"admin\": 30 (1 values)\n  \"dev\": 33 (2 values)"
+    );
+    assert_eq!(
+        ok(&mut s, "sum user:*.salary group by user:*.city limit 3"),
+        "Sum of salary by city (2 groups, 3 matches):\n  \"Goma\": 700 (1 matches)\n  \"Kinshasa\": 2000 (2 matches)"
+    );
+
+    // Plans: indexes intersected for and, merged for or, none through not.
+    ok(&mut s, "create index on user: (role)");
+    ok(&mut s, "create index on user: (age)");
+    let plan = ok(&mut s, r#"explain get where user:*.role = "dev" and age > 30"#);
+    assert!(plan.contains("INDEX MERGE") && plan.contains("user:* (role) and user:* (age)"), "{plan}");
+    assert!(plan.contains("1 of 5 keys examined"), "{plan}");
+    let plan = ok(&mut s, r#"explain count where user:*.role = "dev" or role = "ops""#);
+    assert!(plan.contains("INDEX MERGE") && plan.contains("3 of 5 keys"), "{plan}");
+    let plan = ok(&mut s, r#"explain avg user:*.age where role = "dev" and city = "Goma" group by city"#);
+    assert!(plan.contains("INDEX SCAN") && plan.contains("2 of 5 keys"), "{plan}");
+    let plan = ok(&mut s, r#"explain get where user:*.role = "dev" or city = "Goma""#);
+    assert!(plan.contains("PREFIX SCAN") && plan.contains("Tip       : create index on user:* (city)"), "{plan}");
+    assert!(!plan.contains("index on user:* (role)"), "{plan}");
+    let plan = ok(&mut s, r#"explain get where not user:*.role = "dev""#);
+    assert!(plan.contains("PREFIX SCAN") && !plan.contains("Tip"), "{plan}");
+    // Same answers through the indexes.
+    assert_eq!(keys(ok(&mut s, q)), ["user:1", "user:3"]);
+    assert_eq!(
+        ok(&mut s, r#"avg user:*.age where role != "ops" group by role"#),
+        "Avg of age by role (2 groups, 3 matches):\n  \"admin\": 30 (1 values)\n  \"dev\": 33 (2 values)"
+    );
+
+    // Structured requests.
+    let api = |s: &mut Session, r: serde_json::Value| kivadb::api::handle(s, &r).unwrap();
+    let r = api(
+        &mut s,
+        serde_json::json!({"op": "query", "target": "user:*",
+            "where": {"and": [{"field": "age", "cmp": ">", "value": 26}, {"or": [{"role": "dev"}, {"role": "admin"}]}]}}),
+    );
+    let got: Vec<&str> = r["rows"].as_array().unwrap().iter().map(|x| x["key"].as_str().unwrap()).collect();
+    assert_eq!(got, ["user:1", "user:3"]);
+    assert_eq!(r["plan"]["strategy"], "INDEX MERGE");
+    let r = api(
+        &mut s,
+        serde_json::json!({"op": "aggregate", "target": "user:*", "where": {"not": {"role": "ops"}}, "group_by": "role",
+            "compute": {"n": "count", "mean_age": {"avg": "age"}, "top": {"max": "salary"}}}),
+    );
+    assert_eq!(r["matches"], 3);
+    assert_eq!(
+        r["groups"][1],
+        serde_json::json!({"key": "dev", "matches": 2, "values": {"n": 2, "mean_age": 33, "top": 1100}})
+    );
+    let r =
+        api(&mut s, serde_json::json!({"op": "aggregate", "target": "user:*", "compute": ["count", {"sum": "age"}]}));
+    assert_eq!(r["values"], serde_json::json!({"count": 4, "sum_age": 131}));
+    let r =
+        api(&mut s, serde_json::json!({"op": "explain", "target": "user:*", "where": {"role": "dev", "city": "Goma"}}));
+    assert_eq!(r["plan"]["strategy"], "INDEX SCAN");
+    let r = api(
+        &mut s,
+        serde_json::json!({"op": "explain", "target": "user:*", "where": {"or": [{"role": "dev"}, {"city": "Goma"}]}}),
+    );
+    assert_eq!(r["suggestion"], "create index on user:* (city)");
+    for (bad, why) in [
+        (serde_json::json!({"op": "query", "target": "user:*.age", "where": {"age": 1}}), "key pattern alone"),
+        (serde_json::json!({"op": "aggregate", "target": "user:*.age"}), "key pattern alone"),
+        (serde_json::json!({"op": "aggregate", "target": "user:*", "compute": {"m": "median"}}), "compute"),
+        (serde_json::json!({"op": "aggregate", "target": "user:*", "order_by": "age"}), "sorting pipelines"),
+    ] {
+        let err = kivadb::api::handle(&mut s, &bad).unwrap_err().to_string();
+        assert!(err.contains(why), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn indexed_and_scanned_queries_give_the_same_answers() {
+    let dir = TempDir::new("query-plans");
+    let mut s = kiva(&dir);
+    let mut seed = 7u64;
+    let mut next = |n: u64| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) % n
+    };
+    let roles = ["dev", "ops", "admin", "sales"];
+    for i in 0..400 {
+        let (role, age, city) = (roles[next(4) as usize], 18 + next(50), next(6));
+        // Some documents lack a field, some hold another type.
+        let doc = match i % 10 {
+            0 => format!(r#"{{"role": "{role}", "age": "{age}"}}"#),
+            1 => format!(r#"{{"age": {age}, "city": {city}}}"#),
+            _ => format!(r#"{{"role": "{role}", "age": {age}, "city": {city}}}"#),
+        };
+        ok(&mut s, &format!("set p:{i:03} {doc}"));
+    }
+    ok(&mut s, r#"set other:1 {"role": "dev", "age": 30}"#);
+    let queries = [
+        r#"p:*.role = "dev" and age > 40"#,
+        r#"p:*.role = "dev" or role = "ops""#,
+        r#"p:*.age >= 30 and age < 35 and city = 2"#,
+        r#"(p:*.role = "admin" or age < 20) and city != 3"#,
+        r#"p:*.role = "sales" and not (age > 50 or city = 1)"#,
+        r#"p:*.city = 0 or city = 5 or role = "admin" and age <= 25"#,
+        r#"not p:*.role = "dev""#,
+    ];
+    let run_all = |s: &mut Session| -> Vec<String> {
+        let mut out = Vec::new();
+        for q in queries {
+            out.push(ok(s, &format!("get where {q}")));
+            out.push(ok(s, &format!("count where {q} group by role")));
+            out.push(ok(s, &format!("avg p:*.age where {} group by city", q.trim_start_matches("p:*."))));
+        }
+        out
+    };
+    let scanned = run_all(&mut s);
+    ok(&mut s, "create index on p: (role) using hash");
+    ok(&mut s, "create index on p: (age)");
+    ok(&mut s, "create index on p: (city)");
+    let plan = ok(&mut s, &format!("explain get where {}", queries[2]));
+    assert!(plan.contains("INDEX MERGE"), "{plan}");
+    assert_eq!(run_all(&mut s), scanned);
+    assert!(scanned[0].ends_with("matches)") && !scanned[0].starts_with("(0"), "{}", scanned[0]);
 }

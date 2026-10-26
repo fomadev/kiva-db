@@ -13,6 +13,7 @@ use crate::format::*;
 use crate::hint;
 use crate::hnsw::{self, Hnsw};
 use crate::jsonpath;
+use crate::query::{Expr, Query};
 use crate::util::{glob_match, glob_prefix, now_secs, random_u64};
 use crate::value::{Type, Value};
 pub use crate::vector::Kind as VectorIndexKind;
@@ -3041,23 +3042,23 @@ impl Engine {
 
     /// How `cond` would be executed, without running it.
     pub fn explain(&self, cond: &Cond) -> Plan {
-        let inner = self.lock();
-        Self::plan(&inner, cond)
+        match Query::single(cond.clone()) {
+            Ok(q) => self.explain_query(&q),
+            Err(_) => Self::scan_plan(&self.lock(), &cond.pattern),
+        }
     }
 
-    fn plan(inner: &Inner, cond: &Cond) -> Plan {
-        let total_keys = inner.index.len();
-        if let Some(i) = Self::find_index(inner, cond) {
-            let idx = &inner.sec[i];
-            let kind = if idx.kind == IndexKind::Hash { " using hash" } else { "" };
-            return Plan {
-                strategy: "INDEX SCAN",
-                index: Some(format!("{} ({}){kind}", idx.pattern, idx.field)),
-                candidates: Self::index_candidates(idx, cond).len(),
-                total_keys,
-            };
+    /// How `q` would be executed, without running it.
+    pub fn explain_query(&self, q: &Query) -> Plan {
+        let inner = self.lock();
+        match q.expr.as_ref().and_then(|e| Self::index_plan(&inner, e)) {
+            Some(p) => p.plan(inner.index.len()),
+            None => Self::scan_plan(&inner, &q.pattern),
         }
-        let prefix = glob_prefix(&cond.pattern);
+    }
+
+    fn scan_plan(inner: &Inner, pattern: &str) -> Plan {
+        let prefix = glob_prefix(pattern);
         let candidates = inner
             .index
             .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
@@ -3067,33 +3068,106 @@ impl Engine {
             strategy: if prefix.is_empty() { "FULL SCAN" } else { "PREFIX SCAN" },
             index: None,
             candidates,
-            total_keys,
+            total_keys: inner.index.len(),
+        }
+    }
+
+    /// The keys the secondary indexes give for `e`, sorted, when they can:
+    /// a comparison with an index, an `and` with at least one such part
+    /// (their keys intersected), an `or` whose parts all have one (merged).
+    /// `not` never: it selects what an index does not list.
+    fn index_plan(inner: &Inner, e: &Expr) -> Option<IndexPlan> {
+        match e {
+            Expr::Test(t) => {
+                let i = Self::find_index(inner, &t.cond)?;
+                let idx = &inner.sec[i];
+                let kind = if idx.kind == IndexKind::Hash { " using hash" } else { "" };
+                let mut keys = Self::index_candidates(idx, &t.cond);
+                keys.dedup();
+                Some(IndexPlan { keys, used: format!("{} ({}){kind}", idx.pattern, idx.field), indexes: 1 })
+            }
+            Expr::And(parts) => {
+                let mut plans: Vec<IndexPlan> = parts.iter().filter_map(|p| Self::index_plan(inner, p)).collect();
+                // Smallest first: each intersection then walks fewer keys.
+                plans.sort_by_key(|p| p.keys.len());
+                let mut it = plans.into_iter();
+                let mut acc = it.next()?;
+                for p in it {
+                    if acc.keys.is_empty() {
+                        break;
+                    }
+                    acc.keys = intersect_sorted(&acc.keys, &p.keys);
+                    acc.used = format!("{} and {}", acc.used, p.used);
+                    acc.indexes += p.indexes;
+                }
+                Some(acc)
+            }
+            Expr::Or(parts) => {
+                let plans: Option<Vec<IndexPlan>> = parts.iter().map(|p| Self::index_plan(inner, p)).collect();
+                let mut it = plans?.into_iter();
+                let mut acc = it.next()?;
+                for p in it {
+                    acc.keys = union_sorted(&acc.keys, &p.keys);
+                    acc.used = format!("{} or {}", acc.used, p.used);
+                    acc.indexes += p.indexes;
+                }
+                acc.used = format!("({})", acc.used);
+                Some(acc)
+            }
+            Expr::Not(_) => None,
         }
     }
 
     /// Documents whose key matches `cond.pattern` and whose field satisfies
     /// the comparison. `limit == 0` means no limit.
     pub fn query(&self, cond: &Cond, limit: usize) -> Result<(Vec<(String, Json)>, Plan)> {
-        let path = jsonpath::parse_path(&cond.field).map_err(KivaError::Invalid)?;
+        let q = Query::single(cond.clone()).map_err(KivaError::Invalid)?;
+        self.query_expr(&q, limit)
+    }
+
+    /// The documents `q` selects, in key order. `limit == 0` means no limit.
+    pub fn query_expr(&self, q: &Query, limit: usize) -> Result<(Vec<(String, Json)>, Plan)> {
+        let mut rows = Vec::new();
+        let plan = self.scan_query(q, limit, |key, doc| {
+            rows.push((key, doc));
+            Ok(())
+        })?;
+        Ok((rows, plan))
+    }
+
+    /// Calls `f` with each document `q` selects, in key order, without
+    /// keeping them (aggregates fold them as they come). `f` runs while
+    /// the engine is locked. `limit == 0` means no limit.
+    pub fn scan_query(
+        &self,
+        q: &Query,
+        limit: usize,
+        mut f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+    ) -> Result<Plan> {
         let mut inner = self.lock();
-        let plan = Self::plan(&inner, cond);
-        let now = now_secs();
-        let candidates: Vec<String> = match Self::find_index(&inner, cond) {
-            Some(i) => Self::index_candidates(&inner.sec[i], cond),
+        let total_keys = inner.index.len();
+        let (candidates, plan) = match q.expr.as_ref().and_then(|e| Self::index_plan(&inner, e)) {
+            Some(p) => {
+                let plan = p.plan(total_keys);
+                (p.keys, plan)
+            }
             None => {
-                let prefix = glob_prefix(&cond.pattern);
-                inner
+                let plan = Self::scan_plan(&inner, &q.pattern);
+                let prefix = glob_prefix(&q.pattern);
+                let keys = inner
                     .index
                     .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
                     .take_while(|(k, _)| k.starts_with(prefix))
                     .filter(|(_, e)| e.ty.is_doc())
                     .map(|(k, _)| k.clone())
-                    .collect()
+                    .collect();
+                (keys, plan)
             }
         };
-        let mut rows = Vec::new();
+        let now = now_secs();
+        let mut found = 0;
         for key in candidates {
-            if !glob_match(&cond.pattern, &key) {
+            if !glob_match(&q.pattern, &key) {
                 continue;
             }
             let Some(e) = inner.live(&key, now) else {
@@ -3105,16 +3179,81 @@ impl Engine {
             let Value::Doc(doc) = inner.value_of(&key, &e)? else {
                 continue;
             };
-            let hit = jsonpath::get(&doc, &path).is_some_and(|v| compare_json(v, cond.op, &cond.value));
-            if hit {
-                rows.push((key, doc));
-                if limit != 0 && rows.len() >= limit {
+            // An index only narrows the reading: the whole condition decides.
+            if q.matches(&doc) {
+                f(key, doc).map_err(KivaError::Invalid)?;
+                found += 1;
+                if limit != 0 && found >= limit {
                     break;
                 }
             }
         }
-        Ok((rows, plan))
+        Ok(plan)
     }
+}
+
+/// Keys given by secondary indexes for part of a condition.
+struct IndexPlan {
+    /// Sorted, without duplicates.
+    keys: Vec<String>,
+    /// The indexes used, as a formula: `user:* (role) and user:* (age)`.
+    used: String,
+    indexes: usize,
+}
+
+impl IndexPlan {
+    fn plan(&self, total_keys: usize) -> Plan {
+        Plan {
+            strategy: if self.indexes > 1 { "INDEX MERGE" } else { "INDEX SCAN" },
+            index: Some(self.used.clone()),
+            candidates: self.keys.len(),
+            total_keys,
+        }
+    }
+}
+
+fn intersect_sorted(a: &[String], b: &[String]) -> Vec<String> {
+    let (mut i, mut j, mut out) = (0, 0, Vec::with_capacity(a.len().min(b.len())));
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                out.push(a[i].clone());
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
+}
+
+fn union_sorted(a: &[String], b: &[String]) -> Vec<String> {
+    let (mut i, mut j, mut out) = (0, 0, Vec::with_capacity(a.len() + b.len()));
+    while i < a.len() || j < b.len() {
+        let next = match (a.get(i), b.get(j)) {
+            (Some(x), Some(y)) if x == y => {
+                i += 1;
+                j += 1;
+                x
+            }
+            (Some(x), Some(y)) if x < y => {
+                i += 1;
+                x
+            }
+            (Some(x), None) => {
+                i += 1;
+                x
+            }
+            (_, Some(y)) => {
+                j += 1;
+                y
+            }
+            (None, None) => break,
+        };
+        out.push(next.clone());
+    }
+    out
 }
 
 impl Drop for Engine {
