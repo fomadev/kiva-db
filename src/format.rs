@@ -8,6 +8,9 @@
 //!
 //! Record (28-byte header + key + value), all integers little-endian:
 //! `crc32 u32 | k_size u16 | v_size u32 | type u8 | flags u8 | timestamp i64 | expires_at i64`
+//!
+//! `expires_at` is Unix time in milliseconds (in seconds in files written by
+//! KivaDB 1.5 and before, converted when read: see [`crate::util::expiry_to_ms`]).
 //! The CRC covers every byte of the record that follows it.
 
 use crate::compress::Compression;
@@ -98,7 +101,9 @@ pub fn parse_header(b: &[u8]) -> RecHeader {
         ty: b[10],
         flags: b[11],
         timestamp: i64::from_le_bytes([b[12], b[13], b[14], b[15], b[16], b[17], b[18], b[19]]),
-        expires_at: i64::from_le_bytes([b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27]]),
+        expires_at: crate::util::expiry_to_ms(i64::from_le_bytes([
+            b[20], b[21], b[22], b[23], b[24], b[25], b[26], b[27],
+        ])),
     }
 }
 

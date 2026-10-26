@@ -1047,7 +1047,22 @@ fn redis_expiry_options_and_time() {
     // EXPIRETIME, GETEX.
     let R::I(at) = r.cmd(&["EXPIRETIME", "c"]) else { panic!() };
     assert!(at > 1_700_000_000);
-    assert_eq!(r.cmd(&["PEXPIRETIME", "c"]), R::I(at * 1000));
+    assert!(matches!(r.cmd(&["PEXPIRETIME", "c"]), R::I(p) if p / 1000 == at));
+
+    // Milliseconds are kept as given: PX 150 is gone after 150 ms, not a second.
+    r.cmd(&["SET", "lock", "me", "PX", "150"]);
+    assert!(matches!(r.cmd(&["PTTL", "lock"]), R::I(t) if (100..=150).contains(&t)));
+    assert_eq!(r.cmd(&["TTL", "lock"]), R::I(0), "rounded to the nearest second");
+    r.cmd(&["SET", "lease", "x"]);
+    assert_eq!(r.cmd(&["PEXPIRE", "lease", "120"]), R::I(1));
+    r.cmd(&["PSETEX", "short", "130", "y"]);
+    std::thread::sleep(Duration::from_millis(250));
+    for k in ["lock", "lease", "short"] {
+        assert_eq!(r.cmd(&["GET", k]), R::B(None), "{k}");
+    }
+    r.cmd(&["SET", "at", "v", "PXAT", &(kivadb::util::now_ms() + 100).to_string()]);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.cmd(&["EXISTS", "at"]), R::I(0));
     assert_eq!(r.cmd(&["EXPIRETIME", "greeting-ghost"]), R::I(-2));
     r.cmd(&["SET", "s", "hello"]);
     assert_eq!(r.cmd(&["EXPIRETIME", "s"]), R::I(-1));

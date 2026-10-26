@@ -693,7 +693,8 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
             R_SET => {
                 let seq = r.u64()?;
                 let timestamp = r.i64()?;
-                let expires_at = r.i64()?;
+                // An older master sends seconds.
+                let expires_at = crate::util::expiry_to_ms(r.i64()?);
                 let ty = Type::from_u8(r.u8()?).ok_or_else(|| KivaError::Corrupted("bad type in stream".into()))?;
                 let msgpack = r.u8()? != 0;
                 let key = r.str16()?;

@@ -11,7 +11,6 @@ use crate::instance::{Instance, VERSION};
 use crate::proto::*;
 use crate::repl;
 use crate::session::{Need, Session};
-use crate::util::now_secs;
 use crate::value::{Type, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -257,6 +256,6 @@ fn binary_set(sess: &mut Session, payload: &[u8]) -> Result<()> {
     validate_key_name(&key).map_err(KivaError::Invalid)?;
     let value = Value::decode(ty, r.rest(), false)
         .map_err(|e| KivaError::Invalid(format!("value does not match its type: {e}")))?;
-    let expires_at = if ttl > 0 { now_secs() + ttl } else { 0 };
+    let expires_at = crate::util::deadline_in(ttl);
     sess.kv_put(&key, value, expires_at, false)
 }

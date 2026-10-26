@@ -11,7 +11,6 @@
 
 use crate::error::{KivaError, Result};
 use crate::session::Session;
-use crate::util::now_secs;
 use crate::value::{fmt_f64, Value};
 use mlua::{HookTriggers, Lua, LuaOptions, MultiValue, StdLib, Table, Value as LVal, VmState};
 use serde_json::Value as Json;
@@ -197,7 +196,7 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
             // Keep the storage format and TTL of an existing key unless a TTL is given.
             let meta = s.kv_get(&key).map_err(lerr)?.map(|(_, m)| m).unwrap_or_default();
             let expires_at = match ttl {
-                Some(t) if t > 0 => now_secs() + t,
+                Some(t) if t > 0 => crate::util::deadline_in(t),
                 Some(_) => 0,
                 None => meta.expires_at,
             };

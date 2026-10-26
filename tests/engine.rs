@@ -4,7 +4,7 @@ use common::TempDir;
 use kivadb::compress::Compression;
 use kivadb::engine::{BatchOp, CmpOp, Cond, Engine, EngineOptions};
 use kivadb::error::KivaError;
-use kivadb::util::now_secs;
+use kivadb::util::now_ms;
 use kivadb::value::Value;
 use serde_json::json;
 use std::fs;
@@ -379,9 +379,9 @@ fn expired_keys_disappear() {
     let dir = TempDir::new("ttl");
     let path = dir.path().join("store.kiva");
     let e = Engine::open(&path, quiet()).unwrap();
-    e.put("gone", &s("x"), now_secs() - 1, false).unwrap();
-    e.put("soon", &s("y"), now_secs() + 1, false).unwrap();
-    e.put("kept", &s("z"), now_secs() + 3600, false).unwrap();
+    e.put("gone", &s("x"), now_ms() - 1000, false).unwrap();
+    e.put("soon", &s("y"), now_ms() + 1000, false).unwrap();
+    e.put("kept", &s("z"), now_ms() + 3_600_000, false).unwrap();
     assert!(e.get("gone").unwrap().is_none());
     assert!(e.get("soon").unwrap().is_some());
     std::thread::sleep(Duration::from_millis(2100));
@@ -390,7 +390,7 @@ fn expired_keys_disappear() {
     drop(e);
     let e = Engine::open(&path, quiet()).unwrap();
     assert_eq!(e.len(), 1);
-    assert!(e.meta("kept").unwrap().expires_at > now_secs());
+    assert!(e.meta("kept").unwrap().expires_at > now_ms());
 }
 
 #[test]
@@ -406,19 +406,19 @@ fn the_background_sweep_removes_expired_keys_in_batches() {
             .map(|i| BatchOp::Put { key: format!("session:{i:05}"), value: s("x"), expires_at, msgpack: false })
             .collect()
     };
-    e.apply_batch(sessions(now_secs() + 3600), None).unwrap();
-    e.put("kept", &s("z"), now_secs() + 3600, false).unwrap();
+    e.apply_batch(sessions(now_ms() + 3_600_000), None).unwrap();
+    e.put("kept", &s("z"), now_ms() + 3_600_000, false).unwrap();
     e.put("plain", &s("p"), 0, false).unwrap();
     assert_eq!(e.stats().ttl_keys, 25_001);
 
     // Changing or removing a TTL moves the key's deadline, or drops it.
     e.put("session:00000", &s("x"), 0, false).unwrap();
-    e.put("session:00001", &s("x"), now_secs() + 7200, false).unwrap();
+    e.put("session:00001", &s("x"), now_ms() + 7_200_000, false).unwrap();
     e.delete("session:00002").unwrap();
     assert_eq!(e.stats().ttl_keys, 24_999);
 
     // Now the other sessions' time is up.
-    let gone: Vec<BatchOp> = sessions(now_secs() - 1).into_iter().skip(3).collect();
+    let gone: Vec<BatchOp> = sessions(now_ms() - 1000).into_iter().skip(3).collect();
     e.apply_batch(gone, None).unwrap();
 
     // Removed by the maintenance thread, not only hidden from reads.

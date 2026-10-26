@@ -14,7 +14,7 @@ use crate::hint;
 use crate::hnsw::{self, Hnsw};
 use crate::jsonpath;
 use crate::query::{Expr, Query};
-use crate::util::{glob_match, glob_prefix, now_secs, random_u64};
+use crate::util::{glob_match, glob_prefix, now_ms, now_secs, random_u64};
 use crate::value::{Type, Value};
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
@@ -41,7 +41,8 @@ pub struct Entry {
     pub ty: Type,
     pub flags: u8,
     pub timestamp: i64,
-    /// Unix time after which the key is gone; 0 means it never expires.
+    /// Unix time in milliseconds after which the key is gone; 0 means it
+    /// never expires.
     pub expires_at: i64,
     /// Engine sequence number of the write that produced this entry.
     pub version: u64,
@@ -877,7 +878,7 @@ impl Inner {
         index.clear();
         let pattern = index.pattern.clone();
         let prefix = glob_prefix(&pattern).to_string();
-        let now = now_secs();
+        let now = now_ms();
         let keys: Vec<(String, Entry)> = self
             .index
             .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
@@ -900,7 +901,7 @@ impl Inner {
     /// byte `since` of the log, so only the keys written after that, and the
     /// keys deleted since, need looking at.
     fn catch_up_vec(&mut self, i: usize, since: u64) {
-        let now = now_secs();
+        let now = now_ms();
         let gone: Vec<String> = self.vecs[i]
             .keys()
             .into_iter()
@@ -1144,7 +1145,7 @@ impl Inner {
     /// Reads into memory the values of the live keys matching `pattern`.
     fn warm_pinned(&mut self, pattern: &str) {
         let prefix = glob_prefix(pattern).to_string();
-        let now = now_secs();
+        let now = now_ms();
         let keys: Vec<(String, Entry)> = self
             .index
             .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
@@ -1186,7 +1187,7 @@ impl Inner {
         self.sec[i].clear();
         let pattern = self.sec[i].pattern.clone();
         let prefix = glob_prefix(&pattern).to_string();
-        let now = now_secs();
+        let now = now_ms();
         let keys: Vec<(String, Entry)> = self
             .index
             .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
@@ -1335,7 +1336,7 @@ impl Engine {
             }
         }
 
-        let now = now_secs();
+        let now = now_ms();
         index.retain(|_, e| !e.is_expired(now));
         // A missing or wrong key shows now, not at the first read.
         if let Some((k, e)) = index.iter().find(|(_, e)| e.flags & FLAG_ENCRYPTED != 0) {
@@ -1544,7 +1545,7 @@ impl Engine {
 
     pub fn get(&self, key: &str) -> Result<Option<(Value, Entry)>> {
         let mut inner = self.lock();
-        let Some(e) = inner.live(key, now_secs()) else {
+        let Some(e) = inner.live(key, now_ms()) else {
             return Ok(None);
         };
         let v = inner.value_of(key, &e)?;
@@ -1554,7 +1555,7 @@ impl Engine {
     /// Canonical payload bytes of `key` (used by replication).
     pub fn get_raw(&self, key: &str) -> Result<Option<(Vec<u8>, Entry)>> {
         let mut inner = self.lock();
-        let Some(e) = inner.live(key, now_secs()) else {
+        let Some(e) = inner.live(key, now_ms()) else {
             return Ok(None);
         };
         let raw = inner.read_raw(key, &e)?;
@@ -1562,7 +1563,7 @@ impl Engine {
     }
 
     pub fn meta(&self, key: &str) -> Option<Entry> {
-        self.lock().live(key, now_secs())
+        self.lock().live(key, now_ms())
     }
 
     pub fn contains(&self, key: &str) -> bool {
@@ -1585,7 +1586,7 @@ impl Engine {
     /// or reversed. `limit == 0` means no limit.
     pub fn range(&self, from: Option<&str>, to: Option<&str>, reverse: bool, limit: usize) -> Vec<(String, Entry)> {
         let inner = self.lock();
-        let now = now_secs();
+        let now = now_ms();
         let (lo, hi) = match (from, to) {
             (Some(a), Some(b)) if a > b => (Some(b), Some(a)),
             other => other,
@@ -1604,7 +1605,7 @@ impl Engine {
     /// Keys matching a glob pattern, in key order.
     pub fn keys_matching(&self, pattern: &str, limit: usize) -> Vec<(String, Entry)> {
         let inner = self.lock();
-        let now = now_secs();
+        let now = now_ms();
         let prefix = glob_prefix(pattern);
         let take = if limit == 0 { usize::MAX } else { limit };
         inner
@@ -1661,7 +1662,7 @@ impl Engine {
         f: impl FnOnce(Value) -> Result<(Option<Value>, T)>,
     ) -> Result<Option<(T, bool)>> {
         let mut inner = self.lock();
-        let Some(e) = inner.live(key, now_secs()) else {
+        let Some(e) = inner.live(key, now_ms()) else {
             return Ok(None);
         };
         let current = inner.value_of(key, &e)?;
@@ -1688,7 +1689,7 @@ impl Engine {
         timestamp: i64,
     ) -> Result<bool> {
         let (rec, mut entry, raw) = build_put(inner, key, value, expires_at, msgpack, timestamp, 0)?;
-        let created = inner.live(key, now_secs()).is_none();
+        let created = inner.live(key, now_ms()).is_none();
         entry.offset = inner.append(&rec, false)?;
         inner.seq += 1;
         entry.version = inner.seq;
@@ -1723,7 +1724,7 @@ impl Engine {
 
     pub fn delete(&self, key: &str) -> Result<bool> {
         let mut inner = self.lock();
-        if inner.live(key, now_secs()).is_none() {
+        if inner.live(key, now_ms()).is_none() {
             return Ok(false);
         }
         let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
@@ -1750,7 +1751,8 @@ impl Engine {
     /// modified by someone else after that sequence number.
     pub fn apply_batch(&self, ops: Vec<BatchOp>, begin_seq: Option<u64>) -> Result<()> {
         let mut inner = self.lock();
-        let now = now_secs();
+        let now = now_ms();
+        let ts = now / 1000;
         if let Some(begin) = begin_seq {
             if inner.reset_seq > begin {
                 return Err(KivaError::Conflict("the database was reset during the transaction".into()));
@@ -1781,7 +1783,7 @@ impl Engine {
         for op in ops {
             match op {
                 BatchOp::Put { key, value, expires_at, msgpack } => {
-                    let (rec, entry, raw) = build_put(&inner, &key, &value, expires_at, msgpack, now, FLAG_TXN)?;
+                    let (rec, entry, raw) = build_put(&inner, &key, &value, expires_at, msgpack, ts, FLAG_TXN)?;
                     let exists = match shadow.get(&key) {
                         Some(e) => *e,
                         None => inner.live(&key, now).is_some(),
@@ -1980,7 +1982,7 @@ impl Engine {
             if inner.closed {
                 return Err(KivaError::Other("database is closed".into()));
             }
-            inner.purge_all_expired(now_secs());
+            inner.purge_all_expired(now_ms());
             if let Some(c) = recompress {
                 inner.compression = c;
             }
@@ -2121,7 +2123,7 @@ impl Engine {
     /// (`.bak`) is taken and corrupted entries are removed.
     pub fn check(&self, repair: bool) -> Result<CheckReport> {
         let mut inner = self.lock();
-        inner.purge_all_expired(now_secs());
+        inner.purge_all_expired(now_ms());
         let entries: Vec<(String, Entry)> = inner.index.iter().map(|(k, e)| (k.clone(), e.clone())).collect();
         let mut report = CheckReport { total: entries.len(), ..Default::default() };
         let before = inner.corrupted_detected;
@@ -2269,7 +2271,7 @@ impl Engine {
         if inner.closed {
             return;
         }
-        inner.purge_all_expired(now_secs());
+        inner.purge_all_expired(now_ms());
         inner.write_hint(&self.path);
         if inner.graph_changes() > 0 {
             inner.save_graphs(&self.path);
@@ -2286,7 +2288,7 @@ impl Engine {
             inner.ticks += 1;
             // Every second: cheap, since only expired keys are visited. A
             // full batch means more are waiting: come back at once.
-            if inner.purge_expired(now_secs()) == PURGE_BATCH {
+            if inner.purge_expired(now_ms()) == PURGE_BATCH {
                 self.wake();
             }
             if inner.unsynced {
@@ -2514,7 +2516,7 @@ impl Engine {
         if inner.max_memory == 0 {
             return Ok(());
         }
-        let now = now_secs();
+        let now = now_ms();
         let new: Vec<&str> =
             keys.into_iter().filter(|k| !inner.index.get(*k).is_some_and(|e| !e.is_expired(now))).collect();
         if new.is_empty() {
@@ -2680,7 +2682,7 @@ impl Engine {
         if let Some(qp) = queries_from {
             let path = jsonpath::parse_path(field).map_err(KivaError::Invalid)?;
             let prefix = glob_prefix(qp).to_string();
-            let now = now_secs();
+            let now = now_ms();
             let keys: Vec<(String, Entry)> = inner
                 .index
                 .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
@@ -2817,7 +2819,7 @@ impl Engine {
         };
         let query = vector::Query::new(q.vector.clone(), q.metric);
         let mut inner = self.lock();
-        let now = now_secs();
+        let now = now_ms();
         let limit = if q.limit == 0 { 10 } else { q.limit };
 
         let index = inner.vecs.iter().position(|v| v.field == q.field && pattern_covers(&v.pattern, &q.pattern));
@@ -3228,7 +3230,7 @@ impl Engine {
                 (keys, plan)
             }
         };
-        let now = now_secs();
+        let now = now_ms();
         let mut found = 0;
         for key in candidates {
             if !glob_match(&q.pattern, &key) {

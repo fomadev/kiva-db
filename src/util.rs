@@ -9,6 +9,37 @@ pub fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
+/// Unix time in milliseconds: the unit of every expiry (`expires_at`).
+pub fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// The deadline `ttl` seconds from now, in milliseconds; 0 (none) when
+/// `ttl` is not positive.
+pub fn deadline_in(ttl: i64) -> i64 {
+    if ttl > 0 {
+        now_ms().saturating_add(ttl.saturating_mul(1000))
+    } else {
+        0
+    }
+}
+
+/// Seconds left before `expires_at` (milliseconds), rounded up; for display.
+pub fn secs_left(expires_at: i64) -> i64 {
+    ((expires_at - now_ms()).max(0) + 999) / 1000
+}
+
+/// An expiry read from a file or a stream written before expiries were kept
+/// in milliseconds: values below 10^11 can only be seconds (as milliseconds
+/// they would fall in 1973), so they are converted.
+pub fn expiry_to_ms(expires_at: i64) -> i64 {
+    if expires_at > 0 && expires_at < 100_000_000_000 {
+        expires_at * 1000
+    } else {
+        expires_at
+    }
+}
+
 /// Local time, `YYYY-MM-DD HH:MM:SS`.
 pub fn fmt_time(ts: i64) -> String {
     match Local.timestamp_opt(ts, 0).single() {
@@ -284,4 +315,23 @@ pub fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expiries_are_milliseconds_and_old_seconds_are_converted() {
+        // Seconds, as files written by KivaDB 1.5 hold them.
+        assert_eq!(expiry_to_ms(1_793_000_000), 1_793_000_000_000);
+        // Already milliseconds, or none.
+        assert_eq!(expiry_to_ms(1_793_000_000_123), 1_793_000_000_123);
+        assert_eq!(expiry_to_ms(0), 0);
+        let d = deadline_in(10);
+        assert!((d - now_ms() - 10_000).abs() < 1000);
+        assert_eq!(deadline_in(0), 0);
+        assert_eq!(secs_left(now_ms() + 1500), 2);
+        assert_eq!(secs_left(now_ms() - 5), 0);
+    }
 }

@@ -178,7 +178,7 @@ fn transactions_ttl_and_replays_work_encrypted() {
         None,
     )
     .unwrap();
-    e.put("short", &Value::Str("gone soon".into()), kivadb::util::now_secs() + 3600, false).unwrap();
+    e.put("short", &Value::Str("gone soon".into()), kivadb::util::now_ms() + 3_600_000, false).unwrap();
     // A write after the snapshot is replayed from the log.
     e.snapshot();
     e.put("after", &Value::Str("replayed".into()), 0, false).unwrap();

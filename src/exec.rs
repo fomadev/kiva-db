@@ -13,7 +13,7 @@ use crate::jsonpath;
 use crate::lexer::{split_by_and, tokenize, Kind, Token};
 use crate::query::{self, Agg, Aggregation, Expr, Func, Query};
 use crate::session::{Need, Session};
-use crate::util::{b64_decode, fmt_time, hex_decode, human_size, now_secs};
+use crate::util::{b64_decode, deadline_in, fmt_time, hex_decode, human_size, now_ms, secs_left};
 use crate::value::{fmt_f64, is_valid_number, Type, Value};
 use serde_json::Value as Json;
 use std::sync::atomic::Ordering;
@@ -898,7 +898,7 @@ impl Session {
             }
             return Err(format!("Key '{key}' already exists. Use 'update' to change it."));
         }
-        let expires_at = if ttl > 0 { now_secs() + ttl } else { 0 };
+        let expires_at = deadline_in(ttl);
         self.kv_put(&key, value, expires_at, false)?;
         out.say(format!("OK: {key} saved."));
         Ok(())
@@ -1172,8 +1172,8 @@ impl Session {
                 ));
             }
         }
-        let now = now_secs();
-        let expires_at = if add && meta.expires_at > now { meta.expires_at + secs } else { now + secs };
+        let (now, ms) = (now_ms(), secs.saturating_mul(1000));
+        let expires_at = if add && meta.expires_at > now { meta.expires_at + ms } else { now + ms };
         self.kv_put(&key, value, expires_at, meta.msgpack)?;
         out.say(format!("OK: Key '{key}' TTL updated successfully ({} {secs}s).", if add { "add" } else { "set" }));
         Ok(())
@@ -1205,11 +1205,10 @@ impl Session {
         }
         out.say(format!(" {:<24} | {:<7} | {:>10} | {:<19} | STATUS", "KEY", "TYPE", "SIZE", "MODIFIED"));
         out.say("-".repeat(78));
-        let now = now_secs();
         for (key, e) in &rows {
             let mut status = Vec::new();
             if e.expires_at > 0 {
-                status.push(format!("TTL: {}s", (e.expires_at - now).max(0)));
+                status.push(format!("TTL: {}s", secs_left(e.expires_at)));
             }
             if e.flags & FLAG_COMP_MASK != 0 {
                 status.push(e.compression().name().to_string());

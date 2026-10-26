@@ -163,7 +163,7 @@ pub fn read_hint(path: &Path, keys: Option<&Keys>) -> Result<HintData> {
         let ty = Type::from_u8(body[p + 16]).ok_or_else(|| bad("unknown type tag"))?;
         let flags = body[p + 17];
         let timestamp = i64::from_le_bytes(rd64(p + 18));
-        let expires_at = i64::from_le_bytes(rd64(p + 26));
+        let expires_at = crate::util::expiry_to_ms(i64::from_le_bytes(rd64(p + 26)));
         p += 34;
         if rd32(p) != crc32fast::hash(&body[start..p]) {
             return Err(bad("entry checksum mismatch"));
