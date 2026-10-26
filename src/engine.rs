@@ -19,7 +19,7 @@ use crate::value::{Type, Value};
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
 use serde_json::Value as Json;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
@@ -546,6 +546,10 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
 /// A graph search pre-filters through a secondary index only when the
 /// candidates are at most this fraction of the graph (1/10).
 const PREFILTER_RATIO: usize = 10;
+
+/// A quantized graph is asked for this many times the results wanted, which
+/// the documents' full vectors then put in their true order.
+const RERANK: usize = 2;
 
 fn as_doc(v: &Value) -> Option<&Json> {
     match v {
@@ -2413,6 +2417,9 @@ impl Engine {
                     def["metric"] = p.metric.name().into();
                     def["m"] = p.m.into();
                     def["ef_construction"] = p.ef_construction.into();
+                    if p.quant != hnsw::Quant::None {
+                        def["quantize"] = p.quant.name().into();
+                    }
                     if v.ef_search > 0 {
                         def["ef_search"] = v.ef_search.into();
                     }
@@ -2828,18 +2835,25 @@ impl Engine {
             let v = &inner.vecs[i];
             v.graph().is_some_and(|g| !q.exact && g.params.metric == q.metric && q.pattern == v.pattern)
         });
-        // Pre-filtering: the condition a secondary index narrows the most.
-        // Its candidates are compared one by one, which is exact; with a
-        // graph, only when they are few enough to beat the graph search.
-        let narrowest = q
+        // A quantized graph only approximates its vectors: outside a graph
+        // search, the documents' own vectors are compared.
+        let index = index.filter(|&i| graph == Some(i) || !inner.vecs[i].quantized());
+        // The conditions a secondary index answers, with the keys it gives.
+        let mut indexed: Vec<(usize, Vec<String>)> = q
             .filter
             .iter()
             .filter_map(|c| Self::find_index(&inner, c).map(|i| (i, Self::index_candidates(&inner.sec[i], c))))
-            .min_by_key(|(_, keys)| keys.len());
-        let prefilter = narrowest.filter(|(_, keys)| match graph {
-            Some(i) => keys.len().saturating_mul(PREFILTER_RATIO) <= inner.vecs[i].len(),
-            None => true,
-        });
+            .collect();
+        // Pre-filtering: the condition a secondary index narrows the most.
+        // Its candidates are compared one by one, which is exact; with a
+        // graph, only when they are few enough to beat the graph search.
+        let narrowest = (0..indexed.len()).min_by_key(|&j| indexed[j].1.len());
+        let prefilter = narrowest
+            .filter(|&j| match graph {
+                Some(i) => indexed[j].1.len().saturating_mul(PREFILTER_RATIO) <= inner.vecs[i].len(),
+                None => true,
+            })
+            .map(|j| indexed.swap_remove(j));
 
         // Documents read to test the filter, kept for the answer.
         let mut docs: HashMap<String, Json> = HashMap::new();
@@ -2858,10 +2872,8 @@ impl Engine {
                     continue;
                 }
                 let found = match index {
-                    Some(i) => inner.vecs[i].get(&key).map(|(v, n)| query.score(v, n)),
-                    None => {
-                        vector::extract(&doc, &path).filter(|v| v.len() == query.dims()).map(|v| query.score_vec(&v))
-                    }
+                    Some(i) if !inner.vecs[i].quantized() => inner.vecs[i].get(&key).map(|(v, n)| query.score(&v, n)),
+                    _ => vector::extract(&doc, &path).filter(|v| v.len() == query.dims()).map(|v| query.score_vec(&v)),
                 };
                 if let Some(score) = found {
                     scored.push((key.clone(), score));
@@ -2873,56 +2885,108 @@ impl Engine {
             let n = scored.len();
             (vector::top_k(scored, limit, &query), examined, n, false, Some(how))
         } else if let Some(i) = graph {
-            // Searched in the graph, then filtered: when too few of the found
-            // keys pass, the search asks for more, until the graph is exhausted.
             let ef = match (q.ef, inner.vecs[i].ef_search) {
                 (0, 0) => hnsw::DEFAULT_EF_SEARCH,
                 (0, tuned) => tuned,
                 (asked, _) => asked,
             };
-            let mut want = limit;
-            let mut seen: HashMap<String, bool> = HashMap::new();
-            let mut compared = 0;
-            let mut scored = Vec::new();
-            loop {
-                let found = {
-                    let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
-                    let g = inner.vecs[i].graph().expect("graph index");
-                    g.search(&query.vector, want, ef.max(want), live)
+            // A quantized graph orders its vectors nearly as the true ones:
+            // it is asked for more, re-ranked with the documents' vectors.
+            let quantized = inner.vecs[i].quantized();
+            let want = if quantized { limit.saturating_mul(RERANK) } else { limit };
+            let found = if filter.is_empty() {
+                let live = |k: &str| inner.index.get(k).is_some_and(|e| !e.is_expired(now));
+                let g = inner.vecs[i].graph().expect("graph index");
+                g.search(&query.vector, want, ef.max(want), live)
+            } else {
+                // The filter is tested while the graph is walked. The keys
+                // the secondary indexes give make a mask tested without
+                // reading anything; the other conditions read the document,
+                // once per node close enough to count.
+                let mut mask: Option<HashSet<&str>> = None;
+                for (_, keys) in &indexed {
+                    let set: HashSet<&str> = keys.iter().map(String::as_str).collect();
+                    mask = Some(match mask {
+                        None => set,
+                        Some(m) => m.intersection(&set).copied().collect(),
+                    });
+                }
+                let rest: Vec<&(Vec<jsonpath::Seg>, &Cond)> =
+                    filter.iter().filter(|(_, c)| Self::find_index(&inner, c).is_none()).collect();
+                // The index is set aside while the documents are read, and
+                // put back whatever happens.
+                let vi = std::mem::replace(&mut inner.vecs[i], VecIndex::new("", "", Vec::new()));
+                let state = std::cell::RefCell::new((&mut *inner, &mut docs, 0usize, None::<KivaError>));
+                let accept = |key: &str| {
+                    let mut s = state.borrow_mut();
+                    let (inner, docs, read, err) = &mut *s;
+                    if mask.as_ref().is_some_and(|m| !m.contains(key)) {
+                        return false;
+                    }
+                    let Some(e) = inner.live(key, now) else { return false };
+                    if rest.is_empty() {
+                        return true;
+                    }
+                    *read += 1;
+                    match inner.value_of(key, &e) {
+                        Ok(Value::Doc(d)) => {
+                            let ok = rest
+                                .iter()
+                                .all(|(p, c)| jsonpath::get(&d, p).is_some_and(|v| compare_json(v, c.op, &c.value)));
+                            if ok {
+                                docs.insert(key.to_string(), d);
+                            }
+                            ok
+                        }
+                        Ok(_) => false,
+                        Err(x) => {
+                            err.get_or_insert(x);
+                            false
+                        }
+                    }
                 };
-                compared += found.compared;
-                let total = inner.vecs[i].len();
-                for key in found.keys {
-                    if seen.contains_key(&key) {
+                let found = vi.graph().expect("graph index").search_filtered(&query.vector, want, ef.max(want), accept);
+                let (_, _, n, err) = state.into_inner();
+                inner.vecs[i] = vi;
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                read += n;
+                found
+            };
+            let compared = found.compared;
+            let mut scored = Vec::with_capacity(found.keys.len());
+            for key in found.keys {
+                // The document: to re-rank with its full vector, and to
+                // check every condition once more on what is returned.
+                if (quantized || !filter.is_empty()) && !docs.contains_key(&key) {
+                    let Some(e) = inner.live(&key, now) else { continue };
+                    let Value::Doc(d) = inner.value_of(&key, &e)? else { continue };
+                    read += 1;
+                    docs.insert(key.clone(), d);
+                }
+                if let Some(d) = docs.get(&key) {
+                    if !passes(d) {
+                        docs.remove(&key);
                         continue;
                     }
-                    let ok = filter.is_empty() || {
-                        let doc = match inner.live(&key, now) {
-                            Some(e) => Some(inner.value_of(&key, &e)?),
-                            None => None,
-                        };
-                        read += 1;
-                        match doc {
-                            Some(Value::Doc(d)) if passes(&d) => {
-                                docs.insert(key.clone(), d);
-                                true
-                            }
-                            _ => false,
-                        }
-                    };
-                    seen.insert(key.clone(), ok);
-                    if ok {
-                        if let Some((v, n)) = inner.vecs[i].get(&key) {
-                            scored.push((key, query.score(v, n)));
-                        }
-                    }
                 }
-                if filter.is_empty() || scored.len() >= limit || want >= total {
-                    break;
+                let full = quantized
+                    .then(|| docs.get(&key).and_then(|d| vector::extract(d, &path)))
+                    .flatten()
+                    .filter(|v| v.len() == query.dims());
+                let score = match full {
+                    Some(v) => Some(query.score_vec(&v)),
+                    None => inner.vecs[i].get(&key).map(|(v, n)| query.score(&v, n)),
+                };
+                if let Some(score) = score {
+                    scored.push((key, score));
                 }
-                want = want.saturating_mul(4).min(total);
             }
-            let how = (!filter.is_empty()).then(|| format!("tested on the graph's matches, {read} documents read"));
+            let how = (!filter.is_empty()).then(|| {
+                let mask = if indexed.is_empty() { String::new() } else { " and the secondary indexes".to_string() };
+                format!("tested while walking the graph{mask}, {read} documents read")
+            });
             (vector::top_k(scored, limit, &query), compared, compared, true, how)
         } else if let Some(i) = index {
             let scored = {
@@ -3345,6 +3409,9 @@ fn kind_from_json(def: &Json) -> VectorIndexKind {
     }
     if let Some(ef) = def["ef_construction"].as_u64() {
         p.ef_construction = ef as usize;
+    }
+    if let Some(q) = def["quantize"].as_str().and_then(hnsw::Quant::parse) {
+        p.quant = q;
     }
     VectorIndexKind::Hnsw(p)
 }

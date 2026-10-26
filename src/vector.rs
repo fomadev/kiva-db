@@ -17,6 +17,7 @@ use crate::hnsw::{Hnsw, Params};
 use crate::jsonpath::{self, Seg};
 use crate::util::glob_match;
 use serde_json::Value as Json;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Longest vector accepted (OpenAI's largest embeddings have 3072 dimensions).
@@ -291,7 +292,7 @@ impl VecIndex {
             Store::Exact(m) if m.contains_key(key) => 0,
             Store::Exact(_) => exact_cost(key, v.len()),
             // A replaced vector leaves its node behind as a tombstone.
-            Store::Graph(g) if g.get(key).is_some_and(|(old, _)| old == v.as_slice()) => 0,
+            Store::Graph(g) if g.same(key, &v) => 0,
             Store::Graph(g) => g.node_bytes(key.len(), v.len(), 1),
         }
     }
@@ -304,12 +305,18 @@ impl VecIndex {
         }
     }
 
-    /// The vector indexed for `key`, with its norm.
-    pub fn get(&self, key: &str) -> Option<(&[f32], f32)> {
+    /// The vector indexed for `key`, with its norm. A quantized graph gives
+    /// back the vector its codes stand for, close to the document's.
+    pub fn get(&self, key: &str) -> Option<(Cow<'_, [f32]>, f32)> {
         match &self.store {
-            Store::Exact(m) => m.get(key).map(|(v, n)| (v.as_slice(), *n)),
+            Store::Exact(m) => m.get(key).map(|(v, n)| (Cow::Borrowed(v.as_slice()), *n)),
             Store::Graph(g) => g.get(key),
         }
+    }
+
+    /// Whether the index keeps its vectors quantized.
+    pub fn quantized(&self) -> bool {
+        self.graph().is_some_and(Hnsw::quantized)
     }
 
     pub fn clear(&mut self) {
@@ -363,7 +370,7 @@ impl VecIndex {
             // A document changed elsewhere than in its vector keeps its node:
             // replacing it would only leave a tombstone behind.
             Store::Graph(g) => {
-                if g.get(key).is_none_or(|(old, _)| old != v.as_slice()) {
+                if !g.same(key, &v) {
                     g.insert(key, v);
                 }
             }
@@ -378,7 +385,7 @@ impl VecIndex {
                 m.iter().filter(|(k, (v, _))| keep(k, v)).map(|(k, (v, n))| (k.clone(), query.score(v, *n))).collect()
             }
             Store::Graph(g) => {
-                g.iter().filter(|(k, v, _)| keep(k, v)).map(|(k, v, n)| (k.to_string(), query.score(v, n))).collect()
+                g.iter().filter(|(k, v, _)| keep(k, v)).map(|(k, v, n)| (k.to_string(), query.score(&v, n))).collect()
             }
         }
     }

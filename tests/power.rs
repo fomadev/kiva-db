@@ -1789,3 +1789,181 @@ fn query_speed() {
         println!("{name}: {:?} per query", t.elapsed() / runs);
     }
 }
+
+/// Data of the filter and quantization benchmarks: embeddings around 200
+/// topics, `group` (one in five) and `rare` (one in a hundred) to filter on.
+fn bench_corpus(dir: &TempDir) -> (std::sync::Arc<Engine>, Vec<Vec<f32>>) {
+    let n: usize = std::env::var("HNSW_N").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000);
+    let dims: usize = std::env::var("HNSW_DIMS").ok().and_then(|v| v.parse().ok()).unwrap_or(128);
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(0)).unwrap();
+    let centres = random_vectors(200, dims, 8);
+    let noise = random_vectors(n + 50, dims, 5);
+    // HNSW_DATA=uniform spreads them evenly instead, the hardest case.
+    let uniform = std::env::var("HNSW_DATA").is_ok_and(|d| d == "uniform");
+    let around = |i: usize| -> Vec<f32> {
+        if uniform {
+            return noise[i].clone();
+        }
+        centres[i % 200].iter().zip(&noise[i]).map(|(c, x)| 2.0 * c + (x - 0.25) * 0.8).collect()
+    };
+    for i in 0..n {
+        embed(&e, &format!("chunk:{i:07}"), &around(i), json!({ "group": i % 5, "rare": i % 100 == 7 }));
+    }
+    (e, (n..n + 50).map(around).collect())
+}
+
+/// Recall@10 against the exact filtered answer, time and documents read per search.
+fn filtered_run(e: &Engine, queries: &[Vec<f32>], filter: &[kivadb::engine::Cond]) -> (f64, Duration, usize) {
+    let (mut hits, mut read, mut time) = (0, 0, Duration::ZERO);
+    for q in queries {
+        let mut exact = query("chunk:*", q.clone(), Metric::Cosine, 10);
+        exact.exact = true;
+        exact.filter = filter.to_vec();
+        let truth: Vec<String> = e.similar(&exact).unwrap().rows.into_iter().map(|r| r.0).collect();
+        let mut vq = query("chunk:*", q.clone(), Metric::Cosine, 10);
+        vq.filter = filter.to_vec();
+        let t = std::time::Instant::now();
+        let r = e.similar(&vq).unwrap();
+        time += t.elapsed();
+        let how = r.filter.unwrap_or_default();
+        read += how.split(", ").find_map(|p| p.strip_suffix(" documents read")?.parse::<usize>().ok()).unwrap_or(0);
+        hits += r.rows.iter().filter(|row| truth.contains(&row.0)).count();
+    }
+    let n = queries.len();
+    (hits as f64 / (n * 10) as f64, time / n as u32, read / n)
+}
+
+/// Vector search with a filter on other fields, through an HNSW graph.
+/// `cargo test --release --test power hnsw_filter_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn hnsw_filter_speed() {
+    use kivadb::engine::{CmpOp, Cond};
+    let dir = TempDir::new("hnsw_filter_speed");
+    let (e, queries) = bench_corpus(&dir);
+    e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap();
+    let cond = |field: &str, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op: CmpOp::Eq, value };
+    let cases =
+        [("group = 2 (1 in 5)", cond("group", json!(2))), ("rare = true (1 in 100)", cond("rare", json!(true)))];
+    for (name, c) in &cases {
+        let (recall, t, read) = filtered_run(&e, &queries, std::slice::from_ref(c));
+        println!("{name}, no secondary index: recall@10 {recall:.3}, {t:?} per search, {read} documents read");
+    }
+    e.create_index("chunk:*", "group").unwrap();
+    let (recall, t, read) = filtered_run(&e, &queries, std::slice::from_ref(&cases[0].1));
+    println!("group = 2, with an index on group: recall@10 {recall:.3}, {t:?} per search, {read} documents read");
+}
+
+/// Memory and accuracy of a scalar-quantized HNSW graph.
+/// `cargo test --release --test power hnsw_sq8_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn hnsw_sq8_speed() {
+    use kivadb::hnsw::Quant;
+    let dir = TempDir::new("hnsw_sq8_speed");
+    let (e, queries) = bench_corpus(&dir);
+    let only_sq8 = std::env::var("HNSW_ONLY_SQ8").is_ok();
+    for quant in [Quant::None, Quant::Sq8].into_iter().filter(|q| !only_sq8 || *q == Quant::Sq8) {
+        let start = std::time::Instant::now();
+        let kind = VectorIndexKind::Hnsw(HnswParams { quant, ..Default::default() });
+        e.create_vector_index_with("chunk:*", "embedding", kind).unwrap();
+        let built = start.elapsed();
+        let memory = e.list_vector_indexes()[0].memory_bytes;
+        let (recall, t, _) = filtered_run(&e, &queries, &[]);
+        println!(
+            "{}: graph built in {built:?}, {} MB, recall@10 {recall:.3}, {t:?} per search",
+            quant.name(),
+            memory / 1_000_000
+        );
+        e.drop_vector_index("chunk:*", "embedding").unwrap();
+    }
+}
+
+#[test]
+fn quantized_graphs_rank_with_the_full_vectors_and_filters_apply_while_walking() {
+    use kivadb::engine::{CmpOp, Cond};
+    use kivadb::hnsw::Quant;
+    let dir = TempDir::new("hnsw_sq8");
+    let path = dir.path().join("store.kiva");
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    let (n, dims) = (2000, 24);
+    let vectors = random_vectors(n, dims, 17);
+    for (i, v) in vectors.iter().enumerate() {
+        embed(&e, &format!("chunk:{i:05}"), v, json!({ "group": i % 5, "rare": i % 100 == 3 }));
+    }
+    let sq8 = VectorIndexKind::Hnsw(HnswParams { quant: Quant::Sq8, ..Default::default() });
+    e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap();
+    let full_memory = e.list_vector_indexes()[0].memory_bytes;
+    e.drop_vector_index("chunk:*", "embedding").unwrap();
+    e.create_vector_index_with("chunk:*", "embedding", sq8).unwrap();
+    // One byte per number instead of four, and 12 bytes of range per vector.
+    assert_eq!(full_memory - e.list_vector_indexes()[0].memory_bytes, n * (dims * 3 - 12));
+
+    // The scores are those of the documents' vectors: identical to an exact search.
+    let exact_rows = |q: &VectorQuery| {
+        let mut x = q.clone();
+        x.exact = true;
+        e.similar(&x).unwrap()
+    };
+    let q = query("chunk:*", vectors[42].clone(), Metric::Cosine, 5);
+    let (approx, exact) = (e.similar(&q).unwrap(), exact_rows(&q));
+    assert!(approx.approximate && !exact.indexed, "exact reads the documents, not the codes");
+    assert_eq!(approx.rows[0].0, "chunk:00042");
+    for row in &approx.rows {
+        if let Some(t) = exact.rows.iter().find(|r| r.0 == row.0) {
+            assert_eq!(t.1, row.1, "{}", row.0);
+        }
+    }
+    let mut hits = 0;
+    for qv in random_vectors(20, dims, 3) {
+        let q = query("chunk:*", qv, Metric::Cosine, 10);
+        let truth: Vec<String> = exact_rows(&q).rows.into_iter().map(|r| r.0).collect();
+        hits += e.similar(&q).unwrap().rows.iter().filter(|r| truth.contains(&r.0)).count();
+    }
+    assert!(hits >= 180, "recall@10 {hits}/200");
+
+    // Filters are tested while the graph is walked: enough results, all passing.
+    let cond = |field: &str, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op: CmpOp::Eq, value };
+    for c in [cond("group", json!(2)), cond("rare", json!(true))] {
+        let mut q = query("chunk:*", vectors[7].clone(), Metric::Cosine, 10);
+        q.filter = vec![c.clone()];
+        let r = e.similar(&q).unwrap();
+        assert_eq!(r.rows.len(), 10);
+        let path = kivadb::jsonpath::parse_path(&c.field).unwrap();
+        assert!(r.rows.iter().all(|row| kivadb::jsonpath::get(&row.2, &path) == Some(&c.value)));
+        assert!(r.filter.as_deref().unwrap().starts_with("tested while walking the graph,"), "{:?}", r.filter);
+        let truth: Vec<String> = exact_rows(&q).rows.into_iter().map(|r| r.0).collect();
+        assert!(r.rows.iter().filter(|row| truth.contains(&row.0)).count() >= 8, "{c:?}");
+    }
+    // An index on the field gives a mask: no document read to test it.
+    e.create_index("chunk:*", "group").unwrap();
+    let mut q = query("chunk:*", vectors[7].clone(), Metric::Cosine, 10);
+    q.filter = vec![cond("group", json!(2))];
+    let how = e.similar(&q).unwrap().filter.unwrap();
+    assert!(how.starts_with("tested while walking the graph and the secondary indexes"), "{how}");
+
+    // The quantization is kept across a restart, graph file or not.
+    e.close();
+    drop(e);
+    let e = Engine::open(&path, quiet(0)).unwrap();
+    assert_eq!(e.list_vector_indexes()[0].kind, sq8);
+    assert_eq!(e.similar(&query("chunk:*", vectors[42].clone(), Metric::Cosine, 1)).unwrap().rows[0].0, "chunk:00042");
+}
+
+#[test]
+fn quantization_and_filtered_graph_search_from_the_shell() {
+    let dir = TempDir::new("hnsw_sq8_shell");
+    let mut s = Session::new(instance(&dir), true, None);
+    for (i, v) in random_vectors(400, 8, 9).iter().enumerate() {
+        let lang = ["fr", "en"][i % 2];
+        ok(&mut s, &format!("set doc:{i:03} {}", json!({ "embedding": v, "lang": lang })));
+    }
+    let out = ok(&mut s, "create vector index on doc: (embedding) using hnsw quantize sq8");
+    assert!(out.contains("sq8: one byte per number, re-ranked with the documents' vectors"), "{out}");
+    assert!(ok(&mut s, "indexes").contains("ef_search 100, sq8)"));
+    let out = ok(&mut s, r#"get similar doc:*.embedding to doc:004.embedding where lang = "fr" limit 3 return lang"#);
+    assert!(out.starts_with("doc:004: 1.0000"), "{out}");
+    assert_eq!(out.matches(r#"{"lang":"fr"}"#).count(), 3, "{out}");
+    assert!(out.contains("filter tested while walking the graph, "), "{out}");
+    assert!(fails(&mut s, "create vector index on doc: (other) using hnsw quantize pq").contains("sq8 or none"));
+}

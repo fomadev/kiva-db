@@ -1705,6 +1705,7 @@ kiva> get similar doc:*.embedding to [0.12, -0.4, ...] limit 5 return title
 | `m N` | `create` | 16 (2 to 100) | Links per point. More: better results and more memory |
 | `ef N` | `create` | 200 (10 to 2000) | Candidates while building. More: a better graph, built more slowly |
 | `ef_search N` | `create`, `tune` | 100 | Candidates a search keeps when it does not say: the index's own default. `tune` measures it ([12.12](#1212-tuning-an-hnsw-index)) |
+| `quantize sq8\|none` | `create` | `none` | `sq8` keeps one byte per number instead of four ([12.13](#1213-quantization-a-quarter-of-the-memory-for-the-vectors)) |
 | `ef N` | `get similar` | the index's `ef_search` | Candidates while searching, for this search. More: fewer misses, slower |
 | `exact` | `get similar` | | Compare every vector this time, for example to check the results |
 
@@ -1718,7 +1719,7 @@ kiva> get similar img:*.features to [...] limit 10 exact
 * **Restarts.** The graph is saved next to the data (`<file>.graphs`) when the index is created, when KivaDB stops, after a compaction, and from time to time after many changes. At start, KivaDB reads it back and replays only the writes made after it was saved, instead of building the graph again. A missing or damaged file is not an error: the graph is built again from the documents. The format is described in [12.12](#1212-tuning-an-hnsw-index).
 * **When it is used.** A search uses the graph when its pattern is the index's own (`doc:*` for an index on `doc:`) and its metric is the graph's. A narrower pattern (`doc:2026*`) or another metric compares every vector of the index, exactly, as in 12.4.
 * **Building.** Creating the index builds the graph at once, on one processor core, and the workspace waits meanwhile: about 0.6 ms per vector of 128 dimensions with the defaults, more with longer vectors or a higher `ef`. Create it before loading millions of documents, or at a quiet time. Afterwards, each write adds its vector to the graph in about the same time.
-* **Memory.** The vectors (4 bytes per number) plus the links (about `m` × 8 bytes per vector): 1 million vectors of 768 dimensions take about 3.2 GB.
+* **Memory.** The vectors (4 bytes per number) plus the links (about `m` × 8 bytes per vector): 1 million vectors of 768 dimensions take about 3.2 GB, about 1.1 GB with `quantize sq8` ([12.13](#1213-quantization-a-quarter-of-the-memory-for-the-vectors)).
 * `indexes` shows the kind of each index and its settings.
 
 ### 12.6 How fast
@@ -1792,10 +1793,20 @@ doc:1: 0.9938 {"title":"Kinshasa guide"}
 | :--- | :--- | :--- |
 | A secondary index ([11.4](#114-indexes--making-queries-fast)) serves one of the conditions, and leaves few documents | **Pre-filtering**: only the documents that index gives are compared, after the other conditions | Exact, even with HNSW |
 | An exact vector index | **Post-filtering**: the vectors are ranked, then the documents are read closest first until enough pass | Exact |
-| An HNSW index | The graph is searched, the documents it finds are tested, and the search asks for more until enough pass or the graph is exhausted | Approximate |
+| An HNSW index | **Filtered walk**: the condition is tested while the graph is explored. Nodes that fail it are still walked through, but only those that pass fill the list of `ef` best candidates, however rare they are. The conditions a secondary index serves are tested against its keys, without reading anything; the others read the document, once per node close enough to count | Approximate |
 | No vector index | Each document read is tested before its vector is compared | Exact |
 
-With HNSW, "few" means at most a tenth of the graph: a narrower filter is answered faster and exactly by comparing its documents, a broader one by the graph. A filter that few documents pass, without a secondary index on its field, makes an HNSW search explore much of the graph and read many documents: create an index on that field (`create index on doc:* (lang)`).
+With HNSW, "few" means at most a tenth of the graph: a narrower filter is answered faster and exactly by comparing its documents, a broader one by the graph walk.
+
+**Give the filtered fields a secondary index.** In a filtered walk, a condition without an index reads a document for each node it tests; with one, it reads none. Measured on 100 000 vectors of 128 dimensions grouped around 200 topics, each topic entirely in one group (the hard case: the closest vectors all fail the filter), 50 queries, release build:
+
+| Filter | Before (search, then filter, then search again for more) | Filtered walk |
+| :--- | :--- | :--- |
+| One document in five, no index | 95.2 % of the true 10 closest, 41 ms, 1 397 documents read | 96.4 %, 54 ms, 2 087 documents read |
+| One in a hundred, no index | 96.6 %, 640 ms | 99.8 %, 707 ms |
+| One in five, **index on the field** | 95.2 %, 48 ms, 1 397 documents read | 96.4 %, **8.8 ms, 10 documents read** |
+
+Without an index, the walk finds more of the true closest vectors but reads more documents. With an index, it reads only the documents it returns. The test `hnsw_filter_speed` in `tests/power.rs` repeats the measurement.
 
 From programs: `"filter"` in the structured request ([12.7](#127-from-programs)), `FILTER <field> <op> <value>` (repeatable) in `KIVA.SIMILAR` ([23.10](#2310-vector-search-and-the-semantic-cache-from-a-redis-client)).
 
@@ -1825,7 +1836,7 @@ Vector indexes live in memory only. So that they cannot exhaust the machine's RA
 KivaDB's vector search is that of a database that also holds the documents, not of a dedicated vector engine. Its limits are deliberate:
 
 * **Embeddings come from your application.** KivaDB stores and compares the vectors it is given, as arrays of numbers; it never calls a model. Text sent where a vector is expected is refused with `KivaDB does not compute embeddings: ...`, in the shell, the structured requests and `KIVA.SIMILAR`. Compute vectors with your model (OpenAI, Mistral, Ollama, sentence-transformers...) and store them in a field of the document. One index holds vectors of one length: those of one model.
-* **In memory, on one machine.** The vectors of an index, exact or HNSW, are in RAM: the graph is saved to disk to start faster, but searched in memory. There is no on-disk index and no compression of the vectors (product or scalar quantization). A workspace is not split across machines (no sharding): replicas hold full copies, for reading and failover ([Chapter 25](#chapter-25--replication)). The collection must fit in the RAM of one machine: about 4 bytes per number, plus the graph links ([12.5](#125-approximate-index-hnsw-for-large-collections)), within `vector.max_ram_mb`.
+* **In memory, on one machine.** The vectors of an index, exact or HNSW, are in RAM: the graph is saved to disk to start faster, but searched in memory. `quantize sq8` keeps one byte per number instead of four ([12.13](#1213-quantization-a-quarter-of-the-memory-for-the-vectors)); there is no product quantization, and no graph searched from disk (DiskANN). A workspace is not split across machines (no sharding): replicas hold full copies, for reading and failover ([Chapter 25](#chapter-25--replication)). The collection must fit in the RAM of one machine: about 4 bytes per number, plus the graph links ([12.5](#125-approximate-index-hnsw-for-large-collections)), within `vector.max_ram_mb`.
 * **Simple filters.** Conditions joined by `and` ([12.9](#129-filtering-on-other-fields)); no `or`, no full-text search, no hybrid search mixing keyword and dense vectors.
 
 As a rule of thumb, up to a few million vectors of a few hundred dimensions, on one machine, with filters on a few fields, KivaDB covers the need without a second system. Beyond, or for hybrid search, a dedicated vector engine is the right tool, and KivaDB can keep the documents.
@@ -1877,6 +1888,33 @@ Kept ef_search 40 for chunk:* (embedding): the smallest that finds 95 % of the t
 | End | A CRC32 checksum of everything before it |
 
 It is written to `<file>.graphs.tmp`, synced to disk, then renamed, so a crash leaves either the old file or the new one, never half of one. At start, a file that belongs to another data file, reflects a point the log no longer reaches, fails its checksum, or holds a link to a node that does not exist, is ignored and the graph is built again; one that is valid is brought up to date by replaying only the writes made after it. With encryption at rest, the file is encrypted with the data ([16.12](#1612-encryption-at-rest)). The index settings themselves (`m`, `ef`, `ef_search`) live in `<file>.meta`.
+
+### 12.13 Quantization: a quarter of the memory for the vectors
+
+An HNSW index keeps every vector in memory, 4 bytes per number. With `quantize sq8` (*scalar quantization, 8 bits*), it keeps one byte per number:
+
+```text
+kiva> create vector index on doc: (embedding) using hnsw quantize sq8
+HNSW vector index created on doc:* (embedding): 250000 vectors in a graph (cosine, m 16, ef 200, sq8: one byte per number, re-ranked with the documents' vectors).
+```
+
+* **How.** Each vector is stored as its smallest and largest number and, for each number, its place between the two on a scale of 256 steps. The graph computes its distances on those bytes directly. They are close to the true distances, not equal.
+* **The true order.** A search asks the graph for twice the results wanted, reads their documents, and orders them with the full vectors, which stay on disk in the documents. The scores returned are therefore the exact ones, as with `exact`, and a search reads twice as many documents.
+* **`exact`** compares the full vectors of every document, read from disk, not the bytes kept in memory. It is slower than an exact search on an index without quantization.
+* **Saved** with the index (`.meta`), in the graphs file, and across restarts.
+
+Measured on 100 000 vectors of 128 dimensions, 50 queries, release build:
+
+| Vectors | Index | Memory | True 10 closest found | Per search |
+| :--- | :--- | :--- | :--- | :--- |
+| Grouped around topics | full (4 bytes) | 81 MB | 100 % | 0.79 ms |
+| Grouped around topics | `sq8` | 44 MB | 100 % | 0.85 ms |
+| Spread evenly (hardest case) | full | 81 MB | 29.2 % | 1.48 ms |
+| Spread evenly | `sq8` | 44 MB | 30.4 % | 2.25 ms |
+
+At 128 dimensions, the links of the graph weigh as much as the vectors. With 768 dimensions the vectors dominate: 1 million of them take about 3.2 GB in full, about 1.1 GB with `sq8`. On evenly spread vectors, quantization loses nothing: the misses come from the graph, and `ef` or `tune` fix them ([12.12](#1212-tuning-an-hnsw-index)). The test `hnsw_sq8_speed` in `tests/power.rs` repeats the measurement.
+
+**Not offered:** product quantization (PQ), which shrinks vectors 10 to 30 times further but needs codebooks trained on the data, retrained as it changes, and loses more accuracy. Nor graphs searched from disk (DiskANN), which need another kind of graph and fast SSDs. With `sq8`, the bytes in memory serve the graph walk, and the full vectors on disk serve the final order.
 
 ## Chapter 13 — Transactions
 
@@ -4839,7 +4877,7 @@ KivaDB 1.5.1 keeps the whole database on each node, with replicas and automatic 
 
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
-* **Vector indexes on disk, and dedicated vector engine features.** Vector indexes, exact or HNSW, live in memory, bounded by `vector.max_ram_mb`: the vectors must fit in the RAM of one machine. No vector quantization, no hybrid (keyword and vector) search, filters joined by `and` only, embeddings computed by the application ([12.10, 12.11](#1210-memory-bounds)).
+* **Vector indexes on disk, and dedicated vector engine features.** Vector indexes, exact or HNSW, live in memory, bounded by `vector.max_ram_mb`: the vectors must fit in the RAM of one machine. 8-bit quantization only (no product quantization), no graph searched from disk, no hybrid (keyword and vector) search, filters joined by `and` only, embeddings computed by the application ([12.10, 12.11](#1210-memory-bounds)).
 * **The full Redis command set**: streams, blocking commands, sharded publish/subscribe and `WATCH` are missing (refused with a clear error), sets and sorted sets are meant for thousands of members per key, not millions (bounded by `resp.max_collection_members`), and expiry times are kept to the second ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).

@@ -111,11 +111,16 @@ impl Session {
                     let kind = match v.kind {
                         VectorIndexKind::Exact => "vector index".to_string(),
                         VectorIndexKind::Hnsw(p) => format!(
-                            "HNSW vector index ({}, m {}, ef {}, ef_search {})",
+                            "HNSW vector index ({}, m {}, ef {}, ef_search {}{})",
                             p.metric.name(),
                             p.m,
                             p.ef_construction,
-                            v.ef_search
+                            v.ef_search,
+                            if p.quant == crate::hnsw::Quant::None {
+                                String::new()
+                            } else {
+                                format!(", {}", p.quant.name())
+                            }
                         ),
                     };
                     out.say(format!(
@@ -212,7 +217,7 @@ impl Session {
             Ok(())
         } else if c.eat("vector") {
             const USAGE: &str =
-                "create vector index on <pattern> (<field>) [using hnsw [metric cosine|dot|l2] [m N] [ef N] [ef_search N]]";
+                "create vector index on <pattern> (<field>) [using hnsw [metric cosine|dot|l2] [m N] [ef N] [ef_search N] [quantize sq8|none]]";
             if !c.eat("index") {
                 return Err(format!("Usage: {USAGE}"));
             }
@@ -228,7 +233,10 @@ impl Session {
                         ef_search = parse_ef_search(c.next())?;
                         continue;
                     }
-                    if c.eat("metric") {
+                    if c.eat("quantize") {
+                        let q = word(c.next(), "sq8 or none")?;
+                        p.quant = crate::hnsw::Quant::parse(&q).ok_or("quantize takes sq8 or none")?;
+                    } else if c.eat("metric") {
                         let m = word(c.next(), "a metric")?;
                         p.metric = crate::vector::Metric::parse(&m).ok_or("metric must be cosine, dot or l2")?;
                     } else if c.eat("m") {
@@ -259,10 +267,14 @@ impl Session {
                     out.say(format!("Vector index created on {pattern} ({field}): {n} vectors in memory."))
                 }
                 VectorIndexKind::Hnsw(p) => out.say(format!(
-                    "HNSW vector index created on {pattern} ({field}): {n} vectors in a graph ({}, m {}, ef {}).",
+                    "HNSW vector index created on {pattern} ({field}): {n} vectors in a graph ({}, m {}, ef {}{}).",
                     p.metric.name(),
                     p.m,
-                    p.ef_construction
+                    p.ef_construction,
+                    match p.quant {
+                        crate::hnsw::Quant::None => String::new(),
+                        q => format!(", {}: one byte per number, re-ranked with the documents' vectors", q.name()),
+                    }
                 )),
             }
             Ok(())

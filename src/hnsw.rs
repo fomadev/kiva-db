@@ -16,8 +16,22 @@
 //! A deleted or replaced vector stays in the graph as a tombstone, still used
 //! to navigate but never returned. When tombstones reach a third of the nodes,
 //! the graph is rebuilt from the live vectors.
+//!
+//! **Scalar quantization** ([`Quant::Sq8`]): each vector is kept as one byte
+//! per dimension, `lo + step * code` with `lo` and `step` from the vector's
+//! own minimum and maximum, a quarter of the memory of 32-bit numbers. The
+//! distances are computed on the codes directly; they are close to the true
+//! ones, not equal, so the engine re-ranks what the graph finds with the full
+//! vectors of the documents, on disk.
+//!
+//! **Filtered search** ([`Hnsw::search_filtered`]): a condition on the
+//! documents is tested while the graph is explored. Nodes that fail it are
+//! still walked through, so the graph stays connected, but only those that
+//! pass fill the list of best candidates; the search ends with `ef` of them,
+//! however rare they are, instead of filtering a list found without them.
 
 use crate::vector::{dot, l2_squared, norm, Metric};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
@@ -32,23 +46,156 @@ pub const DEFAULT_EF_SEARCH: usize = 100;
 const MAX_LEVEL: usize = 16;
 const NONE: u32 = u32::MAX;
 
+/// How the graph keeps its vectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Quant {
+    /// 32-bit numbers, as given.
+    #[default]
+    None,
+    /// One byte per dimension: a quarter of the memory.
+    Sq8,
+}
+
+impl Quant {
+    pub fn parse(s: &str) -> Option<Quant> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" | "f32" => Some(Quant::None),
+            "sq8" | "int8" => Some(Quant::Sq8),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Quant::None => "none",
+            Quant::Sq8 => "sq8",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Params {
     /// The metric the graph is built for; searches with it use the graph.
     pub metric: Metric,
     pub m: usize,
     pub ef_construction: usize,
+    pub quant: Quant,
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Params { metric: Metric::Cosine, m: DEFAULT_M, ef_construction: DEFAULT_EF_CONSTRUCTION }
+        Params { metric: Metric::Cosine, m: DEFAULT_M, ef_construction: DEFAULT_EF_CONSTRUCTION, quant: Quant::None }
+    }
+}
+
+/// A vector quantized to one byte per dimension: `x[i] ~ lo + step * codes[i]`.
+#[derive(Clone, Debug)]
+struct Sq8 {
+    codes: Vec<u8>,
+    lo: f32,
+    step: f32,
+    /// Sum of the codes, for the dot products.
+    sum: u32,
+}
+
+impl Sq8 {
+    fn encode(v: &[f32]) -> Sq8 {
+        let lo = v.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let step = if hi > lo { (hi - lo) / 255.0 } else { 0.0 };
+        let codes: Vec<u8> =
+            v.iter().map(|x| if step > 0.0 { ((x - lo) / step).round().clamp(0.0, 255.0) as u8 } else { 0 }).collect();
+        Sq8::from_codes(codes, lo, step)
+    }
+
+    fn from_codes(codes: Vec<u8>, lo: f32, step: f32) -> Sq8 {
+        let sum = codes.iter().map(|&c| c as u32).sum();
+        Sq8 { codes, lo, step, sum }
+    }
+
+    fn decode(&self) -> Vec<f32> {
+        self.codes.iter().map(|&c| self.lo + self.step * c as f32).collect()
+    }
+
+    /// Dot product with a full vector whose sum is `qsum`.
+    fn dot_full(&self, q: &[f32], qsum: f32) -> f32 {
+        let qc: f32 = q.iter().zip(&self.codes).map(|(x, &c)| x * c as f32).sum();
+        self.lo * qsum + self.step * qc
+    }
+
+    /// Dot product with another quantized vector, from the integer dot
+    /// product of the codes.
+    fn dot(&self, o: &Sq8) -> f32 {
+        let cc: u32 = self.codes.iter().zip(&o.codes).map(|(&a, &b)| a as u32 * b as u32).sum();
+        let n = self.codes.len() as f32;
+        n * self.lo * o.lo
+            + self.lo * o.step * o.sum as f32
+            + o.lo * self.step * self.sum as f32
+            + self.step * o.step * cc as f32
+    }
+}
+
+#[derive(Clone, Debug)]
+enum Stored {
+    Full(Vec<f32>),
+    Sq8(Sq8),
+}
+
+impl Stored {
+    fn new(v: Vec<f32>, quant: Quant) -> Stored {
+        match quant {
+            Quant::None => Stored::Full(v),
+            Quant::Sq8 => Stored::Sq8(Sq8::encode(&v)),
+        }
+    }
+
+    fn dims(&self) -> usize {
+        match self {
+            Stored::Full(v) => v.len(),
+            Stored::Sq8(s) => s.codes.len(),
+        }
+    }
+
+    fn vector(&self) -> Cow<'_, [f32]> {
+        match self {
+            Stored::Full(v) => Cow::Borrowed(v),
+            Stored::Sq8(s) => Cow::Owned(s.decode()),
+        }
+    }
+}
+
+/// A graph distance from a dot product and the two norms.
+fn from_dot(metric: Metric, dot: f32, an: f32, bn: f32) -> f32 {
+    match metric {
+        Metric::Cosine => {
+            let d = an * bn;
+            if d == 0.0 {
+                1.0
+            } else {
+                1.0 - dot / d
+            }
+        }
+        Metric::Dot => -dot,
+        Metric::L2 => (an * an + bn * bn - 2.0 * dot).max(0.0),
+    }
+}
+
+/// What a search compares the nodes with.
+struct Probe<'a> {
+    q: &'a [f32],
+    norm: f32,
+    sum: f32,
+}
+
+impl<'a> Probe<'a> {
+    fn new(q: &'a [f32]) -> Probe<'a> {
+        Probe { q, norm: norm(q), sum: q.iter().sum() }
     }
 }
 
 struct Node {
     key: String,
-    vector: Vec<f32>,
+    vector: Stored,
     norm: f32,
     /// Neighbours on each layer the node belongs to, bottom first.
     links: Vec<Vec<u32>>,
@@ -185,7 +332,17 @@ impl Hnsw {
     /// What a node of `levels` layers and its entry in the key map cost.
     pub fn node_bytes(&self, key: usize, dims: usize, levels: usize) -> usize {
         let links: usize = (0..levels).map(|l| self.max_links(l) * 4 + 24).sum();
-        key + dims * 4 + links + 80 + key + 40
+        let vector = match self.params.quant {
+            Quant::None => dims * 4,
+            Quant::Sq8 => dims + 12,
+        };
+        key + vector + links + 80 + key + 40
+    }
+
+    /// Whether the vectors are kept quantized, so their distances are close
+    /// to the true ones but not equal.
+    pub fn quantized(&self) -> bool {
+        self.params.quant != Quant::None
     }
 
     pub fn clear(&mut self) {
@@ -193,15 +350,29 @@ impl Hnsw {
         self.changes = 1;
     }
 
-    /// The vector stored for `key`, with its norm.
-    pub fn get(&self, key: &str) -> Option<(&[f32], f32)> {
+    /// The vector stored for `key`, with its norm; with quantization, the
+    /// vector the codes stand for.
+    pub fn get(&self, key: &str) -> Option<(Cow<'_, [f32]>, f32)> {
         let n = &self.nodes[*self.ids.get(key)? as usize];
-        Some((&n.vector, n.norm))
+        Some((n.vector.vector(), n.norm))
+    }
+
+    /// Whether `key` holds what `vector` would be stored as: then writing
+    /// it again changes nothing.
+    pub fn same(&self, key: &str, vector: &[f32]) -> bool {
+        let Some(&id) = self.ids.get(key) else { return false };
+        match &self.nodes[id as usize].vector {
+            Stored::Full(v) => v == vector,
+            Stored::Sq8(s) => {
+                let q = Sq8::encode(vector);
+                q.codes == s.codes && q.lo == s.lo && q.step == s.step
+            }
+        }
     }
 
     /// Every live vector.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &[f32], f32)> {
-        self.nodes.iter().filter(|n| !n.deleted).map(|n| (n.key.as_str(), n.vector.as_slice(), n.norm))
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Cow<'_, [f32]>, f32)> {
+        self.nodes.iter().filter(|n| !n.deleted).map(|n| (n.key.as_str(), n.vector.vector(), n.norm))
     }
 
     pub fn remove(&mut self, key: &str) {
@@ -221,8 +392,11 @@ impl Hnsw {
 
     /// Builds the graph again from the live vectors only.
     pub fn rebuild(&mut self) {
-        let live: Vec<(String, Vec<f32>)> =
-            std::mem::take(&mut self.nodes).into_iter().filter(|n| !n.deleted).map(|n| (n.key, n.vector)).collect();
+        let live: Vec<(String, Vec<f32>)> = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .filter(|n| !n.deleted)
+            .map(|n| (n.key, n.vector.vector().into_owned()))
+            .collect();
         *self = Hnsw { rng: self.rng, ..Hnsw::new(self.params) };
         for (k, v) in live {
             self.insert(&k, v);
@@ -230,14 +404,21 @@ impl Hnsw {
         self.changes = self.changes.max(1);
     }
 
-    fn dist_to(&self, q: &[f32], qn: f32, id: u32) -> f32 {
+    fn dist_to(&self, p: &Probe, id: u32) -> f32 {
         let n = &self.nodes[id as usize];
-        distance(self.params.metric, q, qn, &n.vector, n.norm)
+        match &n.vector {
+            Stored::Full(v) => distance(self.params.metric, p.q, p.norm, v, n.norm),
+            Stored::Sq8(s) => from_dot(self.params.metric, s.dot_full(p.q, p.sum), p.norm, n.norm),
+        }
     }
 
     fn dist_nodes(&self, a: u32, b: u32) -> f32 {
-        let n = &self.nodes[a as usize];
-        self.dist_to(&n.vector, n.norm, b)
+        let (na, nb) = (&self.nodes[a as usize], &self.nodes[b as usize]);
+        match (&na.vector, &nb.vector) {
+            (Stored::Full(x), Stored::Full(y)) => distance(self.params.metric, x, na.norm, y, nb.norm),
+            (Stored::Sq8(x), Stored::Sq8(y)) => from_dot(self.params.metric, x.dot(y), na.norm, nb.norm),
+            (x, y) => distance(self.params.metric, &x.vector(), na.norm, &y.vector(), nb.norm),
+        }
     }
 
     /// A layer drawn so that each one holds about 1/M of the one below.
@@ -285,13 +466,29 @@ impl Hnsw {
         dist: &impl Fn(u32) -> f32,
         count: &mut usize,
     ) -> Vec<Near> {
+        self.search_layer_with(entry, ef, level, dist, None, count)
+    }
+
+    /// [`Hnsw::search_layer`], keeping among the best only the nodes
+    /// `allow` lets through; the others are still walked through. `allow`
+    /// is asked once per node, and only for a node close enough to count.
+    fn search_layer_with(
+        &self,
+        entry: &[Near],
+        ef: usize,
+        level: usize,
+        dist: &impl Fn(u32) -> f32,
+        allow: Option<&dyn Fn(u32) -> bool>,
+        count: &mut usize,
+    ) -> Vec<Near> {
+        let allowed = |id: u32| allow.is_none_or(|f| f(id));
         let mut visits = self.visits.borrow_mut();
         visits.start(self.nodes.len());
         for n in entry {
             visits.first(n.id);
         }
         let mut candidates: BinaryHeap<Reverse<Near>> = entry.iter().map(|n| Reverse(*n)).collect();
-        let mut best: BinaryHeap<Near> = entry.iter().copied().collect();
+        let mut best: BinaryHeap<Near> = entry.iter().copied().filter(|n| allowed(n.id)).collect();
         while let Some(Reverse(c)) = candidates.pop() {
             if best.len() >= ef && best.peek().is_some_and(|w| c.dist > w.dist) {
                 break;
@@ -309,9 +506,11 @@ impl Hnsw {
                 if best.len() < ef || best.peek().is_some_and(|w| d < w.dist) {
                     let near = Near { dist: d, id: n };
                     candidates.push(Reverse(near));
-                    best.push(near);
-                    if best.len() > ef {
-                        best.pop();
+                    if allowed(n) {
+                        best.push(near);
+                        if best.len() > ef {
+                            best.pop();
+                        }
                     }
                 }
             }
@@ -369,8 +568,9 @@ impl Hnsw {
         self.remove(key);
         let level = self.random_level();
         let id = self.nodes.len() as u32;
-        let vn = norm(&vector);
         self.bytes += self.node_bytes(key.len(), vector.len(), level + 1);
+        let vector = Stored::new(vector, self.params.quant);
+        let vn = norm(&vector.vector());
         self.nodes.push(Node {
             key: key.to_string(),
             vector,
@@ -429,9 +629,9 @@ impl Hnsw {
         if self.entry == NONE || k == 0 {
             return Found { keys: Vec::new(), compared: 0 };
         }
-        let qn = norm(query);
+        let probe = Probe::new(query);
         let hidden = hidden.and_then(|k| self.ids.get(k).copied()).filter(|&h| h != self.entry);
-        let dist = |o: u32| if Some(o) == hidden { f32::INFINITY } else { self.dist_to(query, qn, o) };
+        let dist = |o: u32| if Some(o) == hidden { f32::INFINITY } else { self.dist_to(&probe, o) };
         let mut compared = 1;
         let mut cur = Near { dist: dist(self.entry), id: self.entry };
         for l in (1..=self.max_level).rev() {
@@ -455,6 +655,31 @@ impl Hnsw {
         }
     }
 
+    /// The `k` closest keys among those `accept` lets through, tested while
+    /// the bottom layer is explored: the search ends with `ef` (at least
+    /// `k`) accepted candidates, or once every node it can reach was seen.
+    /// `accept` is asked at most once per node, only for nodes close enough
+    /// to be among the best; a rare condition makes the search walk further.
+    pub fn search_filtered(&self, query: &[f32], k: usize, ef: usize, accept: impl Fn(&str) -> bool) -> Found {
+        if self.entry == NONE || k == 0 {
+            return Found { keys: Vec::new(), compared: 0 };
+        }
+        let probe = Probe::new(query);
+        let dist = |o: u32| self.dist_to(&probe, o);
+        let mut compared = 1;
+        let mut cur = Near { dist: dist(self.entry), id: self.entry };
+        for l in (1..=self.max_level).rev() {
+            cur = self.greedy(cur, l, &dist, &mut compared);
+        }
+        let allow = |id: u32| {
+            let n = &self.nodes[id as usize];
+            !n.deleted && accept(&n.key)
+        };
+        let found = self.search_layer_with(&[cur], ef.max(k), 0, &dist, Some(&allow), &mut compared);
+        let keys = found.iter().take(k).map(|n| self.nodes[n.id as usize].key.clone()).collect();
+        Found { keys, compared }
+    }
+
     // -- persistence --------------------------------------------------------
 
     /// Appends the graph to `out` (little-endian, read back by [`Hnsw::read`]).
@@ -464,7 +689,12 @@ impl Hnsw {
             Metric::Dot => 1,
             Metric::L2 => 2,
         };
-        out.push(metric);
+        // The quantization in the high bits: 0 in files written before it.
+        let quant = match self.params.quant {
+            Quant::None => 0u8,
+            Quant::Sq8 => 1,
+        };
+        out.push(metric | (quant << 4));
         put_u32(out, self.params.m as u32);
         put_u32(out, self.params.ef_construction as u32);
         put_u32(out, self.entry);
@@ -474,9 +704,18 @@ impl Hnsw {
         for n in &self.nodes {
             put_bytes(out, n.key.as_bytes());
             out.push(n.deleted as u8);
-            put_u32(out, n.vector.len() as u32);
-            for x in &n.vector {
-                out.extend_from_slice(&x.to_le_bytes());
+            put_u32(out, n.vector.dims() as u32);
+            match &n.vector {
+                Stored::Full(v) => {
+                    for x in v {
+                        out.extend_from_slice(&x.to_le_bytes());
+                    }
+                }
+                Stored::Sq8(s) => {
+                    out.extend_from_slice(&s.lo.to_le_bytes());
+                    out.extend_from_slice(&s.step.to_le_bytes());
+                    out.extend_from_slice(&s.codes);
+                }
             }
             out.push(n.links.len() as u8);
             for l in &n.links {
@@ -490,13 +729,19 @@ impl Hnsw {
 
     /// Reads a graph written by [`Hnsw::write`]; `None` if it is malformed.
     pub fn read(r: &mut Reader) -> Option<Hnsw> {
-        let metric = match r.u8()? {
+        let flags = r.u8()?;
+        let metric = match flags & 0x0f {
             0 => Metric::Cosine,
             1 => Metric::Dot,
             2 => Metric::L2,
             _ => return None,
         };
-        let params = Params { metric, m: r.u32()? as usize, ef_construction: r.u32()? as usize };
+        let quant = match flags >> 4 {
+            0 => Quant::None,
+            1 => Quant::Sq8,
+            _ => return None,
+        };
+        let params = Params { metric, m: r.u32()? as usize, ef_construction: r.u32()? as usize, quant };
         let entry = r.u32()?;
         let max_level = r.u32()? as usize;
         let rng = r.u64()?;
@@ -507,10 +752,20 @@ impl Hnsw {
             let key = String::from_utf8(r.bytes()?.to_vec()).ok()?;
             let deleted = r.u8()? != 0;
             let dims = r.u32()? as usize;
-            let mut vector = Vec::with_capacity(dims);
-            for _ in 0..dims {
-                vector.push(f32::from_le_bytes(r.take(4)?.try_into().ok()?));
-            }
+            let f32_at = |r: &mut Reader| r.take(4).and_then(|b| b.try_into().ok()).map(f32::from_le_bytes);
+            let vector = match quant {
+                Quant::None => {
+                    let mut v = Vec::with_capacity(dims.min(crate::vector::MAX_DIMS));
+                    for _ in 0..dims {
+                        v.push(f32_at(r)?);
+                    }
+                    Stored::Full(v)
+                }
+                Quant::Sq8 => {
+                    let (lo, step) = (f32_at(r)?, f32_at(r)?);
+                    Stored::Sq8(Sq8::from_codes(r.take(dims)?.to_vec(), lo, step))
+                }
+            };
             let levels = r.u8()? as usize;
             let mut links = Vec::with_capacity(levels);
             for _ in 0..levels {
@@ -526,14 +781,14 @@ impl Hnsw {
                 links.push(l);
             }
             let id = g.nodes.len() as u32;
-            g.bytes += g.node_bytes(key.len(), vector.len(), links.len());
+            g.bytes += g.node_bytes(key.len(), vector.dims(), links.len());
             if deleted {
                 g.bytes -= key.len() + 40;
                 g.deleted += 1;
             } else {
                 g.ids.insert(key.clone(), id);
             }
-            g.nodes.push(Node { norm: norm(&vector), key, vector, links, deleted });
+            g.nodes.push(Node { norm: norm(&vector.vector()), key, vector, links, deleted });
         }
         let valid_entry = if count == 0 { entry == NONE } else { (entry as usize) < count };
         if !valid_entry || (count > 0 && g.nodes[entry as usize].links.len() != max_level + 1) {
@@ -542,7 +797,7 @@ impl Hnsw {
         // A link on a layer must lead to a node that has that layer, or a
         // search would index past its links.
         let consistent = g.nodes.iter().all(|n| {
-            n.vector.len() == g.nodes[0].vector.len()
+            n.vector.dims() == g.nodes[0].vector.dims()
                 && n.links.iter().enumerate().all(|(l, ids)| ids.iter().all(|&id| g.nodes[id as usize].links.len() > l))
         });
         consistent.then_some(g)
@@ -681,7 +936,7 @@ mod tests {
     #[test]
     fn survives_a_round_trip_to_bytes() {
         let vectors = random_vectors(300, 8, 5);
-        let mut g = Hnsw::new(Params { metric: Metric::L2, m: 8, ef_construction: 64 });
+        let mut g = Hnsw::new(Params { metric: Metric::L2, m: 8, ef_construction: 64, ..Params::default() });
         for (i, v) in vectors.iter().enumerate() {
             g.insert(&format!("v{i}"), v.clone());
         }
@@ -696,5 +951,90 @@ mod tests {
         }
         assert!(Hnsw::read(&mut Reader::new(&buf[..buf.len() / 2])).is_none());
         assert!(Hnsw::read(&mut Reader::new(&[])).is_none());
+    }
+
+    #[test]
+    fn scalar_quantization_keeps_distances_close_with_a_byte_per_number() {
+        let v = vec![-1.0, 0.0, 0.5, 2.0];
+        let q = Sq8::encode(&v);
+        assert_eq!((q.codes[0], q.codes[3]), (0, 255));
+        for (a, b) in q.decode().iter().zip(&v) {
+            assert!((a - b).abs() <= 3.0 / 255.0 / 2.0 + 1e-6, "{a} vs {b}");
+        }
+        // Dot products on the codes match those of the decoded vectors.
+        let w = Sq8::encode(&[0.3, -0.7, 0.1, 0.9]);
+        let (dv, dw) = (q.decode(), w.decode());
+        assert!((q.dot(&w) - dot(&dv, &dw)).abs() < 1e-4);
+        let probe = [0.2f32, 0.4, -0.1, 0.8];
+        assert!((q.dot_full(&probe, probe.iter().sum()) - dot(&probe, &dv)).abs() < 1e-4);
+        // A constant vector has no spread: every code is 0.
+        assert_eq!(Sq8::encode(&[0.5, 0.5]).decode(), [0.5, 0.5]);
+        // Decoding then encoding again gives the same codes.
+        let again = Sq8::encode(&q.decode());
+        assert_eq!((again.codes, again.lo, again.step), (q.codes.clone(), q.lo, q.step));
+
+        let vectors = random_vectors(2000, 32, 11);
+        for metric in [Metric::Cosine, Metric::L2, Metric::Dot] {
+            let full = Params { metric, ..Params::default() };
+            let (mut f, mut s) = (Hnsw::new(full), Hnsw::new(Params { quant: Quant::Sq8, ..full }));
+            for (i, v) in vectors.iter().enumerate() {
+                f.insert(&format!("v{i}"), v.clone());
+                s.insert(&format!("v{i}"), v.clone());
+            }
+            // Each vector takes one byte per number, and 12 for its range.
+            assert_eq!(f.memory_bytes() - s.memory_bytes(), vectors.len() * (32 * 3 - 12));
+            // Among 40 candidates, the true 10 closest are nearly all there.
+            let queries = random_vectors(30, 32, 5);
+            let mut hits = 0;
+            for q in &queries {
+                let truth = exact(&vectors, q, 10, metric);
+                let found = s.search(q, 40, DEFAULT_EF_SEARCH, |_| true);
+                hits += truth.iter().filter(|k| found.keys.contains(k)).count();
+            }
+            let r = hits as f64 / 300.0;
+            assert!(r >= 0.9, "{metric:?}: {r}");
+            assert!(s.same("v3", &vectors[3]) && !s.same("v3", &vectors[4]));
+            let mut buf = Vec::new();
+            s.write(&mut buf);
+            let back = Hnsw::read(&mut Reader::new(&buf)).unwrap();
+            assert_eq!(back.params.quant, Quant::Sq8);
+            assert_eq!(back.memory_bytes(), s.memory_bytes());
+            assert_eq!(back.search(&queries[0], 5, 40, |_| true).keys, s.search(&queries[0], 5, 40, |_| true).keys);
+        }
+    }
+
+    #[test]
+    fn a_filtered_search_fills_its_list_with_nodes_that_pass() {
+        let vectors = random_vectors(3000, 16, 21);
+        let mut g = Hnsw::new(Params::default());
+        for (i, v) in vectors.iter().enumerate() {
+            g.insert(&format!("v{i}"), v.clone());
+        }
+        // One vector in fifty passes.
+        let rare = |k: &str| k[1..].parse::<usize>().unwrap() % 50 == 0;
+        let kept: Vec<Vec<f32>> = vectors.iter().step_by(50).cloned().collect();
+        let asked = std::cell::Cell::new(0);
+        let mut hits = 0;
+        for q in &random_vectors(20, 16, 8) {
+            // The truth, named like the graph's keys.
+            let truth: Vec<String> = exact(&kept, q, 10, Metric::Cosine)
+                .iter()
+                .map(|k| format!("v{}", k[1..].parse::<usize>().unwrap() * 50))
+                .collect();
+            let found = g.search_filtered(q, 10, 64, |k| {
+                asked.set(asked.get() + 1);
+                rare(k)
+            });
+            assert!(found.keys.iter().all(|k| rare(k)));
+            assert_eq!(found.keys.len(), 10);
+            hits += truth.iter().filter(|k| found.keys.contains(k)).count();
+        }
+        assert!(hits as f64 / 200.0 >= 0.9, "recall {}", hits as f64 / 200.0);
+        // The condition is asked once per node at most.
+        assert!(asked.get() <= 20 * 3000);
+        // Deleted nodes never come back, and an impossible filter finds nothing.
+        g.remove("v0");
+        assert!(!g.search_filtered(&vectors[0], 5, 32, rare).keys.contains(&"v0".to_string()));
+        assert!(g.search_filtered(&vectors[0], 5, 32, |_| false).keys.is_empty());
     }
 }
