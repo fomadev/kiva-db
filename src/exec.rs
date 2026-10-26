@@ -669,7 +669,7 @@ const HELP: &str = r#"
   get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
-  tune vector index on <pat> (<field>) [recall 0.95] : Measure an HNSW index and keep the ef_search it needs.
+  tune vector index on <pat> (<field>) [recall 0.95] [auto] : Measure an HNSW index and keep the ef_search it needs (auto: again as it grows).
   semantic lookup|store|stats|clear : Semantic cache of answers (questions found by meaning).
   explain <query>                   : Show how a query would be executed.
   convert <key> to msgpack|json     : Change a document's storage encoding.

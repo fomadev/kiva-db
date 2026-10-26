@@ -108,6 +108,16 @@ impl Session {
                     if v.tombstones > 0 {
                         extra.push_str(&format!(", {} replaced or deleted awaiting a rebuild", v.tombstones));
                     }
+                    if let Some(a) = &v.auto_tune {
+                        extra.push_str(&format!(
+                            ", ef_search tuned again as it grows (recall {:.0} %",
+                            a.recall * 100.0
+                        ));
+                        extra.push_str(&match a.tuned_at {
+                            0 => ", once it has enough vectors)".to_string(),
+                            n => format!(", last at {n} vectors)"),
+                        });
+                    }
                     let kind = match v.kind {
                         VectorIndexKind::Exact => "vector index".to_string(),
                         VectorIndexKind::Hnsw(p) => format!(
@@ -330,11 +340,13 @@ impl Session {
 
     /// `tune vector index on <pattern> (<field>) [recall R] [limit K] [sample N]`
     /// measures the HNSW index and keeps the smallest `ef_search` that finds
-    /// that share of the true closest vectors; `... ef_search N | default`
-    /// sets it by hand.
+    /// that share of the true closest vectors; with `auto`, it is measured
+    /// again each time the index doubles or halves. `... ef_search N |
+    /// default` sets it by hand.
     fn cmd_tune(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
-            "tune vector index on <pattern> (<field>) [recall 0.95] [limit 10] [sample 100] [queries \"<pattern>\"]
+            "tune vector index on <pattern> (<field>) [recall 0.95] [limit 10] [sample 100] [queries \"<pattern>\"] [auto]
+       tune vector index on <pattern> (<field>) auto off
        tune vector index on <pattern> (<field>) ef_search <N> | default";
         let mut c = Cur::new(a);
         if !(c.eat("vector") && c.eat("index")) {
@@ -350,9 +362,20 @@ impl Session {
             out.say(format!("Searches on {pattern} ({field}) now keep {shown} candidates (ef_search)."));
             return Ok(());
         }
+        if matches!(c.rest(), [a, o] if a.is_kw("auto") && o.is_kw("off")) {
+            self.engine.set_vector_auto_tune(&pattern, &field, None)?;
+            out.say(format!(
+                "{pattern} ({field}) keeps its ef_search as it grows; 'tune vector index ... auto' measures it again."
+            ));
+            return Ok(());
+        }
         let (mut recall, mut k, mut sample) = (0.95, 10, 100);
-        let mut queries = None;
+        let (mut queries, mut auto) = (None, false);
         loop {
+            if c.eat("auto") {
+                auto = true;
+                continue;
+            }
             if c.eat("queries") {
                 queries = Some(word(c.next(), "the key pattern of documents holding real queries")?);
                 continue;
@@ -379,7 +402,24 @@ impl Session {
             }
         }
         c.finish(USAGE)?;
-        let r = self.engine.tune_vector_index(&pattern, &field, recall, k, sample, queries.as_deref())?;
+        let keep = |tuned_at| crate::engine::AutoTune { recall, limit: k, sample, queries: queries.clone(), tuned_at };
+        let r = match self.engine.tune_vector_index(&pattern, &field, recall, k, sample, queries.as_deref()) {
+            Ok(r) => r,
+            // An index still filling up is tuned as soon as it can be.
+            Err(_) if auto && self.vector_count(&pattern, &field).is_some_and(|n| n <= k) => {
+                self.engine.set_vector_auto_tune(&pattern, &field, Some(keep(0)))?;
+                out.say(format!(
+                    "{pattern} ({field}) has {k} vectors or fewer: it will be tuned for a recall of {:.0} % once it \
+                     has more, then each time its number of vectors doubles or halves.",
+                    recall * 100.0
+                ));
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        if auto {
+            self.engine.set_vector_auto_tune(&pattern, &field, Some(keep(r.vectors)))?;
+        }
         let source = match &queries {
             Some(q) => format!("read from {q}"),
             None => "taken from its vectors, each searched without its own node".to_string(),
@@ -412,7 +452,23 @@ impl Session {
                 recall * 100.0
             ));
         }
+        if auto {
+            out.say(format!(
+                "It is measured again in the background when the index reaches {} or falls to {} vectors.",
+                r.vectors * 2,
+                r.vectors / 2
+            ));
+        }
         Ok(())
+    }
+
+    /// Vectors in the index on `pattern (field)`.
+    fn vector_count(&self, pattern: &str, field: &str) -> Option<usize> {
+        self.engine
+            .list_vector_indexes()
+            .into_iter()
+            .find(|v| v.pattern == pattern && v.field == field)
+            .map(|v| v.vectors)
     }
 
     fn cmd_drop(&mut self, a: &[Token], out: &mut Out) -> R {

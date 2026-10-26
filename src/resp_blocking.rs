@@ -110,13 +110,10 @@ impl Conn {
         loop {
             // Read before trying: a write landing after the try then counts.
             let seen = waiters.seen();
-            {
-                let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
-                match self.try_blocking(name, args) {
-                    Ok(Some(r)) => return r,
-                    Ok(None) => {}
-                    Err(e) => return e,
-                }
+            match self.with_turn(|c| c.try_blocking(name, args)) {
+                Ok(Ok(Some(r))) => return r,
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) | Err(e) => return e,
             }
             let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
             if left.is_some_and(|l| l.is_zero()) {

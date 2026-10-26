@@ -206,6 +206,52 @@ pub struct VecIndex {
     /// HNSW: candidates a search keeps when it does not say; 0 = the
     /// default ([`crate::hnsw::DEFAULT_EF_SEARCH`]). Set by `tune`.
     pub ef_search: usize,
+    /// HNSW: tuned again as it grows or shrinks (`tune ... auto`).
+    pub auto_tune: Option<AutoTune>,
+}
+
+/// What `tune vector index ... auto` keeps with an HNSW index: the recall
+/// to reach, how to measure it, and the size of the index when it was last
+/// tuned. The engine tunes it again in the background when that size
+/// doubles or halves, so `ef_search` follows the volume of data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AutoTune {
+    pub recall: f64,
+    /// Closest vectors a search returns (`limit`).
+    pub limit: usize,
+    /// Queries measured.
+    pub sample: usize,
+    /// Documents holding real queries, or `None` for indexed vectors.
+    pub queries: Option<String>,
+    /// Vectors in the index at the last tuning.
+    pub tuned_at: usize,
+}
+
+impl AutoTune {
+    /// Whether an index of `len` vectors is due for tuning again.
+    pub fn due(&self, len: usize) -> bool {
+        len > self.limit && (len >= self.tuned_at.saturating_mul(2) || len.saturating_mul(2) <= self.tuned_at)
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut j = serde_json::json!({
+            "recall": self.recall, "limit": self.limit, "sample": self.sample, "tuned_at": self.tuned_at,
+        });
+        if let Some(q) = &self.queries {
+            j["queries"] = q.as_str().into();
+        }
+        j
+    }
+
+    pub fn from_json(j: &serde_json::Value) -> Option<AutoTune> {
+        Some(AutoTune {
+            recall: j["recall"].as_f64()?,
+            limit: j["limit"].as_u64()? as usize,
+            sample: j["sample"].as_u64()? as usize,
+            queries: j["queries"].as_str().map(str::to_string),
+            tuned_at: j["tuned_at"].as_u64().unwrap_or(0) as usize,
+        })
+    }
 }
 
 impl VecIndex {
@@ -227,6 +273,7 @@ impl VecIndex {
             not_vectors: 0,
             exact_bytes: 0,
             ef_search: 0,
+            auto_tune: None,
         }
     }
 

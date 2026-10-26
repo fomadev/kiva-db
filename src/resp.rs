@@ -572,9 +572,24 @@ impl Conn {
                 return self.block(&name, &args);
             }
         }
+        self.with_turn(|c| c.run(&name, args).unwrap_or_else(|e| e)).unwrap_or_else(|e| e)
+    }
+
+    /// Runs `f` with the turn, then waits, without it, until the writes `f`
+    /// made are on disk when `storage.sync_writes` is on. Waiting outside
+    /// the turn lets the writes of every client share their fsyncs instead
+    /// of waiting for them one after the other; each write is still on disk
+    /// before its client is answered. `Err` when the disk sync failed.
+    pub(super) fn with_turn<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> std::result::Result<R, Reply> {
         let inst = self.sess.inst.clone();
-        let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
-        self.run(&name, args).unwrap_or_else(|e| e)
+        let (r, syncs) = {
+            let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
+            crate::engine::put_off_syncs(|| f(self))
+        };
+        match syncs.wait() {
+            Ok(()) => Ok(r),
+            Err(e) => Err(Reply::err(format!("the write was made but could not be confirmed on disk: {e}"))),
+        }
     }
 
     fn get(&mut self, k: &str) -> std::result::Result<Option<(Value, Meta)>, Reply> {
