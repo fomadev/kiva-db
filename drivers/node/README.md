@@ -1,16 +1,16 @@
-# kivadb — Node.js driver
+# @fomadev/kivadb — Node.js driver
 
 The official Node.js driver for [KivaDB](../../README.md). It speaks KivaDB's binary protocol on port 2911, has no dependencies, and ships TypeScript types. It needs Node.js 18 or later and a running KivaDB (`kivadb start`).
 
 ## Install
 
 ```bash
-npm install kivadb
+npm install @fomadev/kivadb
 ```
 
 The driver has its own version numbers, separate from the server's: driver 1.0.0 is tested with KivaDB 1.6.0, and `semanticCached` needs a server of 1.6.0 or later.
 
-Until the package is published on npm, install it from a copy of the repository:
+To try a version not yet published, install it from a copy of the repository:
 
 ```bash
 npm install path/to/kiva-db/drivers/node
@@ -19,7 +19,7 @@ npm install path/to/kiva-db/drivers/node
 ## Quick start
 
 ```js
-const { connect } = require("kivadb");
+const { connect } = require("@fomadev/kivadb");
 
 const db = await connect({ host: "localhost", port: 2911, user: "kiva", password: "" });
 
@@ -79,7 +79,7 @@ try {
 ## TypeScript
 
 ```ts
-import { connect } from "kivadb";
+import { connect } from "@fomadev/kivadb";
 
 const db = await connect({ host: "localhost", port: 2911, user: "kiva", password: "" });
 ```

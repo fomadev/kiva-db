@@ -1,5 +1,5 @@
 {
-  "name": "kivadb",
+  "name": "@fomadev/kivadb",
   "version": "1.0.0",
   "description": "Official Node.js driver for KivaDB (binary protocol, no dependencies)",
   "main": "index.js",
@@ -16,6 +16,10 @@
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fomadev/kiva-db"
+    "url": "git+https://github.com/fomadev/kiva-db.git",
+    "directory": "drivers/node"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
