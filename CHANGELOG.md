@@ -2,6 +2,14 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased
+
+### Added
+
+* Conditions take `in`, `like` and `ilike`: `city in ["Goma", "Bukavu"]` (one of up to 1 024 values), `name like "Kin%"` (`%` for any text, `_` for one character, `\%` and `\_` for themselves) and `name ilike "kin%"`, which ignores capitals in every alphabet. `not in`, `not like` and `not ilike` negate them. They work in `get where`, the aggregates, `explain`, vector search filters and the structured requests (`"cmp": "in"`, or `{"city": ["Goma", "Bukavu"]}` in `where`). An index answers them: `in` looks up each value, `like` with text before its first wildcard reads only the B-tree values starting with it, and the other patterns are tested on the index's distinct values without reading the documents ([11.1](DOCUMENTATION.md#111-the-condition), [11.4](DOCUMENTATION.md#114-indexes--making-queries-fast)).
+* Unique indexes: `create unique index on user: (email)` refuses a second document of the pattern holding the same value, and `create unique index on place: (type, parent, nameLower)` the same combination of values. The check is made under the same lock as every write (shell, structured requests, REST, Redis clients, scripts), and a transaction is judged by what its keys hold at `commit`. `null` is a value like the others; a document lacking one of the fields is not constrained. Creating the index is refused while two documents already share a value, naming them ([11.7](DOCUMENTATION.md#117-unique-indexes)).
+* `add place: {...}` creates a key named by KivaDB: the prefix followed by a new 24-character identifier in the format of MongoDB's ObjectId (time, random part per process, counter), so keys added later sort after the earlier ones. The structured request `add` answers the key and the identifier ([6.7](DOCUMENTATION.md#67-add--let-kivadb-name-the-key)).
+
 ## 1.6.1 - 2026-10-26
 
 A fix release: the message that refuses text where a vector is expected reads correctly.

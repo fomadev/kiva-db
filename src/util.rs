@@ -247,6 +247,34 @@ pub fn glob_prefix(pattern: &str) -> &str {
     }
 }
 
+/// A new identifier for a key: 24 hexadecimal characters, in the format of
+/// MongoDB's ObjectId. Four bytes of seconds since 1970, five random bytes
+/// drawn once per process, three bytes of a counter starting at a random
+/// value. Identifiers made later sort after the earlier ones (by the second,
+/// then by the counter within one process), and two processes, on one
+/// machine or several, do not share the random part.
+pub fn new_id() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
+    static PROCESS: OnceLock<[u8; 5]> = OnceLock::new();
+    static COUNTER: OnceLock<AtomicU32> = OnceLock::new();
+    let process = PROCESS.get_or_init(|| {
+        let r = random_bytes(5);
+        [r[0], r[1], r[2], r[3], r[4]]
+    });
+    let counter = COUNTER.get_or_init(|| {
+        let r = random_bytes(3);
+        AtomicU32::new(u32::from_be_bytes([0, r[0], r[1], r[2]]))
+    });
+    let n = counter.fetch_add(1, Ordering::Relaxed) & 0x00ff_ffff;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as u32;
+    let mut bytes = Vec::with_capacity(12);
+    bytes.extend_from_slice(&secs.to_be_bytes());
+    bytes.extend_from_slice(process);
+    bytes.extend_from_slice(&n.to_be_bytes()[1..]);
+    hex_encode(&bytes)
+}
+
 pub fn random_bytes(n: usize) -> Vec<u8> {
     let mut v = vec![0u8; n];
     if getrandom::getrandom(&mut v).is_err() {

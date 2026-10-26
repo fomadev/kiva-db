@@ -750,7 +750,7 @@ fn openapi() -> Json {
             "/health": { "get": { "summary": "Liveness probe. No authentication." } },
             "/v1/api": {
                 "post": {
-                    "summary": "Structured request: whoami, scan, get, put, del, similar, stats, users, workspaces.",
+                    "summary": "Structured request: whoami, scan, get, put, add, del, query, explain, aggregate, similar, semantic, stats, users, workspaces.",
                     "requestBody": { "content": { "application/json": { "example": { "op": "similar", "target": "doc:*.embedding", "vector": [0.1, 0.2, 0.3], "limit": 5 } } } }
                 }
             },

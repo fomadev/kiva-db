@@ -1023,6 +1023,31 @@ Error: Migration failed ('maybe' is not a valid boolean (use true or false).) So
 
 `change` refuses to overwrite an existing key.
 
+### 6.7 `add` — let KivaDB name the key
+
+```text
+add <prefix> <value> [ttl <seconds>]
+```
+
+Creates a key named `<prefix>` followed by a new identifier, and says which key it is. Use it when the application has no natural name for a record (an order, a message, a place) and should not have to invent one:
+
+```text
+kiva> add place: {"type": "VILLE", "name": "Bukavu"}
+OK: place:6adf9c3ca32f23553b1dbb10 saved.
+kiva> add place: {"type": "VILLE", "name": "Uvira"}
+OK: place:6adf9c3ca32f23553b1dbb11 saved.
+kiva> add session: "abc123" ttl 3600
+OK: session:6adf9c3ca32f23553b1dbb12 saved.
+```
+
+The identifier has the format of MongoDB's ObjectId: 24 hexadecimal characters, made of the time in seconds, a random part drawn once per server process and a counter. So:
+
+* identifiers made later sort after the earlier ones: `keys place:` lists the places in the order they were added (to the second, and exactly within one server);
+* two servers do not make the same identifier, and a data set migrated from MongoDB keeps its identifiers in the same format;
+* the first 8 characters give the creation time: `6adf9c3c` is 1 793 039 420 seconds after 1970 (26 October 2026, 18:30:20 UTC).
+
+The prefix is bare text, usually ending with `:`. The value follows the rules of `set`, without a type keyword. Inside a transaction the key is chosen at once and written at `commit`. Unique indexes ([11.7](#117-unique-indexes)) apply to added documents as to the others. The structured request `add` does the same from programs and answers the key and the identifier ([20.4](#204-structured-requests-for-tools)).
+
 ---
 
 ## Chapter 7 — Expiring keys (TTL)
@@ -1407,8 +1432,34 @@ So far every command named the keys it wanted. A **query** finds documents by wh
 
 * `pattern` selects keys (`user:*`, or `*` for all).
 * `field` is a path inside the document (`role`, `address.city`).
-* `operator` is one of `=`, `!=`, `>`, `>=`, `<`, `<=`.
+* `operator` is one of `=`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `ilike`.
 * `value` follows the usual rules: text quoted, numbers and booleans bare.
+
+| Operator | Value | Keeps the documents whose field |
+| :--- | :--- | :--- |
+| `=` `!=` `>` `>=` `<` `<=` | one value | compares so with the value |
+| `in` | a list: `["Goma", "Bukavu"]` | equals one of the values (at most 1 024) |
+| `like` | a quoted text pattern | is text matching the pattern: `%` stands for any text (none included), `_` for one character, `\%` and `\_` for the characters themselves |
+| `ilike` | a quoted text pattern | is text matching the pattern, capitals and small letters being the same in every alphabet (`"KIN%"` matches `Kinshasa`, `"é%"` matches `Élisabethville`) |
+
+`not` written before `in`, `like` or `ilike` negates it: `role not in ["admin", "ops"]`, `name not like "%test%"`. `ilike` without a wildcard compares text without regard to capitals: `name ilike "kinshasa"`.
+
+```text
+kiva> get where user:*.address.city in ["Goma", "Bukavu"]
+user:2: {"name":"Bob","role":"dev","age":25,"address":{"city":"Goma"}}
+(1 matches)
+kiva> get where user:*.role not in ["admin", "ops"] return name
+user:2: {"name":"Bob"}
+user:3: {"name":"Carol"}
+(2 matches)
+kiva> get where user:*.name like "C%"
+user:3: {"name":"Carol","role":"dev","age":41,"address":{"city":"Kinshasa"}}
+(1 matches)
+kiva> count where user:*.address.city ilike "kinshasa"
+Count: 2
+```
+
+Regular expressions are not part of the language: `like` and `ilike` cover prefixes, suffixes and words inside a text, and an index can serve them ([11.4](#114-indexes--making-queries-fast)).
 
 The field starts at the first dot after the last `*`: in `user:*.address.city`, the pattern is `user:*` and the field is `address.city`. Spaces around the operator are optional (`user:*.age>26`). If the pattern itself needs quoting, quote the whole left side: `"*.active" = true`.
 
@@ -1507,8 +1558,10 @@ An index keeps its values one of two ways:
 
 | Kind | Answers | Use it for |
 | :--- | :--- | :--- |
-| `btree` (the default) | `=`, `>`, `>=`, `<`, `<=` | Numbers, dates, anything compared or sorted |
-| `hash` | `=` only, in the same time whatever the number of distinct values | Identifiers, e-mails, codes: fields only ever compared with `=` |
+| `btree` (the default) | `=`, `>`, `>=`, `<`, `<=`, `in`, `like`, `ilike` | Numbers, dates, names, anything compared or sorted |
+| `hash` | `=` and `in`, in the same time whatever the number of distinct values; `like`, `ilike` | Identifiers, e-mails, codes: fields only ever compared with `=` |
+
+For `in`, the index looks up each value of the list. For `like` with text before its first wildcard (`"Kin%"`), a B-tree reads only the values that start with that text. Otherwise (`ilike`, `"%sha"`), the index tests each of its distinct values against the pattern, without opening a document: much faster than reading the documents when many of them share few values.
 
 ```text
 kiva> create index on user:*.name using hash
@@ -1599,7 +1652,7 @@ A query reads **one key pattern**, tests its documents against comparisons with 
 | :--- | :--- | :--- |
 | Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user`, `... and order:*.total > 5` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
 | Sorting pipelines | `order by`, `distinct`, `having`, `group by` on `get` | The aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
-| Other operators | `in [...]`, `like`, `between`, a list of values | The six comparisons, one value each; several values with `or` |
+| Other operators | `between`, `contains`, `matches`, `regexp` | The comparisons of [11.1](#111-the-condition): `age >= 20 and age <= 30` for a range, `in [...]` for several values, `like` / `ilike` for text patterns |
 | Other combinations | `&&`, `\|\|`, `xor` | `and`, `or`, `not` and parentheses |
 | Distributed queries | `@node2`, `across`, `shard`, `explain distributed` | Nothing to do: one server holds all of a workspace's data |
 
@@ -1610,7 +1663,42 @@ kiva> get where user:*.name = order:*.user
 Error: 'order:*.user' names a field of other documents: joins are not supported: a query reads one key pattern and compares with a literal value. Keep related data in the same document, or read the related keys by name (get a and b).
 ```
 
-Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` and `aggregate` requests follow the same rules: a request with a field such as `join`, `order_by` or `distinct`, or with an array or object as `value`, is refused; `and`, `or` and `not` go inside `where` ([20.4](#204-structured-requests-for-tools)).
+Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` and `aggregate` requests follow the same rules: a request with a field such as `join`, `order_by` or `distinct`, or with an array or object as `value` (except a list for `in`), is refused; `and`, `or` and `not` go inside `where` ([20.4](#204-structured-requests-for-tools)).
+
+### 11.7 Unique indexes
+
+A **unique index** refuses a second document holding the same value, whoever writes it: the shell, a program, a Redis client, a script.
+
+```text
+create unique index on <pattern> (<field>[, <field>...]) [using btree|hash]
+```
+
+```text
+kiva> create unique index on user: (name)
+Unique index created on user:* (name): 3 documents indexed.
+kiva> set user:4 {"name": "Alice", "role": "ops"}
+Error: 'user:4' not written: 'user:1' already holds "Alice" in the unique index on user:* (name)
+```
+
+On **several fields**, it is the combination that must be unique: the same name may come back under another parent, not twice under the same one.
+
+```text
+kiva> create unique index on place: (type, parent, nameLower)
+Unique index created on place:* (type, parent, nameLower): 0 documents indexed.
+kiva> set place:1 {"type": "VILLE", "parent": null, "name": "Goma", "nameLower": "goma"}
+OK: place:1 saved.
+kiva> set place:2 {"type": "QUARTIER", "parent": "place:1", "name": "Katindo", "nameLower": "katindo"}
+OK: place:2 saved.
+kiva> set place:3 {"type": "QUARTIER", "parent": "place:1", "name": "KATINDO", "nameLower": "katindo"}
+Error: 'place:3' not written: 'place:2' already holds ["QUARTIER","place:1","katindo"] in the unique index on place:* (type, parent, nameLower)
+```
+
+* **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Values compare as in conditions: `"Goma"` and `"goma"` differ, which is why the example keeps a field in small letters.
+* **When it is checked.** At every write, under the same lock as the write itself: two clients creating the same place at the same instant cannot both succeed, which a "read, then write if absent" in the application cannot promise. Writing a document again with its own value is allowed. A transaction is judged by what its keys hold at `commit`: swapping two values between documents in one transaction works, and a transaction that would leave a duplicate is refused as a whole. A deleted or expired document frees its value.
+* **Creating it** is refused while two documents already hold the same value; the error names them. Change one, then create the index again.
+* **Queries.** A unique index on one field also answers queries like any index. On several fields it only guards the writes: queries use indexes on one field, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)).
+* `indexes` shows `unique`; `drop index on place: (type, parent, nameLower)` removes it. Like every index, it is defined per node: create it on the master; a replica copies what the master accepted.
+* An index on several fields that is not unique is refused.
 
 ---
 
@@ -1785,7 +1873,7 @@ doc:1: 0.9938 {"title":"Kinshasa guide"}
 (1 results, cosine metric, 3 vectors compared, vector index; filter tested on the closest vectors first, 2 documents read)
 ```
 
-* A condition is `<field> <op> <value>` with the six comparisons of [Chapter 11](#chapter-11--queries-and-indexes) (`= != > >= < <=`). The field belongs to the documents searched; it may repeat their pattern (`doc:*.lang`). A document without the field does not pass.
+* A condition is `<field> <op> <value>` with the operators of [11.1](#111-the-condition) (`= != > >= < <=`, `in`, `like`, `ilike`; not `not in`). The field belongs to the documents searched; it may repeat their pattern (`doc:*.lang`). A document without the field does not pass.
 * Only `and`: the filter is simple on purpose. For `or`, run one search per alternative and merge the results. Text search and sparse (keyword) vectors combined with the dense ones are not part of it.
 * The last line says how the filter was applied, chosen by KivaDB:
 
@@ -3115,17 +3203,18 @@ The command language answers with text written for people. A program that needs 
 | `scan` | `pattern` (default `*`), `limit` (default 500) | `keys`: key, type, size, modified, ttl, compression, msgpack; `truncated`; `total` |
 | `get` | `key` | `found`, `type`, `value`, `ttl`, `modified`, `msgpack` |
 | `put` | `key`, `type`, `value`, optional `ttl`, optional `mode` | `key`, `type` |
+| `add` | `prefix` (`place:`), `value`, optional `type` (needed unless the value is an array or an object), optional `ttl` | `key`, `id` (the key after the prefix), `type` ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
 | `users` | - | `users`: name, role, grants, created, home workspace, whether the password is empty (admin only) |
-| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=`), `value`, `limit`; or `target` (`user:*`) and `where` (below) | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
+| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below) | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
 | `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
 | `explain` | the same as `query` | `plan`: strategy, index, candidates, total keys; `suggestion`: the index to create, if any |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
 
 Notes on `query` and `aggregate`:
 
-* `where` is the condition of [11.1](#111-the-condition) as JSON: `{"field": "age", "cmp": ">", "value": 18}` (`cmp` defaults to `=`), `{"role": "dev", "city": "Goma"}` (equalities joined by `and`), `{"and": [...]}`, `{"or": [...]}`, `{"not": {...}}`, or a list (its items joined by `and`). With `where`, `target` is the key pattern alone.
+* `where` is the condition of [11.1](#111-the-condition) as JSON: `{"field": "age", "cmp": ">", "value": 18}` (`cmp` defaults to `=`), `{"role": "dev", "city": "Goma"}` (equalities joined by `and`; a list as value means `in`: `{"city": ["Goma", "Bukavu"]}`), `{"and": [...]}`, `{"or": [...]}`, `{"not": {...}}`, or a list (its items joined by `and`). With `where`, `target` is the key pattern alone.
 * `compute` names each aggregate: `{"n": "count", "mean_age": {"avg": "age"}, "top": {"max": "salary"}}`, or a list `["count", {"avg": "age"}]` whose results are named `count`, `avg_age`. Without it, `count`. At most 32 per request.
 
 ```json
@@ -3139,6 +3228,7 @@ Notes on `put`:
 
 * `value` is plain JSON matching `type`. A number may be given as a JSON number or as text (`"3.14"`), bytes are base64 text.
 * `mode` is `create` (fail if the key exists), `update` (fail if it does not) or `upsert` (default).
+* A write that a unique index refuses ([11.7](#117-unique-indexes)) fails with the message of the shell; over HTTP, with code 409.
 * `ttl` absent keeps the current expiry of the key, `0` removes it, a positive number sets it in seconds.
 
 Because values travel as JSON, they are free of the shell's quoting rules: a text may contain both kinds of quotes.
@@ -4845,6 +4935,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `set [type] <key> <value> [ttl <sec>] [if not exists]` | Create (`if not exists`: skip if present) |
+| `add <prefix> <value> [ttl <sec>]` | Create a key named by KivaDB: `<prefix>` + a new identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |
 | `del [type] <key> [if exists]` | Delete |
@@ -4870,9 +4961,11 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `json incr <key> <.path> <number>` | Add to a number |
 | `json type / len / keys <key> [<.path>]` | Type, length, field names |
 | `get where <pat>.<field> <op> <value> [and\|or ...] [limit N] [return f1, f2]` | Find documents; `and`, `or`, `not`, parentheses |
+| `<field> [not] in [v1, v2...]`, `<field> [not] like\|ilike "Kin%"` | One of several values; a text pattern (`ilike`: capitals or not) ([11.1](#111-the-condition)) |
 | `count` / `sum` / `avg` / `min` / `max` `where ...` or `<pat>[.<field>] [where ...]` `[group by <field>]` | Aggregates |
 | `create index on <pat> (<field>) [using btree\|hash]` | Create an index; also `on <pat>.<field>` (admin) |
-| `drop index on <pat> (<field>)` | Remove it (admin) |
+| `create unique index on <pat> (<f1>[, <f2>...])` | Refuse a second document with the same values ([11.7](#117-unique-indexes)) (admin) |
+| `drop index on <pat> (<field>[, ...])` | Remove it (admin) |
 | `indexes` | List indexes |
 | `explain <query>` | Show the execution plan |
 | `get similar <pat>.<field> to <vector> [where <field> <op> <value> [and ...]] [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search, filtered on other fields ([12.9](#129-filtering-on-other-fields)) |
@@ -4991,6 +5084,7 @@ KivaDB 1.6.1 keeps the whole database on each node, with replicas and automatic 
 
 * All keys must fit in memory ([19.6](#196-limits)).
 * Replication copies whole nodes: every workspace is on every replica. A workspace is never split across machines (no sharding): its data must fit on one node, its keys in that node's memory ([19.6](#196-limits)).
+* Conditions have no regular expressions: `like` and `ilike` cover prefixes, suffixes and words inside a text ([11.1](#111-the-condition)).
 * A transaction lives in one connection; it cannot span several HTTP requests.
 * Listing and query commands do not show the uncommitted writes of your own transaction.
 * Strings have no escape sequences: a text cannot contain both kinds of quotes at once from the shell (it can through the REST API or the binary protocol).

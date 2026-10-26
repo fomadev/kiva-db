@@ -31,6 +31,7 @@ const COMMANDS: &[&str] = &[
     "set",
     "get",
     "update",
+    "add",
     "del",
     "has",
     "typeof",
