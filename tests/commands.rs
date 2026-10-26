@@ -193,10 +193,10 @@ fn change_and_bump() {
 
     ok(&mut s, r#"set sess "x" ttl 100"#);
     assert!(ok(&mut s, "bump sess add 50").contains("add 50s"));
-    let ttl = s.engine.meta("sess").unwrap().expires_at - kivadb::util::now_secs();
+    let ttl = kivadb::util::secs_left(s.engine.meta("sess").unwrap().expires_at);
     assert!((148..=150).contains(&ttl), "ttl was {ttl}");
     ok(&mut s, "bump string sess set 10");
-    let ttl = s.engine.meta("sess").unwrap().expires_at - kivadb::util::now_secs();
+    let ttl = kivadb::util::secs_left(s.engine.meta("sess").unwrap().expires_at);
     assert!((8..=10).contains(&ttl));
     assert!(fails(&mut s, "bump number sess set 10").contains("expected 'number'"));
     assert!(fails(&mut s, "bump ghost set 10").contains("not found"));

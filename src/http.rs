@@ -9,7 +9,7 @@ use crate::error::{KivaError, Result};
 use crate::exec::validate_key_name;
 use crate::instance::{Instance, VERSION};
 use crate::session::{Need, Session};
-use crate::util::{b64_decode, b64_encode, now_secs, url_decode};
+use crate::util::{b64_decode, b64_encode, deadline_in, now_secs, secs_left, url_decode};
 use crate::value::Value;
 use serde_json::{json, Value as Json};
 use sha1::{Digest, Sha1};
@@ -267,7 +267,7 @@ fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAdd
 }
 
 fn value_json(key: &str, v: &Value, expires_at: i64) -> Json {
-    let ttl = if expires_at > 0 { json!((expires_at - now_secs()).max(0)) } else { Json::Null };
+    let ttl = if expires_at > 0 { json!(secs_left(expires_at)) } else { Json::Null };
     let data = match v {
         Value::Bytes(b) => Json::String(b64_encode(b)),
         other => other.to_json(),
@@ -293,7 +293,7 @@ fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
     }
     let value = Value::from_json(value);
     let ty = value.ty();
-    let expires_at = if ttl > 0 { now_secs() + ttl } else { 0 };
+    let expires_at = deadline_in(ttl);
     sess.kv_put(key, value, expires_at, false)?;
     Ok(Response::ok(json!({ "key": key, "type": ty.name() })))
 }
@@ -341,7 +341,6 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
         }
         ("GET", "/v1/scan" | "/scan") => {
             sess.check(Need::Read)?;
-            let now = now_secs();
             let rows: Vec<Json> = sess
                 .engine
                 .keys_matching(q("pattern").unwrap_or("*"), limit)
@@ -352,7 +351,7 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
                         "type": e.ty.name(),
                         "size": e.raw_size,
                         "modified": e.timestamp,
-                        "ttl": if e.expires_at > 0 { json!((e.expires_at - now).max(0)) } else { Json::Null },
+                        "ttl": if e.expires_at > 0 { json!(secs_left(e.expires_at)) } else { Json::Null },
                     })
                 })
                 .collect();

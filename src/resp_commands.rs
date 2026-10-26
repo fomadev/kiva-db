@@ -7,8 +7,8 @@
 //! Every command goes through [`refuse`] before it runs or is queued in a
 //! `MULTI`: a command that is not in [`SUPPORTED`] answers the error Redis
 //! gives for an unknown command, so that client libraries recognize it. For
-//! the families KivaDB leaves out on purpose (blocking commands, streams,
-//! `WATCH`, cluster...), the message also says why and what to use instead.
+//! the families KivaDB leaves out on purpose (cluster, functions, modules...),
+//! the message also says why and what to use instead.
 
 use super::Reply;
 
@@ -17,6 +17,14 @@ use super::Reply;
 pub(super) const SUPPORTED: &[&str] = &[
     "APPEND",
     "AUTH",
+    "BLMOVE",
+    "BLMPOP",
+    "BLPOP",
+    "BRPOP",
+    "BRPOPLPUSH",
+    "BZMPOP",
+    "BZPOPMAX",
+    "BZPOPMIN",
     "CLIENT",
     "COMMAND",
     "COPY",
@@ -149,6 +157,23 @@ pub(super) const SUPPORTED: &[&str] = &[
     "UNLINK",
     "UNSUBSCRIBE",
     "UNWATCH",
+    "WAIT",
+    "WATCH",
+    "XACK",
+    "XADD",
+    "XAUTOCLAIM",
+    "XCLAIM",
+    "XDEL",
+    "XGROUP",
+    "XINFO",
+    "XLEN",
+    "XPENDING",
+    "XRANGE",
+    "XREAD",
+    "XREADGROUP",
+    "XREVRANGE",
+    "XSETID",
+    "XTRIM",
     "ZADD",
     "ZCARD",
     "ZCOUNT",
@@ -185,9 +210,6 @@ pub(super) const SUPPORTED: &[&str] = &[
 /// Redis features KivaDB does not have, by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Family {
-    Blocking,
-    Streams,
-    Watch,
     Cluster,
     Functions,
     Replication,
@@ -198,19 +220,6 @@ impl Family {
     /// Why the family is missing, and what to do instead.
     fn reason(self) -> &'static str {
         match self {
-            Family::Blocking => {
-                "KivaDB does not support blocking commands: a connection never waits for data. Use the \
-                 non-blocking command (LPOP, RPOP, ZPOPMIN, ZPOPMAX) and retry, or SUBSCRIBE to a channel \
-                 the producer PUBLISHes to"
-            }
-            Family::Streams => {
-                "KivaDB does not support streams. Use a list as a queue (RPUSH, then LPOP), or PUBLISH and \
-                 SUBSCRIBE for live messages"
-            }
-            Family::Watch => {
-                "KivaDB does not support WATCH: MULTI ... EXEC runs as a KivaDB transaction, and EXEC answers \
-                 nil when another client changed the same keys meanwhile"
-            }
             Family::Cluster => {
                 "KivaDB is not a Redis Cluster: one server holds all of a workspace's data, so connect to it as \
                  a standalone Redis"
@@ -230,35 +239,13 @@ impl Family {
 /// supported command or one that is simply unknown.
 pub(super) fn family(name: &str) -> Option<Family> {
     Some(match name {
-        "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "BLMOVE" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX" | "BZMPOP" | "WAIT"
-        | "WAITAOF" => Family::Blocking,
-        "WATCH" => Family::Watch,
         "CLUSTER" | "READONLY" | "READWRITE" | "ASKING" | "SPUBLISH" | "SSUBSCRIBE" | "SUNSUBSCRIBE" => Family::Cluster,
         "FUNCTION" | "FCALL" | "FCALL_RO" => Family::Functions,
         "REPLICAOF" | "SLAVEOF" | "SYNC" | "PSYNC" | "REPLCONF" | "FAILOVER" => Family::Replication,
         "MODULE" => Family::Modules,
-        n if STREAMS.contains(&n) => Family::Streams,
         _ => return None,
     })
 }
-
-const STREAMS: &[&str] = &[
-    "XADD",
-    "XACK",
-    "XAUTOCLAIM",
-    "XCLAIM",
-    "XDEL",
-    "XGROUP",
-    "XINFO",
-    "XLEN",
-    "XPENDING",
-    "XRANGE",
-    "XREAD",
-    "XREADGROUP",
-    "XREVRANGE",
-    "XSETID",
-    "XTRIM",
-];
 
 pub(super) fn is_supported(name: &str) -> bool {
     SUPPORTED.binary_search(&name).is_ok()
@@ -314,10 +301,11 @@ mod tests {
     #[test]
     fn refused_families_explain_themselves() {
         assert!(refuse("GET", &args(&["GET", "k"])).is_none());
-        let e = text(refuse("BLPOP", &args(&["blpop", "jobs", "0"])).unwrap());
-        assert!(e.starts_with("ERR unknown command 'blpop', with args beginning with: 'jobs' '0' (KivaDB"), "{e}");
-        assert!(e.contains("LPOP"), "{e}");
-        assert_eq!(family("XADD"), Some(Family::Streams));
+        assert!(refuse("BLPOP", &args(&["BLPOP", "q", "0"])).is_none());
+        let e = text(refuse("FCALL", &args(&["fcall", "f", "0"])).unwrap());
+        assert!(e.starts_with("ERR unknown command 'fcall', with args beginning with: 'f' '0' (KivaDB"), "{e}");
+        assert!(e.contains("EVAL"), "{e}");
+        assert_eq!(family("XADD"), None);
         assert_eq!(family("XYZ"), None);
         assert_eq!(family("CLUSTER"), Some(Family::Cluster));
         // A plain unknown command gets the Redis message alone.

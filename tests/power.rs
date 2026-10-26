@@ -1047,7 +1047,22 @@ fn redis_expiry_options_and_time() {
     // EXPIRETIME, GETEX.
     let R::I(at) = r.cmd(&["EXPIRETIME", "c"]) else { panic!() };
     assert!(at > 1_700_000_000);
-    assert_eq!(r.cmd(&["PEXPIRETIME", "c"]), R::I(at * 1000));
+    assert!(matches!(r.cmd(&["PEXPIRETIME", "c"]), R::I(p) if p / 1000 == at));
+
+    // Milliseconds are kept as given: PX 150 is gone after 150 ms, not a second.
+    r.cmd(&["SET", "lock", "me", "PX", "150"]);
+    assert!(matches!(r.cmd(&["PTTL", "lock"]), R::I(t) if (100..=150).contains(&t)));
+    assert_eq!(r.cmd(&["TTL", "lock"]), R::I(0), "rounded to the nearest second");
+    r.cmd(&["SET", "lease", "x"]);
+    assert_eq!(r.cmd(&["PEXPIRE", "lease", "120"]), R::I(1));
+    r.cmd(&["PSETEX", "short", "130", "y"]);
+    std::thread::sleep(Duration::from_millis(250));
+    for k in ["lock", "lease", "short"] {
+        assert_eq!(r.cmd(&["GET", k]), R::B(None), "{k}");
+    }
+    r.cmd(&["SET", "at", "v", "PXAT", &(kivadb::util::now_ms() + 100).to_string()]);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(r.cmd(&["EXISTS", "at"]), R::I(0));
     assert_eq!(r.cmd(&["EXPIRETIME", "greeting-ghost"]), R::I(-2));
     r.cmd(&["SET", "s", "hello"]);
     assert_eq!(r.cmd(&["EXPIRETIME", "s"]), R::I(-1));
@@ -1562,11 +1577,6 @@ fn redis_refuses_unsupported_commands_clearly() {
         other => panic!("{other:?}"),
     };
 
-    refused(r.cmd(&["BLPOP", "jobs", "0"]), "blocking commands");
-    refused(r.cmd(&["BZPOPMIN", "lb", "1"]), "blocking commands");
-    refused(r.cmd(&["XADD", "events", "*", "type", "login"]), "streams");
-    refused(r.cmd(&["XREADGROUP", "GROUP", "g", "c", "STREAMS", "events", ">"]), "streams");
-    refused(r.cmd(&["WATCH", "balance"]), "EXEC answers nil");
     refused(r.cmd(&["CLUSTER", "INFO"]), "not a Redis Cluster");
     refused(r.cmd(&["FCALL", "f", "0"]), "EVAL");
     refused(r.cmd(&["REPLICAOF", "10.0.0.1", "6379"]), "replica start");
@@ -1580,7 +1590,7 @@ fn redis_refuses_unsupported_commands_clearly() {
     // Refused while queuing: the whole transaction is discarded, as in Redis.
     assert_eq!(r.cmd(&["MULTI"]), ok_reply());
     assert_eq!(r.cmd(&["SET", "a", "1"]), R::S("QUEUED".into()));
-    refused(r.cmd(&["BRPOP", "q", "0"]), "blocking");
+    refused(r.cmd(&["FCALL", "f", "0"]), "EVAL");
     assert!(matches!(r.cmd(&["EXEC"]), R::E(e) if e.starts_with("EXECABORT")));
     assert_eq!(r.cmd(&["EXISTS", "a"]), R::I(0));
     assert_eq!(r.cmd(&["MULTI"]), ok_reply());
@@ -1588,13 +1598,13 @@ fn redis_refuses_unsupported_commands_clearly() {
     assert_eq!(r.cmd(&["EXEC"]), R::A(Some(vec![ok_reply()])));
 
     // Scripts go through the same filter.
-    refused(r.cmd(&["EVAL", "return redis.pcall('XADD', KEYS[1], '*', 'f', 'v')", "1", "s"]), "streams");
+    refused(r.cmd(&["EVAL", "return redis.pcall('FCALL', 'f', '0')", "0"]), "EVAL or EVALSHA");
 
     // COMMAND tells clients what is there.
     match (r.cmd(&["COMMAND", "COUNT"]), r.cmd(&["COMMAND", "LIST"])) {
         (R::I(n), R::A(Some(names))) => {
             assert_eq!(n as usize, names.len());
-            assert!(names.contains(&b("zadd")) && !names.contains(&b("blpop")));
+            assert!(names.contains(&b("zadd")) && names.contains(&b("blpop")) && !names.contains(&b("fcall")));
         }
         other => panic!("{other:?}"),
     }
@@ -1966,4 +1976,306 @@ fn quantization_and_filtered_graph_search_from_the_shell() {
     assert_eq!(out.matches(r#"{"lang":"fr"}"#).count(), 3, "{out}");
     assert!(out.contains("filter tested while walking the graph, "), "{out}");
     assert!(fails(&mut s, "create vector index on doc: (other) using hnsw quantize pq").contains("sq8 or none"));
+}
+
+#[test]
+fn redis_watch_makes_exec_fail_when_a_watched_key_changes() {
+    let dir = TempDir::new("resp_watch");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let (mut a, mut other) = (Redis::connect(port), Redis::connect(port));
+    let ok = || R::S("OK".into());
+    a.cmd(&["SET", "balance", "100"]);
+
+    // Changed by another client between WATCH and EXEC: nothing is applied.
+    assert_eq!(a.cmd(&["WATCH", "balance"]), ok());
+    assert_eq!(other.cmd(&["INCRBY", "balance", "5"]), R::I(105));
+    assert_eq!(a.cmd(&["MULTI"]), ok());
+    assert_eq!(a.cmd(&["SET", "balance", "0"]), R::S("QUEUED".into()));
+    assert_eq!(a.cmd(&["SET", "audit", "x"]), R::S("QUEUED".into()));
+    assert_eq!(a.cmd(&["EXEC"]), R::A(None));
+    assert_eq!(a.cmd(&["GET", "balance"]), b("105"));
+    assert_eq!(a.cmd(&["EXISTS", "audit"]), R::I(0));
+
+    // Untouched: the transaction runs. The watch ends with EXEC.
+    a.cmd(&["WATCH", "balance", "other"]);
+    a.cmd(&["MULTI"]);
+    a.cmd(&["DECRBY", "balance", "5"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(Some(vec![R::I(100)])));
+    other.cmd(&["SET", "balance", "1"]);
+    a.cmd(&["MULTI"]);
+    a.cmd(&["GET", "balance"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(Some(vec![b("1")])), "no longer watched after EXEC");
+
+    // A deleted, a created and an expired key all count as changed.
+    for change in [&["DEL", "balance"][..], &["SET", "fresh", "1"][..]] {
+        a.cmd(&["WATCH", "balance", "fresh"]);
+        other.cmd(change);
+        a.cmd(&["MULTI"]);
+        a.cmd(&["PING"]);
+        assert_eq!(a.cmd(&["EXEC"]), R::A(None), "{change:?}");
+    }
+    a.cmd(&["SET", "ephemeral", "1", "PX", "100"]);
+    a.cmd(&["WATCH", "ephemeral"]);
+    std::thread::sleep(Duration::from_millis(200));
+    a.cmd(&["MULTI"]);
+    a.cmd(&["PING"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(None), "expired");
+
+    // UNWATCH and DISCARD forget the keys; WATCH inside MULTI is an error.
+    a.cmd(&["WATCH", "k"]);
+    assert_eq!(a.cmd(&["UNWATCH"]), ok());
+    other.cmd(&["SET", "k", "1"]);
+    a.cmd(&["MULTI"]);
+    assert!(matches!(a.cmd(&["WATCH", "k"]), R::E(e) if e.contains("inside MULTI")));
+    a.cmd(&["INCR", "k"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(Some(vec![R::I(2)])));
+    a.cmd(&["WATCH", "k"]);
+    a.cmd(&["MULTI"]);
+    assert_eq!(a.cmd(&["DISCARD"]), ok());
+    other.cmd(&["SET", "k", "9"]);
+    a.cmd(&["MULTI"]);
+    a.cmd(&["GET", "k"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(Some(vec![b("9")])));
+
+    // A change from the KivaDB shell counts too.
+    a.cmd(&["WATCH", "k"]);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok_shell(&mut s, r#"update k "10""#);
+    a.cmd(&["MULTI"]);
+    a.cmd(&["INCR", "k"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(None));
+    // WATCH, then SELECT another database: the key of the first is watched.
+    a.cmd(&["WATCH", "k"]);
+    a.cmd(&["SELECT", "1"]);
+    other.cmd(&["SET", "k", "11"]);
+    a.cmd(&["MULTI"]);
+    a.cmd(&["SET", "elsewhere", "1"]);
+    assert_eq!(a.cmd(&["EXEC"]), R::A(None));
+}
+
+fn ok_shell(s: &mut Session, cmd: &str) -> String {
+    ok(s, cmd)
+}
+
+#[test]
+fn redis_blocking_commands_wait_for_data() {
+    let dir = TempDir::new("resp_blocking");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    let in_thread = |cmd: Vec<&'static str>| {
+        std::thread::spawn(move || {
+            let mut c = Redis::connect(port);
+            let t = std::time::Instant::now();
+            (c.cmd(&cmd), t.elapsed())
+        })
+    };
+
+    // Data already there: no wait. Keys are tried in order.
+    r.cmd(&["RPUSH", "low", "a"]);
+    r.cmd(&["RPUSH", "high", "b"]);
+    assert_eq!(r.cmd(&["BLPOP", "high", "low", "1"]), R::A(Some(vec![b("high"), b("b")])));
+    assert_eq!(r.cmd(&["BRPOP", "high", "low", "1"]), R::A(Some(vec![b("low"), b("a")])));
+
+    // Nothing: the client waits, others keep working, a push wakes it.
+    let waiting = in_thread(vec!["BLPOP", "jobs", "5"]);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(r.cmd(&["PING"]), R::S("PONG".into()), "the turn is not held while waiting");
+    r.cmd(&["RPUSH", "jobs", "job-1"]);
+    let (got, took) = waiting.join().unwrap();
+    assert_eq!(got, R::A(Some(vec![b("jobs"), b("job-1")])));
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert_eq!(r.cmd(&["EXISTS", "jobs"]), R::I(0));
+
+    // A timeout answers nil; fractions of a second work.
+    let t = std::time::Instant::now();
+    assert_eq!(r.cmd(&["BLPOP", "empty", "0.2"]), R::A(None));
+    assert!(t.elapsed() >= Duration::from_millis(190) && t.elapsed() < Duration::from_secs(2));
+    assert!(matches!(r.cmd(&["BLPOP", "q", "-1"]), R::E(e) if e.contains("negative")));
+    assert!(matches!(r.cmd(&["BLPOP", "q", "soon"]), R::E(e) if e.contains("not a float")));
+
+    // A write from the KivaDB shell wakes it too.
+    let waiting = in_thread(vec!["BRPOP", "shell-q", "5"]);
+    std::thread::sleep(Duration::from_millis(150));
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, r#"set shell-q ["from the shell"]"#);
+    assert_eq!(waiting.join().unwrap().0, R::A(Some(vec![b("shell-q"), b("from the shell")])));
+
+    // BLMOVE, BRPOPLPUSH, BLMPOP, BZPOPMIN, BZPOPMAX, BZMPOP.
+    let waiting = in_thread(vec!["BLMOVE", "src", "dst", "LEFT", "RIGHT", "5"]);
+    std::thread::sleep(Duration::from_millis(100));
+    r.cmd(&["RPUSH", "src", "x", "y"]);
+    assert_eq!(waiting.join().unwrap().0, b("x"));
+    assert_eq!(r.cmd(&["BRPOPLPUSH", "src", "dst", "1"]), b("y"));
+    assert_eq!(r.cmd(&["LRANGE", "dst", "0", "-1"]), R::A(Some(vec![b("y"), b("x")])));
+    assert_eq!(r.cmd(&["BRPOPLPUSH", "src", "dst", "0.1"]), R::B(None));
+    assert_eq!(
+        r.cmd(&["BLMPOP", "1", "2", "none", "dst", "RIGHT", "COUNT", "5"]),
+        R::A(Some(vec![b("dst"), R::A(Some(vec![b("x"), b("y")]))]))
+    );
+    let waiting = in_thread(vec!["BZPOPMIN", "board", "5"]);
+    std::thread::sleep(Duration::from_millis(100));
+    r.cmd(&["ZADD", "board", "3", "c", "1", "a", "2", "b"]);
+    assert_eq!(waiting.join().unwrap().0, R::A(Some(vec![b("board"), b("a"), b("1")])));
+    assert_eq!(r.cmd(&["BZPOPMAX", "board", "1"]), R::A(Some(vec![b("board"), b("c"), b("3")])));
+    assert_eq!(
+        r.cmd(&["BZMPOP", "1", "1", "board", "MIN"]),
+        R::A(Some(vec![b("board"), R::A(Some(vec![R::A(Some(vec![b("b"), b("2")]))]))]))
+    );
+
+    // Inside MULTI, a blocking command does not wait.
+    r.cmd(&["MULTI"]);
+    r.cmd(&["BLPOP", "nothing", "0"]);
+    assert_eq!(r.cmd(&["EXEC"]), R::A(Some(vec![R::A(None)])));
+    r.cmd(&["SET", "str", "v"]);
+    assert!(matches!(r.cmd(&["BLPOP", "str", "1"]), R::E(e) if e.starts_with("WRONGTYPE")));
+
+    // A client that left takes nothing: the value stays for the others.
+    let gone = std::thread::spawn(move || {
+        let mut c = Redis::connect(port);
+        let mut req = String::new();
+        for a in ["BLPOP", "orphan", "0"] {
+            req.push_str(&format!("${}\r\n{a}\r\n", a.len()));
+        }
+        c.stream.write_all(format!("*3\r\n{req}").as_bytes()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(c);
+    });
+    gone.join().unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    r.cmd(&["RPUSH", "orphan", "kept"]);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(r.cmd(&["LRANGE", "orphan", "0", "-1"]), R::A(Some(vec![b("kept")])));
+
+    // WAIT: no replica, nothing to wait for.
+    assert_eq!(r.cmd(&["WAIT", "0", "100"]), R::I(0));
+}
+
+#[test]
+fn redis_streams_and_consumer_groups() {
+    let dir = TempDir::new("resp_streams");
+    let inst = instance(&dir);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    let id = |reply: R| match reply {
+        R::B(Some(s)) => s,
+        other => panic!("{other:?}"),
+    };
+    let entry = |i: &str, f: &[&str]| R::A(Some(vec![b(i), R::A(Some(f.iter().map(|x| b(x)).collect()))]));
+
+    // XADD with explicit and generated ids.
+    assert_eq!(r.cmd(&["XADD", "s", "1-1", "temp", "20"]), b("1-1"));
+    assert_eq!(r.cmd(&["XADD", "s", "1-*", "temp", "21"]), b("1-2"));
+    assert!(matches!(r.cmd(&["XADD", "s", "1-1", "x", "y"]), R::E(e) if e.contains("equal or smaller")));
+    assert!(matches!(r.cmd(&["XADD", "t", "0-0", "x", "y"]), R::E(e) if e.contains("greater than 0-0")));
+    assert!(matches!(r.cmd(&["XADD", "s", "*", "odd"]), R::E(e) if e.contains("wrong number")));
+    let auto = id(r.cmd(&["XADD", "s", "*", "temp", "22", "unit", "C"]));
+    assert!(auto.split('-').next().unwrap().parse::<i64>().unwrap() >= kivadb::util::now_ms() - 5000);
+    assert_eq!(r.cmd(&["XLEN", "s"]), R::I(3));
+    assert_eq!(r.cmd(&["TYPE", "s"]), R::S("stream".into()));
+    assert!(matches!(r.cmd(&["HGET", "s", "x"]), R::E(e) if e.starts_with("WRONGTYPE")));
+    assert_eq!(r.cmd(&["XADD", "absent", "NOMKSTREAM", "*", "a", "b"]), R::B(None));
+
+    // Ranges, forwards and backwards, inclusive and exclusive, with COUNT.
+    assert_eq!(
+        r.cmd(&["XRANGE", "s", "-", "1"]),
+        R::A(Some(vec![entry("1-1", &["temp", "20"]), entry("1-2", &["temp", "21"])]))
+    );
+    assert_eq!(r.cmd(&["XRANGE", "s", "(1-1", "+", "COUNT", "1"]), R::A(Some(vec![entry("1-2", &["temp", "21"])])));
+    let R::A(Some(rev)) = r.cmd(&["XREVRANGE", "s", "+", "-", "COUNT", "2"]) else { panic!() };
+    assert_eq!(rev[1], entry("1-2", &["temp", "21"]));
+
+    // XDEL, XTRIM, MAXLEN on XADD.
+    assert_eq!(r.cmd(&["XDEL", "s", "1-1", "9-9"]), R::I(1));
+    for i in 0..10 {
+        r.cmd(&["XADD", "log", "MAXLEN", "~", "5", "*", "n", &i.to_string()]);
+    }
+    assert_eq!(r.cmd(&["XLEN", "log"]), R::I(5));
+    assert_eq!(r.cmd(&["XTRIM", "log", "MAXLEN", "2"]), R::I(3));
+    let R::A(Some(left)) = r.cmd(&["XRANGE", "log", "-", "+"]) else { panic!() };
+    assert_eq!(left.len(), 2);
+
+    // XREAD after an id; BLOCK with $ waits for what comes next.
+    let R::A(Some(read)) = r.cmd(&["XREAD", "COUNT", "10", "STREAMS", "s", "0"]) else { panic!() };
+    assert_eq!(read.len(), 1);
+    assert_eq!(r.cmd(&["XREAD", "STREAMS", "s", "$"]), R::A(None));
+    let waiting = std::thread::spawn(move || {
+        let mut c = Redis::connect(port);
+        c.cmd(&["XREAD", "BLOCK", "5000", "STREAMS", "s", "$"])
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let new = id(r.cmd(&["XADD", "s", "*", "temp", "23"]));
+    let R::A(Some(got)) = waiting.join().unwrap() else { panic!() };
+    assert_eq!(got, vec![R::A(Some(vec![b("s"), R::A(Some(vec![entry(&new, &["temp", "23"])]))]))]);
+    let t = std::time::Instant::now();
+    assert_eq!(r.cmd(&["XREAD", "BLOCK", "150", "STREAMS", "s", "$"]), R::A(None));
+    assert!(t.elapsed() >= Duration::from_millis(140));
+
+    // Consumer groups: each entry goes to one consumer, until acknowledged.
+    assert_eq!(r.cmd(&["XGROUP", "CREATE", "jobs", "workers", "$", "MKSTREAM"]), R::S("OK".into()));
+    assert!(matches!(r.cmd(&["XGROUP", "CREATE", "jobs", "workers", "$"]), R::E(e) if e.starts_with("BUSYGROUP")));
+    for j in ["a", "b", "c"] {
+        r.cmd(&["XADD", "jobs", "*", "job", j]);
+    }
+    let R::A(Some(first)) = r.cmd(&["XREADGROUP", "GROUP", "workers", "w1", "COUNT", "2", "STREAMS", "jobs", ">"])
+    else {
+        panic!()
+    };
+    let R::A(Some(ref stream)) = first[0] else { panic!() };
+    let R::A(Some(ref items)) = stream[1] else { panic!() };
+    assert_eq!(items.len(), 2);
+    let R::A(Some(ref e0)) = items[0] else { panic!() };
+    let R::B(Some(ref id_a)) = e0[0] else { panic!() };
+    let R::A(Some(second)) = r.cmd(&["XREADGROUP", "GROUP", "workers", "w2", "STREAMS", "jobs", ">"]) else { panic!() };
+    let R::A(Some(ref s2)) = second[0] else { panic!() };
+    assert!(matches!(&s2[1], R::A(Some(v)) if v.len() == 1), "w2 gets only the third");
+    assert_eq!(r.cmd(&["XREADGROUP", "GROUP", "workers", "w2", "STREAMS", "jobs", ">"]), R::A(None));
+    let R::A(Some(summary)) = r.cmd(&["XPENDING", "jobs", "workers"]) else { panic!() };
+    assert_eq!(summary[0], R::I(3));
+    assert_eq!(r.cmd(&["XACK", "jobs", "workers", id_a]), R::I(1));
+    assert_eq!(r.cmd(&["XACK", "jobs", "workers", id_a]), R::I(0));
+    let R::A(Some(rows)) = r.cmd(&["XPENDING", "jobs", "workers", "-", "+", "10", "w1"]) else { panic!() };
+    assert_eq!(rows.len(), 1);
+    // The history of w1: what it was given and did not acknowledge.
+    let R::A(Some(hist)) = r.cmd(&["XREADGROUP", "GROUP", "workers", "w1", "STREAMS", "jobs", "0"]) else { panic!() };
+    let R::A(Some(ref h)) = hist[0] else { panic!() };
+    assert!(matches!(&h[1], R::A(Some(v)) if v.len() == 1));
+    // Another consumer takes over what was left idle.
+    std::thread::sleep(Duration::from_millis(50));
+    let R::A(Some(claimed)) = r.cmd(&["XAUTOCLAIM", "jobs", "workers", "w3", "10", "0", "COUNT", "10", "JUSTID"])
+    else {
+        panic!()
+    };
+    assert!(matches!(&claimed[1], R::A(Some(v)) if v.len() == 2), "{claimed:?}");
+    let R::A(Some(rows)) = r.cmd(&["XPENDING", "jobs", "workers", "-", "+", "10", "w3"]) else { panic!() };
+    let R::A(Some(ref row)) = rows[0] else { panic!() };
+    let R::B(Some(ref pid)) = row[0] else { panic!() };
+    assert_eq!(r.cmd(&["XCLAIM", "jobs", "workers", "w1", "0", pid, "JUSTID"]), R::A(Some(vec![b(pid)])));
+
+    // A blocked group reader is woken by XADD.
+    let waiting = std::thread::spawn(move || {
+        let mut c = Redis::connect(port);
+        c.cmd(&["XREADGROUP", "GROUP", "workers", "w4", "BLOCK", "5000", "STREAMS", "jobs", ">"])
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    r.cmd(&["XADD", "jobs", "*", "job", "d"]);
+    assert!(matches!(waiting.join().unwrap(), R::A(Some(v)) if v.len() == 1));
+
+    // XINFO.
+    let R::A(Some(info)) = r.cmd(&["XINFO", "STREAM", "jobs"]) else { panic!() };
+    assert_eq!(info[0], b("length"));
+    assert_eq!(info[1], R::I(4));
+    let R::A(Some(groups)) = r.cmd(&["XINFO", "GROUPS", "jobs"]) else { panic!() };
+    assert_eq!(groups.len(), 1);
+    let R::A(Some(consumers)) = r.cmd(&["XINFO", "CONSUMERS", "jobs", "workers"]) else { panic!() };
+    assert_eq!(consumers.len(), 4);
+    assert!(
+        matches!(r.cmd(&["XREADGROUP", "GROUP", "nope", "c", "STREAMS", "jobs", ">"]), R::E(e) if e.starts_with("NOGROUP"))
+    );
+    assert_eq!(r.cmd(&["XGROUP", "DESTROY", "jobs", "workers"]), R::I(1));
+
+    // A stream is a KivaDB document, readable from the shell.
+    let mut s = Session::new(inst.clone(), true, None);
+    assert!(ok(&mut s, "get jobs.redis").contains("stream"));
 }

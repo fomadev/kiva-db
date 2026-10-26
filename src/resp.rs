@@ -35,7 +35,7 @@ use crate::error::{KivaError, Result};
 use crate::instance::{Instance, VERSION};
 use crate::pubsub::{Frame, Held, Outbox, OUTBOX_FRAMES};
 use crate::session::{Meta, Need, Session};
-use crate::util::{glob_match, now_secs};
+use crate::util::{glob_match, now_ms};
 use crate::value::{fmt_f64, Type, Value};
 use mlua::{Lua, MultiValue, Table, Value as LVal};
 use serde_json::{json, Map, Value as Json};
@@ -47,6 +47,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
+#[path = "resp_blocking.rs"]
+mod blocking;
 #[path = "resp_classic.rs"]
 mod classic;
 #[path = "resp_commands.rs"]
@@ -55,7 +57,9 @@ mod commands;
 mod json;
 #[path = "resp_sets.rs"]
 mod sets;
-use std::time::{SystemTime, UNIX_EPOCH};
+#[path = "resp_streams.rs"]
+mod streams;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_ARGS: usize = 1024 * 1024;
 const MAX_BULK: usize = 512 * 1024 * 1024;
@@ -98,9 +102,16 @@ pub struct Shared {
     scripts: Mutex<HashMap<String, String>>,
     /// Connections listening to channels.
     pub hub: crate::pubsub::Hub,
+    /// Connections waiting in a blocking command.
+    waiters: blocking::Waiters,
 }
 
 impl Shared {
+    /// A write was committed somewhere: connections waiting for data look again.
+    pub fn wake(&self) {
+        self.waiters.wake();
+    }
+
     fn script(&self, sha: &str) -> Option<String> {
         self.scripts.lock().unwrap_or_else(|e| e.into_inner()).get(&sha.to_ascii_lowercase()).cloned()
     }
@@ -458,8 +469,16 @@ fn float(arg: &[u8]) -> std::result::Result<f64, Reply> {
         .ok_or_else(|| Reply::err("value is not a valid float"))
 }
 
-fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+/// The deadline of a Redis expiry option, in milliseconds: `EX` seconds or
+/// `PX` milliseconds from now, or `EXAT` / `PXAT` a Unix time.
+fn deadline(option: &str, n: i64) -> Option<i64> {
+    Some(match option {
+        "EX" | "EXPIRE" | "SETEX" => now_ms().saturating_add(n.saturating_mul(1000)),
+        "PX" | "PEXPIRE" | "PSETEX" => now_ms().saturating_add(n),
+        "EXAT" | "EXPIREAT" => n.saturating_mul(1000),
+        "PXAT" | "PEXPIREAT" => n,
+        _ => return None,
+    })
 }
 
 /// A Redis string as a KivaDB value: text when it is UTF-8, bytes otherwise.
@@ -527,9 +546,30 @@ impl Conn {
         }
         // Inside MULTI, commands are queued until EXEC.
         if let Some(queue) = self.queued.as_mut() {
-            if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT") {
+            if !matches!(name.as_str(), "EXEC" | "DISCARD" | "MULTI" | "QUIT" | "WATCH") {
                 queue.push(args.to_vec());
                 return Reply::Simple("QUEUED".into());
+            }
+        }
+        // Commands that wait do it without the turn, so that the others run.
+        if self.queued.is_none() {
+            if name == "WAIT" {
+                return self.wait_replicas(args).unwrap_or_else(|e| e);
+            }
+            let waits = match name.as_str() {
+                "XREAD" | "XREADGROUP" => matches!(self.stream_block(args), Ok(Some(_))),
+                n => blocking::is_blocking(n),
+            };
+            if waits {
+                let args = {
+                    let inst = self.sess.inst.clone();
+                    let _turn = inst.resp.turn.lock().unwrap_or_else(|e| e.into_inner());
+                    match self.resolve_last_ids(args) {
+                        Ok(a) => a,
+                        Err(e) => return e,
+                    }
+                };
+                return self.block(&name, &args);
             }
         }
         let inst = self.sess.inst.clone();
@@ -794,12 +834,42 @@ impl Conn {
                 Ok(Reply::ok())
             }
             "DISCARD" => match self.queued.take() {
-                Some(_) => Ok(Reply::ok()),
+                Some(_) => {
+                    self.sess.unwatch();
+                    Ok(Reply::ok())
+                }
                 None => Err(Reply::err("DISCARD without MULTI")),
             },
-            "EXEC" => self.exec(),
-            // WATCH itself is refused by the filter: there is nothing to undo.
-            "UNWATCH" => Ok(Reply::ok()),
+            "EXEC" => {
+                let r = self.exec();
+                self.sess.unwatch();
+                r
+            }
+            // EXEC answers nil when one of these keys changes before it.
+            "WATCH" => {
+                arity(args, 2)?;
+                if self.queued.is_some() {
+                    return Err(Reply::err("WATCH inside MULTI is not allowed"));
+                }
+                self.sess.check(Need::Read)?;
+                let keys = args[1..].iter().map(|a| key(a)).collect::<std::result::Result<Vec<_>, _>>()?;
+                self.sess.watch(&keys);
+                Ok(Reply::ok())
+            }
+            // Inside MULTI or a script: one try, no wait.
+            "BLPOP" | "BRPOP" | "BRPOPLPUSH" | "BLMOVE" | "BLMPOP" | "BZPOPMIN" | "BZPOPMAX" | "BZMPOP" => {
+                Ok(self.try_blocking(name, args)?.unwrap_or_else(|| self.timed_out(name)))
+            }
+            "XREAD" | "XREADGROUP" => Ok(self.stream_read(name, args)?.unwrap_or(Reply::Array(None))),
+            "WAIT" => {
+                arity(args, 3)?;
+                let n = usize::try_from(int(&args[1])?).map_err(|_| Reply::err("value is out of range"))?;
+                Ok(Reply::Int(self.sess.inst.repl.wait(n, Duration::ZERO) as i64))
+            }
+            "UNWATCH" => {
+                self.sess.unwatch();
+                Ok(Reply::ok())
+            }
             "SUBSCRIBE" | "PSUBSCRIBE" => {
                 arity(args, 2)?;
                 let outbox = self.outbox.as_ref().ok_or_else(no_outbox)?;
@@ -874,7 +944,7 @@ impl Conn {
                 if n <= 0 {
                     return Err(Reply::err(format!("invalid expire time in '{}' command", name.to_ascii_lowercase())));
                 }
-                let exp = if name == "SETEX" { now_secs() + n } else { (now_ms() + n + 999) / 1000 };
+                let exp = deadline(name, n).expect("an expiry command");
                 self.put(&k, value_of(&args[3]), exp)?;
                 Ok(Reply::ok())
             }
@@ -1052,12 +1122,7 @@ impl Conn {
                 if (nx && (xx || gt || lt)) || (gt && lt) {
                     return Err(Reply::err("NX and XX, GT or LT options at the same time are not compatible"));
                 }
-                let exp = match name {
-                    "EXPIRE" => now_secs().saturating_add(n),
-                    "PEXPIRE" => (now_ms().saturating_add(n) + 999) / 1000,
-                    "EXPIREAT" => n,
-                    _ => (n + 999) / 1000,
-                };
+                let exp = deadline(name, n).expect("an expiry command");
                 let Some((v, m)) = self.get(&k)? else { return Ok(Reply::Int(0)) };
                 // 0 means "no expiry", which counts as infinitely far for GT and LT.
                 let cur = m.expires_at;
@@ -1069,7 +1134,7 @@ impl Conn {
                 if !allowed {
                     return Ok(Reply::Int(0));
                 }
-                if exp <= now_secs() {
+                if exp <= now_ms() {
                     self.sess.kv_del(&k)?;
                 } else {
                     self.sess.kv_put(&k, v, exp, m.msgpack)?;
@@ -1093,8 +1158,8 @@ impl Conn {
                 Ok(Reply::Int(match self.get(&k)? {
                     None => -2,
                     Some((_, m)) if m.expires_at == 0 => -1,
-                    Some((_, m)) if name == "EXPIRETIME" => m.expires_at,
-                    Some((_, m)) => m.expires_at * 1000,
+                    Some((_, m)) if name == "EXPIRETIME" => m.expires_at / 1000,
+                    Some((_, m)) => m.expires_at,
                 }))
             }
             "GETEX" => {
@@ -1110,13 +1175,7 @@ impl Conn {
                         if n <= 0 {
                             return Err(Reply::err("invalid expire time in 'getex' command"));
                         }
-                        Some(match o.as_str() {
-                            "EX" => now_secs() + n,
-                            "PX" => (now_ms() + n + 999) / 1000,
-                            "EXAT" => n,
-                            "PXAT" => (n + 999) / 1000,
-                            _ => return Err(Reply::err("syntax error")),
-                        })
+                        Some(deadline(&o, n).ok_or_else(|| Reply::err("syntax error"))?)
                     }
                     _ => return Err(Reply::err("syntax error")),
                 };
@@ -1132,11 +1191,12 @@ impl Conn {
                     None => -2,
                     Some((_, m)) if m.expires_at == 0 => -1,
                     Some((_, m)) => {
-                        let secs = (m.expires_at - now_secs()).max(0);
+                        let ms = (m.expires_at - now_ms()).max(0);
+                        // Rounded to the nearest second, as Redis does.
                         if name == "TTL" {
-                            secs
+                            (ms + 500) / 1000
                         } else {
-                            (m.expires_at * 1000 - now_ms()).max(0)
+                            ms
                         }
                     }
                 }))
@@ -1358,6 +1418,9 @@ impl Conn {
                 if let Some(r) = self.run_json(name, args) {
                     return r;
                 }
+                if let Some(r) = self.run_streams(name, args) {
+                    return r;
+                }
                 Err(commands::unknown(args))
             }
         }
@@ -1563,12 +1626,7 @@ impl Conn {
                     if n <= 0 {
                         return Err(Reply::err("invalid expire time in 'set' command"));
                     }
-                    exp = Some(match opt.as_str() {
-                        "EX" => now_secs() + n,
-                        "PX" => (now_ms() + n + 999) / 1000,
-                        "EXAT" => n,
-                        _ => (n + 999) / 1000,
-                    });
+                    exp = deadline(&opt, n);
                     i += 1;
                 }
                 _ => return Err(Reply::err("syntax error")),
@@ -1644,6 +1702,13 @@ impl Conn {
         }
         if self.sess.txn.is_some() {
             return Err(Reply::err("a transaction is already open on this session"));
+        }
+        // A watched key changed already: nothing runs. (The commit checks
+        // again, under the same lock as its writes.)
+        if let Some((e, w)) = &self.sess.watch {
+            if e.watch_conflict(w).is_some() {
+                return Ok(Reply::Array(None));
+            }
         }
         let begun = self.sess.begin();
         let in_txn = begun.is_ok();

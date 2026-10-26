@@ -15,7 +15,7 @@ use crate::error::{KivaError, Result};
 use crate::exec::validate_key_name;
 use crate::instance::VERSION;
 use crate::session::{Need, Session};
-use crate::util::{b64_decode, b64_encode, now_secs};
+use crate::util::{b64_decode, b64_encode, deadline_in, secs_left};
 use crate::value::{is_valid_number, Type, Value};
 use serde_json::{json, Value as Json};
 use std::sync::atomic::Ordering;
@@ -124,7 +124,7 @@ fn value_in(ty: Type, j: &Json) -> Result<Value> {
 
 fn ttl_of(expires_at: i64) -> Json {
     if expires_at > 0 {
-        json!((expires_at - now_secs()).max(0))
+        json!(secs_left(expires_at))
     } else {
         Json::Null
     }
@@ -207,7 +207,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             // ttl: absent keeps the current expiry, 0 removes it, N sets it.
             let expires_at = match req["ttl"].as_i64() {
                 None => meta.expires_at,
-                Some(t) if t > 0 => now_secs() + t,
+                Some(t) if t > 0 => deadline_in(t),
                 Some(_) => 0,
             };
             sess.kv_put(key, value, expires_at, meta.msgpack)?;

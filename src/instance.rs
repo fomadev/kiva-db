@@ -469,6 +469,8 @@ impl Instance {
             Op::Reset => self.semantic.reset(workspace),
         }
         self.repl.broadcast(workspace, op);
+        // Redis clients waiting for data (BLPOP, XREAD BLOCK...) look again.
+        self.resp.wake();
         // On a replica, what the master's triggers wrote arrives with the
         // rest: running them again would apply their effects twice.
         if IN_TRIGGER.with(|c| c.get()) || self.repl.is_replica() {
