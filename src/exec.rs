@@ -1036,7 +1036,7 @@ impl Session {
                 return Err("'del all keys' cannot run inside a transaction.".into());
             }
             self.engine.reset()?;
-            self.wrote = self.ws == "default";
+            self.wrote = true;
             out.say("All keys deleted. Database reset.");
             return Ok(());
         }

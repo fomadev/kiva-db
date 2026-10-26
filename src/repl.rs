@@ -2,11 +2,24 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Master -> replica replication of the default workspace.
+//! Master -> replica replication of every workspace.
 //!
 //! A replica connects to the master's TCP port, receives a full snapshot and
 //! then the live stream of operations, acknowledging each one. Operations are
 //! absolute (`set key = value`, `del key`), so replaying one twice is harmless.
+//!
+//! The stream carries every workspace: the snapshot starts with the list of
+//! the master's workspaces (`R_WORKSPACES`), then each one's keys after an
+//! `R_USE <name>`; live operations name their workspace the same way when
+//! it changes. Operations of all workspaces share one sequence, numbered in
+//! the order they are queued, so an acknowledgement covers everything before
+//! it whatever the workspace. A replica says it understands this with
+//! `repl=2` in its hello; the master refuses one that does not, since it
+//! would apply every workspace's operations to its default one.
+//!
+//! The system database (users, stored scripts, triggers) travels the same
+//! way, under the name [`SYSTEM`], so that a replica promoted by a
+//! failover has the master's accounts, scripts and triggers.
 //!
 //! While the stream is idle, the master sends a heartbeat every
 //! `failover.heartbeat_ms` listing the nodes of the group; the automatic
@@ -27,9 +40,19 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 enum ReplMsg {
-    Op(u64, Op),
+    /// Sequence, workspace, operation.
+    Op(u64, String, Op),
+    /// A workspace was created (`false`) or unregistered (`true`).
+    Workspace(String, bool),
     Promote,
 }
+
+/// What a replica puts in its hello to receive every workspace.
+const ALL_WORKSPACES: &str = "repl=2";
+
+/// The name the system database goes by in the stream; no workspace can
+/// have it, since workspace names hold letters, digits, `_` and `-` only.
+pub const SYSTEM: &str = "@system";
 
 struct ReplicaConn {
     id: u64,
@@ -259,14 +282,22 @@ impl ReplState {
         self.link.lock().unwrap_or_else(|e| e.into_inner()).status = status.into();
     }
 
-    /// Called by the engine listener, in commit order.
-    pub fn broadcast(&self, op: &Op) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+    /// Called by the engine listeners, in commit order within a workspace.
+    pub fn broadcast(&self, workspace: &str, op: &Op) {
+        // Numbered under the lock, so that every replica receives the
+        // operations in sequence order, whichever workspaces they come from.
         let mut replicas = self.replicas.lock().unwrap_or_else(|e| e.into_inner());
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         if replicas.is_empty() {
             return;
         }
-        replicas.retain(|r| r.tx.send(ReplMsg::Op(seq, op.clone())).is_ok());
+        replicas.retain(|r| r.tx.send(ReplMsg::Op(seq, workspace.to_string(), op.clone())).is_ok());
+    }
+
+    /// A workspace was created or unregistered on this node.
+    pub fn workspace_changed(&self, name: &str, removed: bool) {
+        let mut replicas = self.replicas.lock().unwrap_or_else(|e| e.into_inner());
+        replicas.retain(|r| r.tx.send(ReplMsg::Workspace(name.to_string(), removed)).is_ok());
     }
 
     pub fn replicas(&self) -> Vec<ReplicaInfo> {
@@ -382,12 +413,24 @@ fn reachable(listen: &str, peer: &str) -> String {
 /// Master side: feeds one replica until it disconnects. `hello` is what the
 /// replica sent: `<listen address> node=<id>`.
 pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, hello: String) {
-    let (listen, node) = match hello.split_once(" node=") {
-        Some((l, n)) => (l.to_string(), n.trim().to_string()),
-        None => (hello.clone(), String::new()),
-    };
+    let mut words = hello.split_whitespace();
+    let listen = words.next().unwrap_or_default().to_string();
+    let (mut node, mut all) = (String::new(), false);
+    for w in words {
+        match w.strip_prefix("node=") {
+            Some(n) => node = n.to_string(),
+            None => all |= w == ALL_WORKSPACES,
+        }
+    }
+    if !all {
+        let msg = format!(
+            "this master replicates every workspace: upgrade the replica to KivaDB {} or later",
+            crate::instance::VERSION
+        );
+        let _ = write_frame(&mut stream, ST_ERR, msg.as_bytes());
+        return;
+    }
     let listen = reachable(&listen, &peer);
-    let Ok(engine) = inst.engine("default") else { return };
     let (tx, rx) = mpsc::channel();
     let acked = Arc::new(AtomicU64::new(0));
     let id = inst.next_id();
@@ -424,13 +467,30 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
 
     let run = |stream: &mut TcpStream| -> std::io::Result<()> {
         write_frame(stream, R_SNAP_BEGIN, &[])?;
-        for (key, _) in engine.range(None, None, false, 0) {
-            if let Ok(Some((raw, e))) = engine.get_raw(&key) {
+        let names: Vec<String> = inst.workspaces().into_iter().map(|(n, _)| n).collect();
+        write_frame(stream, R_WORKSPACES, names.join("\n").as_bytes())?;
+        for name in &names {
+            let Ok(engine) = inst.engine(name) else { continue };
+            write_frame(stream, R_USE, name.as_bytes())?;
+            write_frame(stream, R_RESET, &0u64.to_be_bytes())?;
+            for (key, _) in engine.range(None, None, false, 0) {
+                if let Ok(Some((raw, e))) = engine.get_raw(&key) {
+                    let p = set_payload(0, &key, e.ty, e.is_msgpack(), e.timestamp, e.expires_at, &raw);
+                    write_frame(stream, R_SET, &p)?;
+                }
+            }
+        }
+        write_frame(stream, R_USE, SYSTEM.as_bytes())?;
+        write_frame(stream, R_RESET, &0u64.to_be_bytes())?;
+        for (key, _) in inst.system.range(None, None, false, 0) {
+            if let Ok(Some((raw, e))) = inst.system.get_raw(&key) {
                 let p = set_payload(0, &key, e.ty, e.is_msgpack(), e.timestamp, e.expires_at, &raw);
                 write_frame(stream, R_SET, &p)?;
             }
         }
         write_frame(stream, R_SNAP_END, &inst.repl.seq().to_be_bytes())?;
+        // The workspace the replica applies operations to.
+        let mut current = SYSTEM.to_string();
         let mut last_beat = Instant::now() - Duration::from_secs(3600);
         loop {
             let beat = crate::failover::Settings::of(inst).heartbeat;
@@ -439,18 +499,30 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
                 last_beat = Instant::now();
             }
             match rx.recv_timeout(beat.min(Duration::from_secs(1))) {
-                Ok(ReplMsg::Op(seq, op)) => match op {
-                    Op::Set { key, ty, raw, msgpack, timestamp, expires_at, .. } => {
-                        let p = set_payload(seq, &key, ty, msgpack, timestamp, expires_at, &raw);
-                        write_frame(stream, R_SET, &p)?;
+                Ok(ReplMsg::Op(seq, ws, op)) => {
+                    if ws != current {
+                        write_frame(stream, R_USE, ws.as_bytes())?;
+                        current = ws;
                     }
-                    Op::Del { key } => {
-                        let mut p = seq.to_be_bytes().to_vec();
-                        p.extend_from_slice(key.as_bytes());
-                        write_frame(stream, R_DEL, &p)?;
+                    match op {
+                        Op::Set { key, ty, raw, msgpack, timestamp, expires_at, .. } => {
+                            let p = set_payload(seq, &key, ty, msgpack, timestamp, expires_at, &raw);
+                            write_frame(stream, R_SET, &p)?;
+                        }
+                        Op::Del { key } => {
+                            let mut p = seq.to_be_bytes().to_vec();
+                            p.extend_from_slice(key.as_bytes());
+                            write_frame(stream, R_DEL, &p)?;
+                        }
+                        Op::Reset => write_frame(stream, R_RESET, &seq.to_be_bytes())?,
                     }
-                    Op::Reset => write_frame(stream, R_RESET, &seq.to_be_bytes())?,
-                },
+                }
+                // A new workspace exists on the replica as soon as it is named.
+                Ok(ReplMsg::Workspace(ws, false)) => {
+                    write_frame(stream, R_USE, ws.as_bytes())?;
+                    current = ws;
+                }
+                Ok(ReplMsg::Workspace(ws, true)) => write_frame(stream, R_WS_REMOVE, ws.as_bytes())?,
                 Ok(ReplMsg::Promote) => write_frame(stream, R_PROMOTE, &[])?,
                 Err(RecvTimeoutError::Timeout) => {
                     if !alive.load(Ordering::SeqCst) || inst.shutting_down.load(Ordering::SeqCst) {
@@ -555,11 +627,14 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
     if inst.repl.advertised().is_empty() {
         inst.repl.group().advertised = listen.clone();
     }
-    let hello = format!("{listen} node={}", inst.repl.node_id());
+    let hello = format!("{listen} node={} {ALL_WORKSPACES}", inst.repl.node_id());
     write_frame(&mut stream, CMD_REPL_SYNC, hello.as_bytes())?;
     inst.repl.touch();
 
-    let engine = inst.engine("default")?;
+    // A master older than multi-workspace replication sends the default
+    // workspace only, without R_USE: everything then goes there.
+    let mut engine = inst.engine("default")?;
+    let mut on_system = false;
     let applied = |seq: u64, stream: &mut TcpStream| -> std::io::Result<()> {
         if seq > 0 {
             let mut link = inst.repl.link.lock().unwrap_or_else(|e| e.into_inner());
@@ -581,7 +656,39 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
         match code {
             R_SNAP_BEGIN => {
                 inst.repl.set_status("receiving snapshot");
+                engine = inst.engine("default")?;
+                on_system = false;
                 engine.reset()?;
+            }
+            R_WORKSPACES => {
+                let names: Vec<String> =
+                    String::from_utf8_lossy(&payload).lines().map(str::to_string).filter(|n| !n.is_empty()).collect();
+                for name in &names {
+                    inst.ensure_workspace(name)?;
+                }
+                // The replica mirrors the master: its other workspaces are
+                // unregistered, their files left on disk.
+                for (name, _) in inst.workspaces() {
+                    if name != "default" && !names.contains(&name) {
+                        inst.remove_workspace(&name)?;
+                    }
+                }
+            }
+            R_USE => {
+                let name = String::from_utf8_lossy(&payload).into_owned();
+                on_system = name == SYSTEM;
+                engine = if on_system {
+                    inst.system.clone()
+                } else {
+                    inst.ensure_workspace(&name)?;
+                    inst.engine(&name)?
+                };
+            }
+            R_WS_REMOVE => {
+                let name = String::from_utf8_lossy(&payload).into_owned();
+                if name != "default" {
+                    inst.remove_workspace(&name)?;
+                }
             }
             R_SET => {
                 let seq = r.u64()?;
@@ -591,21 +698,31 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
                 let msgpack = r.u8()? != 0;
                 let key = r.str16()?;
                 engine.put_raw(&key, ty, r.rest(), msgpack, timestamp, expires_at)?;
+                if on_system && key.starts_with("trigger:") {
+                    inst.reload_triggers();
+                }
                 applied(seq, &mut stream)?;
             }
             R_DEL => {
                 let seq = r.u64()?;
                 let key = String::from_utf8_lossy(r.rest()).into_owned();
                 engine.delete(&key)?;
+                if on_system && key.starts_with("trigger:") {
+                    inst.reload_triggers();
+                }
                 applied(seq, &mut stream)?;
             }
             R_RESET => {
                 let seq = r.u64()?;
                 engine.reset()?;
+                if on_system {
+                    inst.reload_triggers();
+                }
                 applied(seq, &mut stream)?;
             }
             R_SNAP_END => {
                 let seq = r.u64()?;
+                inst.reload_triggers();
                 {
                     let mut link = inst.repl.link.lock().unwrap_or_else(|e| e.into_inner());
                     link.status = "connected".into();

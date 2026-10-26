@@ -69,7 +69,7 @@ pub struct Session {
     /// Where key-change notifications for this session are delivered.
     pub events: Option<Sender<String>>,
     pub subs: Vec<String>,
-    /// Set when the session wrote to the replicated workspace.
+    /// Set when the session wrote (every workspace is replicated).
     pub wrote: bool,
 }
 
@@ -272,7 +272,7 @@ impl Session {
     /// Checks that this session may modify data right now.
     pub fn writable(&self) -> Result<()> {
         self.check(Need::Write)?;
-        if self.ws == "default" && self.inst.repl.is_replica() {
+        if self.inst.repl.is_replica() {
             // Name the master, so that clients know where to go.
             let master = self.inst.repl.link().master;
             return Err(KivaError::ReadOnly(format!(
@@ -348,7 +348,7 @@ impl Session {
         };
         if wrote {
             self.inst.metrics.sets.fetch_add(1, Ordering::Relaxed);
-            self.wrote = self.ws == "default";
+            self.wrote = true;
         }
         Ok(Some(out))
     }
@@ -389,7 +389,7 @@ impl Session {
             return Ok(());
         }
         self.engine.check_room(put_keys(&ops))?;
-        self.wrote = self.ws == "default";
+        self.wrote = true;
         let mut ops = ops;
         if ops.len() == 1 {
             match ops.pop().unwrap() {
@@ -437,7 +437,7 @@ impl Session {
         };
         self.engine.txn_end();
         res?;
-        self.wrote = self.ws == "default" && n > 0;
+        self.wrote = n > 0;
         Ok(n)
     }
 
