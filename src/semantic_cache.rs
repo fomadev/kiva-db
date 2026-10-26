@@ -110,7 +110,7 @@ fn is_pattern(p: &str) -> bool {
 
 impl Space {
     fn new() -> Space {
-        let params = Params { metric: Metric::Cosine, m: 16, ef_construction: 100 };
+        let params = Params { metric: Metric::Cosine, m: 16, ef_construction: 100, ..Params::default() };
         Space {
             graph: Hnsw::new(params),
             dims: None,
@@ -190,7 +190,7 @@ impl Space {
         let found = self.graph.search(vector, 1, 64, |id| self.entries.get(id).is_some_and(|e| e.alive(now)));
         let id = found.keys.into_iter().next()?;
         let (v, n) = self.graph.get(&id)?;
-        Some((id, Query::new(vector.to_vec(), Metric::Cosine).score(v, n)))
+        Some((id, Query::new(vector.to_vec(), Metric::Cosine).score(&v, n)))
     }
 }
 
