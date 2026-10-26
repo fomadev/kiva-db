@@ -3802,10 +3802,10 @@ async function main() {
 main();
 ```
 
-**With the official driver.** The `kivadb` package in [`drivers/node`](drivers/node) speaks the binary protocol, has no dependencies and ships TypeScript types. It is ready to publish on npm; until then, install it from the folder (`npm install path/to/kiva-db/drivers/node`):
+**With the official driver.** The npm package `@fomadev/kivadb` ([`drivers/node`](drivers/node)) speaks the binary protocol, has no dependencies and ships TypeScript types: `npm install @fomadev/kivadb`. Its version numbers are its own, separate from the server's ([its README](drivers/node/README.md)):
 
 ```javascript
-const { connect } = require("kivadb");
+const { connect } = require("@fomadev/kivadb");
 
 const db = await connect({ host: "localhost", port: 2911, user: "kiva", password: "" });
 await db.set("user:1", { name: "Alice", role: "admin" }, { ttl: 3600 });

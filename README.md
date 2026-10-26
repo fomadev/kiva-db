@@ -102,7 +102,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | :--- | :--- |
 | `src/` | The database: storage engine, command language, servers (KivaDB protocol, REST, Redis), replication, scripting |
 | `tests/` | Automated tests (storage, commands, network, Redis, vectors, encryption, backups, failover, semantic cache) - run them with `cargo test` |
-| `drivers/node/` | The official Node.js driver (npm package `kivadb`) |
+| `drivers/node/` | The official Node.js driver (npm package `@fomadev/kivadb`) |
 | `examples/nodejs/` | A dependency-free Node.js client, to read the protocol |
 | `Dockerfile`, `docker-compose.yml` | The Docker image and a ready-to-use Compose file |
 | `.github/workflows/` | Tests on Windows, Linux and macOS; releases and the Docker image on every version tag |

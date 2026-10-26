@@ -67,6 +67,8 @@ Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux
    ```
 The workflow then publishes a GitHub release with the Windows, Linux and macOS executables and their SHA-256 checksums, and pushes the Docker image `fomadev0/kiva-db:<version>` and `:latest`. Docker Hub access comes from the repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token, never a password).
 
+The same tag also publishes the Node.js driver on npm as `@fomadev/kivadb` (`.github/workflows/node-driver.yml`), after its tests pass on the three systems, with a provenance statement linking the package to the commit. A tag whose driver version is already on npm publishes nothing for the driver: raise `version` in `drivers/node/package.json` to publish a new one. npm access comes from the repository secret `NPM_TOKEN`, a granular access token with read and write access to the packages of the `fomadev` organization.
+
 ## Style Guide
 
 Consistency is key to a maintainable database engine.

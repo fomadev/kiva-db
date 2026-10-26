@@ -6,12 +6,21 @@
 # the same commit, on Windows, Linux and macOS, with every Node.js version it
 # supports ("engines" in package.json). Runs when the driver or the server
 # changes.
+#
+# On a version tag (git tag v1.6.0 && git push origin v1.6.0), once every
+# test passed, it publishes the driver on npm as @fomadev/kivadb, unless its
+# version (drivers/node/package.json, numbered apart from the server) is
+# already there. It needs one repository secret (Settings > Secrets and
+# variables > Actions): NPM_TOKEN, a granular access token of the npm
+# account that can publish to the fomadev organization.
 
 name: Node.js driver
 
 on:
   push:
     branches: [ main ]
+    # Paths are not checked for tags: every version tag runs the workflow.
+    tags: [ 'v*' ]
     paths:
       - 'drivers/node/**'
       - 'src/**'
@@ -140,3 +149,40 @@ jobs:
           cd "$RUNNER_TEMP/types"
           npm install --no-save --no-audit --no-fund typescript@5.6.3 @types/node@22.7.5
           npx tsc --noEmit --strict --types node index.d.ts
+
+  publish:
+    name: Publish on npm
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ test, package ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets npm sign where the package was built (provenance).
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish, unless this version is already on npm
+        working-directory: drivers/node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NAME=$(node -p 'require("./package.json").name')
+          VERSION=$(node -p 'require("./package.json").version')
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm: nothing to publish. Raise the version in drivers/node/package.json to publish the driver."
+            exit 0
+          fi
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::The NPM_TOKEN secret is missing (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          npm publish --provenance --access public
+          echo "Published $NAME@$VERSION: https://www.npmjs.com/package/$NAME"
