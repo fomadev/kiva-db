@@ -55,7 +55,7 @@ KivaDB is built with Cargo.
 - To try the shell on a throwaway database: `cargo run -- --home ./scratch-home`
 
 ### Continuous integration
-Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Node.js driver tests (`cd drivers/node && npm test`, on Linux). A pull request is merged only when all three systems are green.
+Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Redis client checks (on Linux). When the driver or the server changes, `.github/workflows/node-driver.yml` tests the Node.js driver against a KivaDB built from the same commit, with Node.js 18, 20 and 22 on the three systems, and checks the npm package contents and its TypeScript types (locally: `cd drivers/node && KIVADB_BIN=../../target/debug/kivadb npm test`). A pull request is merged only when every check is green.
 
 ### Releasing (maintainers)
 1. Update the version in `Cargo.toml`, the Docker tag in `docker-compose.yml` and the documentation. The Node.js driver (`drivers/node/package.json`) has a version of its own, raised only when the driver changes, following semver.
