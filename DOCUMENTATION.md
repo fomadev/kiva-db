@@ -4875,9 +4875,11 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `drop index on <pat> (<field>)` | Remove it (admin) |
 | `indexes` | List indexes |
 | `explain <query>` | Show the execution plan |
-| `get similar <pat>.<field> to <vector> [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search |
+| `get similar <pat>.<field> to <vector> [where <field> <op> <value> [and ...]] [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search, filtered on other fields ([12.9](#129-filtering-on-other-fields)) |
 | `create vector index on <pat> (<field>)` | Keep vectors in memory, exact search (admin) |
-| `create vector index on <pat> (<field>) using hnsw [metric m] [m N] [ef N]` | Approximate index for large collections (admin) |
+| `create vector index on <pat> (<field>) using hnsw [metric m] [m N] [ef N] [ef_search N] [quantize sq8\|none]` | Approximate index for large collections (admin) |
+| `tune vector index on <pat> (<field>) [recall 0.95] [limit N] [sample N] [queries "<pat>"] [auto]` | Measure an HNSW index and keep the `ef_search` it needs; `auto`: again as it grows ([12.12](#1212-tuning-an-hnsw-index)) (admin) |
+| `tune vector index on <pat> (<field>) auto off` / `ef_search N\|default` | Stop tuning it again / set `ef_search` by hand (admin) |
 | `semantic lookup / store / stats / clear` | Semantic cache of answers ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) |
 | `drop vector index on <pat> (<field>)` | Remove it (admin) |
 | `convert <key> to msgpack\|json` | Change a document's encoding |
