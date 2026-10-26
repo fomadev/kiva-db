@@ -2,6 +2,14 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## 1.6.1 - 2026-10-26
+
+A fix release: the message that refuses text where a vector is expected reads correctly.
+
+### Fixed
+
+* `KivaDB does not compute embeddings: ...`, the answer to text sent where a vector is expected, contained runs of spaces left over from line wrapping. It now has single spaces, in the shell, the structured requests and `KIVA.SIMILAR`.
+
 ## 1.6.0 - 2026-10-26
 
 ### Added

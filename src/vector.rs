@@ -24,7 +24,7 @@ use std::collections::HashMap;
 pub const MAX_DIMS: usize = 16_384;
 
 /// The answer to text sent where a vector is expected.
-pub const NOT_EMBEDDINGS: &str = "KivaDB does not compute embeddings: it stores and compares the vectors      your application sends. Compute the vector of this text with your embedding model (OpenAI, Mistral,      Ollama, sentence-transformers...) and send it as an array of numbers, such as [0.12, -0.4, ...].";
+pub const NOT_EMBEDDINGS: &str = "KivaDB does not compute embeddings: it stores and compares the vectors your application sends. Compute the vector of this text with your embedding model (OpenAI, Mistral, Ollama, sentence-transformers...) and send it as an array of numbers, such as [0.12, -0.4, ...].";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Metric {

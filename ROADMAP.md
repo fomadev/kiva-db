@@ -24,6 +24,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 * **1.5.0** **Encryption at rest**, **automatic failover**, **HNSW** vector index, **semantic cache**, Redis **sets, sorted sets and publish/subscribe**, `kivadb backup` / `restore`, `if not exists` / `if exists`
 * **1.5.1** `config set` tells correctly whether a setting applies at once or at the next start; `help` lists the semantic cache, HNSW and failover commands
 * **1.6.0** Queries with `and` / `or` / `not` and aggregates with `group by`; hash indexes; HNSW quantization (`sq8`), filtered search and `tune ... auto`; semantic cache invalidated by `depends`; Redis streams, blocking commands, `WATCH`, JSON commands and millisecond expiry; replication of every workspace; memory bounds; faster group commit
+* **1.6.1** The message that refuses text where a vector is expected no longer contains runs of spaces
 
 ## Next, in order of value
 
