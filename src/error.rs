@@ -22,6 +22,8 @@ pub enum KivaError {
     Conflict(String),
     Denied(String),
     ReadOnly(String),
+    /// A write refused by a unique index.
+    Unique(String),
     Script(String),
     Other(String),
 }
@@ -42,6 +44,7 @@ impl fmt::Display for KivaError {
             KivaError::Conflict(m) => write!(f, "ERR_TRANSACTION_CONFLICT: {m}"),
             KivaError::Denied(m) => write!(f, "permission denied: {m}"),
             KivaError::ReadOnly(m) => write!(f, "READONLY: {m}"),
+            KivaError::Unique(m) => write!(f, "UNIQUE: {m}"),
             KivaError::Script(m) => write!(f, "ScriptError: {m}"),
             KivaError::Other(m) => write!(f, "{m}"),
         }

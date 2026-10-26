@@ -8,7 +8,14 @@ The official Node.js driver for [KivaDB](../../README.md). It speaks KivaDB's bi
 npm install @fomadev/kivadb
 ```
 
-The driver has its own version numbers, separate from the server's: driver 1.0.0 is tested with KivaDB 1.6.0, and `semanticCached` needs a server of 1.6.0 or later.
+The driver has its own version numbers, separate from the server's:
+
+| Driver | Tested with | Needs a newer server |
+| :--- | :--- | :--- |
+| 1.1.0 | KivaDB 1.7.0 | `add`, and `in` / `like` / `ilike` in `query`: 1.7.0 or later |
+| 1.0.0 | KivaDB 1.6.0 | `semanticCached`: 1.6.0 or later |
+
+The other methods work with any server from 1.6.0.
 
 To try a version not yet published, install it from a copy of the repository:
 
@@ -52,13 +59,15 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | `connect({host, port, user, password, timeout, tls})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }` |
 | `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer` |
 | `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`). `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
+| `add(prefix, value, {ttl, type})` | Stores the value under a key KivaDB names: `add("place:", {name: "Goma"})` resolves to `{key: "place:6adf9c3c...", id: "6adf9c3c..."}`. The identifier has MongoDB's ObjectId format and sorts by creation time |
+| `query(pattern, where, {limit})` | The documents that satisfy a condition, in key order: `query("place:*", {type: "VILLE", parent: null})`, `query("place:*", {field: "name", cmp: "ilike", value: "kin%"})`, `query("place:*", {parent: ["place:1", "place:2"]})` (a list means `in`), `{and: [...]}`, `{or: [...]}`, `{not: {...}}`. Resolves to `{key, value}`; `limit` defaults to 100 |
 | `del(key)` | Resolves to whether the key existed |
 | `scan(pattern, limit)` | Keys with type, size, modification time and TTL |
 | `similar(target, vector, {limit, metric, ef, exact})` | Vector search: `similar("doc:*.embedding", [0.1, ...], {limit: 5})` returns `{key, score, value}` best first. Metrics: `cosine` (default), `dot`, `l2`. With an HNSW index, `ef` trades speed for accuracy and `exact: true` compares every vector |
 | `exec(command)` | Any command of the KivaDB shell language; resolves to the output lines, rejects with `KivaError` on an error |
 | `semanticLookup(cache, {text, vector, threshold})` / `semanticStore(cache, answer, {text, vector, ttl, depends, since})` | Semantic cache: reuse the answer of a question already asked, or of a near-identical one (DOCUMENTATION 12.8) |
 | `semanticCached(cache, {text, vector, threshold, ttl, depends}, compute)` | The cached answer, or `compute()`'s, stored unless the data it depends on changed while it was computed |
-| `api({op, ...})` | Structured request (`whoami`, `workspaces`, `scan`, `get`, `put`, `del`, `similar`, `stats`, `users`) |
+| `api({op, ...})` | Structured request (`whoami`, `workspaces`, `scan`, `get`, `put`, `add`, `del`, `query`, `explain`, `aggregate`, `similar`, `semantic`, `stats`, `users`) |
 | `subscribe(pattern)` | Then `db.on("change", e => ...)` receives `{event, key, type}` for every set, update and delete |
 | `stats()`, `ping()`, `close()` | |
 
@@ -75,6 +84,19 @@ try {
   console.log(err.message);   // Key 'user:1' already exists...
 }
 ```
+
+When KivaDB's message starts with a word in capitals and a colon, `err.code` holds that word, so code can test it without comparing the whole text. A write that a unique index refuses (KivaDB 1.7.0 or later) has the code `UNIQUE`:
+
+```js
+try {
+  await db.add("place:", { type: "VILLE", parent: null, name: "Goma" });
+} catch (err) {
+  if (err.code === "UNIQUE") return reply(409, "This place already exists.");
+  throw err;
+}
+```
+
+Other codes are `READONLY` (the server is a replica) and `ERR_TRANSACTION_CONFLICT`.
 
 ## TypeScript
 

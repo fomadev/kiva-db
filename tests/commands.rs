@@ -1383,7 +1383,104 @@ fn unique_indexes_refuse_a_second_document_with_the_same_values() {
         &serde_json::json!({"op": "put", "key": "user:12", "type": "object", "value": {"email": "amani@exemple.cd"}}),
     )
     .unwrap_err();
-    assert!(matches!(err, kivadb::error::KivaError::Exists(_)), "{err}");
+    assert!(matches!(err, kivadb::error::KivaError::Unique(_)), "{err}");
+    assert!(err.to_string().starts_with("UNIQUE: 'user:12' not written"), "{err}");
+}
+
+#[test]
+fn unique_indexes_may_ignore_case() {
+    let dir = TempDir::new("unique-case");
+    let mut s = kiva(&dir);
+    ok(&mut s, r#"set place:1 {"type": "VILLE", "parent": null, "name": "Goma"}"#);
+    ok(&mut s, r#"set place:2 {"type": "VILLE", "parent": null, "name": "GOMA"}"#);
+    let err = fails(&mut s, "create unique index on place: (type, parent, name) ignore case");
+    assert!(err.contains(r#"place:1 and place:2 both hold ["ville",null,"goma"]"#), "{err}");
+    ok(&mut s, r#"update place:2 {"type": "VILLE", "parent": null, "name": "Bukavu"}"#);
+    assert_eq!(
+        ok(&mut s, "create unique index on place: (type, parent, name) ignore case"),
+        "Unique index created on place:* (type, parent, name) ignore case: 2 documents indexed."
+    );
+    let err = fails(&mut s, r#"set place:3 {"type": "VILLE", "parent": null, "name": "gOmA"}"#);
+    assert!(err.contains("Error: UNIQUE: 'place:3' not written: 'place:1' already holds"), "{err}");
+    assert!(err.contains("unique index on place:* (type, parent, name) ignore case"), "{err}");
+    // In every alphabet, and only for text.
+    ok(&mut s, r#"set place:4 {"type": "VILLE", "parent": null, "name": "Élisabethville"}"#);
+    assert!(fails(&mut s, r#"set place:5 {"type": "VILLE", "parent": null, "name": "élisabethville"}"#)
+        .contains("already holds"));
+    ok(&mut s, r#"set place:6 {"type": "VILLE", "parent": 1, "name": "Goma"}"#);
+    // The documents keep their own text, and queries do not use this index.
+    assert_eq!(ok(&mut s, "get place:1.name"), "place:1.name: Goma [string]");
+    assert!(ok(&mut s, r#"explain get where place:*.name = "Goma""#).contains("PREFIX SCAN"));
+    assert_eq!(ok(&mut s, r#"count where place:*.name = "goma""#), "Count: 0");
+    assert!(ok(&mut s, "indexes").contains("place:* (type, parent, name) - unique, ignore case, 4 documents indexed"));
+    assert!(fails(&mut s, "create index on user: (email) ignore case").contains("for unique indexes"));
+    assert!(fails(&mut s, "create unique index on user: (email) ignore").contains("Usage"));
+    drop(s);
+    let mut s = kiva(&dir);
+    assert!(
+        fails(&mut s, r#"set place:7 {"type": "VILLE", "parent": null, "name": "BUKAVU"}"#).contains("already holds")
+    );
+    assert!(ok(&mut s, "indexes").contains("ignore case"));
+}
+
+#[test]
+fn redis_clients_get_a_stable_error_from_unique_indexes() {
+    use kivadb::resp::{Conn, Reply};
+    let dir = TempDir::new("resp-unique");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "create unique index on place: (type, parent, name) ignore case");
+    ok(&mut s, r#"set place:1 {"type": "VILLE", "parent": null, "name": "Goma"}"#);
+    let mut c = Conn::new(Session::new(inst, true, None));
+    let call = |c: &mut Conn, args: &[&str]| c.handle(&args.iter().map(|a| a.as_bytes().to_vec()).collect::<Vec<_>>());
+    let goma = r#"{"type": "VILLE", "parent": null, "name": "GOMA"}"#;
+
+    let Reply::Error(e) = call(&mut c, &["JSON.SET", "place:2", "$", goma]) else { panic!("not refused") };
+    assert!(e.starts_with("UNIQUE 'place:2' not written: 'place:1' already holds"), "{e}");
+    // A hash without the parent field is not constrained.
+    assert_eq!(call(&mut c, &["HSET", "place:3", "type", "VILLE", "name", "goma"]), Reply::Int(2));
+    // A hash holds text: "null" is not the null of place:1.
+    assert_eq!(call(&mut c, &["HSET", "place:3", "parent", "null"]), Reply::Int(1));
+    // A hash is a document: HSET is checked like JSON.SET.
+    let katindo = r#"{"type": "QUARTIER", "parent": "place:1", "name": "Katindo"}"#;
+    assert_eq!(call(&mut c, &["JSON.SET", "place:7", "$", katindo]), Reply::Simple("OK".into()));
+    let Reply::Error(e) =
+        call(&mut c, &["HSET", "place:8", "type", "QUARTIER", "parent", "place:1", "name", "KATINDO"])
+    else {
+        panic!("HSET not refused")
+    };
+    assert!(e.starts_with("UNIQUE "), "{e}");
+
+    // In MULTI, the write is queued; EXEC refuses the whole transaction.
+    assert_eq!(call(&mut c, &["MULTI"]), Reply::Simple("OK".into()));
+    assert!(matches!(call(&mut c, &["SET", "counter", "1"]), Reply::Simple(q) if q == "QUEUED"));
+    call(&mut c, &["JSON.SET", "place:2", "$", goma]);
+    let Reply::Error(e) = call(&mut c, &["EXEC"]) else { panic!("EXEC should fail") };
+    assert!(e.starts_with("UNIQUE "), "{e}");
+    assert_eq!(call(&mut c, &["EXISTS", "counter", "place:2"]), Reply::Int(0));
+
+    // add through KIVA.API.
+    let Reply::Bulk(Some(r)) = call(
+        &mut c,
+        &[
+            "KIVA.API",
+            r#"{"op": "add", "prefix": "place:", "value": {"type": "VILLE", "parent": null, "name": "Uvira"}}"#,
+        ],
+    ) else {
+        panic!()
+    };
+    let r: serde_json::Value = serde_json::from_slice(&r).unwrap();
+    assert!(r["key"].as_str().unwrap().starts_with("place:") && r["id"].as_str().unwrap().len() == 24, "{r}");
+    let Reply::Error(e) = call(
+        &mut c,
+        &[
+            "KIVA.API",
+            r#"{"op": "add", "prefix": "place:", "value": {"type": "VILLE", "parent": null, "name": "uvira"}}"#,
+        ],
+    ) else {
+        panic!()
+    };
+    assert!(e.starts_with("UNIQUE "), "{e}");
 }
 
 #[test]

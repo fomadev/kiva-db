@@ -397,6 +397,10 @@ struct SecIndex {
     kind: IndexKind,
     /// Two documents of the pattern may not hold the same value.
     unique: bool,
+    /// Texts are kept in small letters (`ignore case`): `Goma` and `GOMA`
+    /// are the same value. Such an index only guards writes, since its
+    /// values are not those the documents hold.
+    fold: bool,
     map: Postings,
     rev: HashMap<String, SKey>,
 }
@@ -409,9 +413,15 @@ impl SecIndex {
             paths,
             kind,
             unique,
+            fold: false,
             map: Postings::new(kind),
             rev: HashMap::new(),
         }
+    }
+
+    fn folding(mut self, fold: bool) -> SecIndex {
+        self.fold = fold;
+        self
     }
 
     fn clear(&mut self) {
@@ -422,7 +432,12 @@ impl SecIndex {
     /// The indexed value of `doc`. On several fields, a document lacking
     /// one of them, or holding an array or an object there, is not indexed.
     fn value(&self, doc: &Json) -> Option<SKey> {
-        let one = |path: &Vec<jsonpath::Seg>| jsonpath::get(doc, path).and_then(SKey::from_json);
+        let one = |path: &Vec<jsonpath::Seg>| {
+            jsonpath::get(doc, path).and_then(SKey::from_json).map(|sk| match sk {
+                SKey::Str(s) if self.fold => SKey::Str(s.to_lowercase()),
+                sk => sk,
+            })
+        };
         match self.paths.as_slice() {
             [path] => one(path),
             paths => paths.iter().map(one).collect::<Option<Vec<SKey>>>().map(SKey::Tuple),
@@ -439,7 +454,8 @@ impl SecIndex {
 
     /// `user:* (email)`, as errors and plans name the index.
     fn describe(&self) -> String {
-        format!("{} ({})", self.pattern, self.field)
+        let case = if self.fold { " ignore case" } else { "" };
+        format!("{} ({}){case}", self.pattern, self.field)
     }
 
     fn remove(&mut self, key: &str) {
@@ -515,6 +531,8 @@ pub struct IndexInfo {
     pub field: String,
     pub kind: IndexKind,
     pub unique: bool,
+    /// A unique index comparing texts without regard to capitals.
+    pub ignore_case: bool,
     /// Documents that have the field.
     pub documents: usize,
     /// Distinct values of the field.
@@ -1390,7 +1408,7 @@ impl Inner {
                         .map(String::as_str)
                 });
                 if let Some(other) = other {
-                    return Err(KivaError::Exists(format!(
+                    return Err(KivaError::Unique(format!(
                         "'{key}' not written: '{other}' already holds {} in the unique index on {}",
                         sk.to_json(),
                         s.describe()
@@ -1746,7 +1764,8 @@ impl Engine {
                         if let Ok(paths) = paths {
                             let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
                             let unique = def["unique"].as_bool().unwrap_or(false);
-                            inner.sec.push(SecIndex::new(p, f, paths, kind, unique));
+                            let fold = def["ignore_case"].as_bool().unwrap_or(false);
+                            inner.sec.push(SecIndex::new(p, f, paths, kind, unique).folding(fold));
                             let i = inner.sec.len() - 1;
                             inner.rebuild_sec(i);
                         }
@@ -2913,6 +2932,9 @@ impl Engine {
                 if s.unique {
                     def["unique"] = true.into();
                 }
+                if s.fold {
+                    def["ignore_case"] = true.into();
+                }
                 if s.paths.len() > 1 {
                     def["fields"] = s.field.split(", ").collect::<Vec<_>>().into();
                 }
@@ -2968,8 +2990,26 @@ impl Engine {
     /// documents hold the same value. Returns the number of documents
     /// indexed.
     pub fn create_index_on(&self, pattern: &str, fields: &[&str], kind: IndexKind, unique: bool) -> Result<usize> {
+        self.create_unique_index(pattern, fields, kind, unique, false)
+    }
+
+    /// [`Engine::create_index_on`]; with `ignore_case`, a unique index
+    /// compares texts in small letters (Unicode): `Goma` and `GOMA` conflict.
+    pub fn create_unique_index(
+        &self,
+        pattern: &str,
+        fields: &[&str],
+        kind: IndexKind,
+        unique: bool,
+        ignore_case: bool,
+    ) -> Result<usize> {
         if fields.is_empty() || fields.iter().any(|f| f.trim().is_empty()) {
             return Err(KivaError::Invalid("an index needs a field name".into()));
+        }
+        if ignore_case && !unique {
+            return Err(KivaError::Invalid(
+                "'ignore case' is for unique indexes; to search without regard to capitals, use ilike".into(),
+            ));
         }
         if fields.len() > 1 && !unique {
             return Err(KivaError::Invalid(
@@ -2992,7 +3032,7 @@ impl Engine {
                 s.kind.name()
             )));
         }
-        inner.sec.push(SecIndex::new(pattern, &field, paths, kind, unique));
+        inner.sec.push(SecIndex::new(pattern, &field, paths, kind, unique).folding(ignore_case));
         let i = inner.sec.len() - 1;
         inner.rebuild_sec(i);
         if unique {
@@ -3040,6 +3080,7 @@ impl Engine {
                 field: s.field.clone(),
                 kind: s.kind,
                 unique: s.unique,
+                ignore_case: s.fold,
                 documents: s.rev.len(),
                 values: s.map.distinct(),
             })
@@ -3695,6 +3736,7 @@ impl Engine {
         }
         let usable = |s: &SecIndex| {
             s.paths.len() == 1
+                && !s.fold
                 && s.kind.serves(cond.op)
                 && s.field == cond.field
                 && pattern_covers(&s.pattern, &cond.pattern)

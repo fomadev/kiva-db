@@ -13,6 +13,10 @@ class KivaError extends Error {
   constructor(message) {
     super(message);
     this.name = "KivaError";
+    // "UNIQUE: ...", "READONLY: ..." (after "Error: " for exec): the word before
+    // the colon, for code to test.
+    const m = /^(?:Error: )?([A-Z][A-Z_]+): /.exec(message);
+    this.code = m ? m[1] : undefined;
   }
 }
 
@@ -187,6 +191,37 @@ class KivaClient extends EventEmitter {
     if (options.mode) req.mode = options.mode;
     if (options.ttl !== undefined) req.ttl = options.ttl;
     await this.api(req);
+  }
+
+  /**
+   * Stores a value under a key KivaDB names: the prefix followed by a new
+   * identifier (24 hexadecimal characters, ObjectId format, sorted by time).
+   * Needs KivaDB 1.7.0 or later.
+   * @param {string} prefix e.g. "place:"
+   * @param {object} [options] ttl (seconds), type (to force one)
+   * @returns {Promise<{key: string, id: string}>}
+   */
+  async add(prefix, value, options = {}) {
+    const type = options.type || typeOf(value);
+    const req = { op: "add", prefix, type, value: type === "bytes" ? Buffer.from(value).toString("base64") : value };
+    if (options.ttl) req.ttl = options.ttl;
+    const r = await this.api(req);
+    return { key: r.key, id: r.id };
+  }
+
+  /**
+   * The documents of a key pattern that satisfy a condition, in key order.
+   * The condition is JSON: {type: "VILLE"} (equalities), {city: ["Goma", "Bukavu"]}
+   * (in), {field: "name", cmp: "ilike", value: "kin%"}, {and: [...]}, {or: [...]},
+   * {not: {...}}. in, like and ilike need KivaDB 1.7.0 or later.
+   * @param {string} pattern e.g. "place:*"
+   * @param {object} where the condition
+   * @param {object} [options] limit (100, at most 10000)
+   * @returns {Promise<{key: string, value: any}[]>}
+   */
+  async query(pattern, where, options = {}) {
+    const r = await this.api({ op: "query", target: pattern, where, limit: options.limit || 100 });
+    return r.rows;
   }
 
   /** Deletes a key; resolves to whether it existed. */

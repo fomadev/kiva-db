@@ -66,7 +66,30 @@ export interface ChangeEvent {
   raw: string;
 }
 
-export class KivaError extends Error {}
+export class KivaError extends Error {
+  /** The word before the colon of KivaDB's message, if any: "UNIQUE", "READONLY"... */
+  code?: string;
+}
+
+export interface AddOptions {
+  /** Seconds until the key expires. */
+  ttl?: number;
+  /** Forces the KivaDB type instead of deriving it from the JavaScript value. */
+  type?: KivaType;
+}
+
+/**
+ * A condition: {type: "VILLE"} (equalities joined by and), {city: ["Goma", "Bukavu"]} (in),
+ * {field, cmp, value} with cmp "=" "!=" ">" ">=" "<" "<=" "in" "like" "ilike",
+ * {and: [...]}, {or: [...]}, {not: {...}}, or a list (joined by and).
+ */
+export type Where =
+  | { field: string; cmp?: "=" | "!=" | ">" | ">=" | "<" | "<=" | "in" | "like" | "ilike"; value: unknown }
+  | { and: Where[] }
+  | { or: Where[] }
+  | { not: Where }
+  | Where[]
+  | Record<string, unknown>;
 
 export class KivaClient extends EventEmitter {
   /** First line of the server greeting, e.g. "KivaDB 1.0.0". */
@@ -74,11 +97,15 @@ export class KivaClient extends EventEmitter {
   static connect(options?: ConnectOptions): Promise<KivaClient>;
   /** Runs any command of the KivaDB shell language; rejects with KivaError on an error line. */
   exec(command: string): Promise<string[]>;
-  /** Structured request: whoami, workspaces, scan, get, put, del, similar, stats, users. */
+  /** Structured request: whoami, workspaces, scan, get, put, add, del, query, explain, aggregate, similar, semantic, stats, users. */
   api<T = any>(request: { op: string; [field: string]: unknown }): Promise<T>;
   ping(): Promise<void>;
   get<T = unknown>(key: string): Promise<T | undefined>;
   set(key: string, value: unknown, options?: SetOptions): Promise<void>;
+  /** Stores a value under `prefix` + a new identifier (KivaDB 1.7.0 or later). */
+  add(prefix: string, value: unknown, options?: AddOptions): Promise<{ key: string; id: string }>;
+  /** The documents of `pattern` that satisfy `where`, in key order (default limit 100). */
+  query<T = unknown>(pattern: string, where: Where, options?: { limit?: number }): Promise<{ key: string; value: T }[]>;
   del(key: string): Promise<boolean>;
   scan(pattern?: string, limit?: number): Promise<KeyInfo[]>;
   similar<T = unknown>(target: string, vector: number[], options?: SimilarOptions): Promise<SimilarResult<T>[]>;

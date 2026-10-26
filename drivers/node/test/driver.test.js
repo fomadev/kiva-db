@@ -120,6 +120,31 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     assert.equal(best.value.t, "cat");
   });
 
+  await t.test("keys named by KivaDB, queries and unique indexes", async () => {
+    const goma = await db.add("place:", { type: "VILLE", parent: null, name: "Goma" });
+    assert.match(goma.id, /^[0-9a-f]{24}$/);
+    assert.equal(goma.key, `place:${goma.id}`);
+    const katindo = await db.add("place:", { type: "QUARTIER", parent: goma.key, name: "Katindo" }, { ttl: 600 });
+    assert.ok(katindo.key > goma.key, "later identifiers sort after");
+    await db.add("place:", { type: "QUARTIER", parent: goma.key, name: "Himbi" });
+    assert.deepEqual((await db.get(goma.key)).name, "Goma");
+
+    const names = (rows) => rows.map((r) => r.value.name);
+    assert.deepEqual(names(await db.query("place:*", { type: "QUARTIER", parent: goma.key })), ["Katindo", "Himbi"]);
+    assert.deepEqual(names(await db.query("place:*", { name: ["Goma", "Himbi"] })), ["Goma", "Himbi"]);
+    assert.deepEqual(names(await db.query("place:*", { field: "name", cmp: "ilike", value: "KAT%" })), ["Katindo"]);
+    const not = await db.query("place:*", { not: { type: "VILLE" } }, { limit: 1 });
+    assert.equal(not.length, 1);
+
+    await db.exec("create unique index on place: (type, parent, name) ignore case");
+    const dup = db.add("place:", { type: "QUARTIER", parent: goma.key, name: "KATINDO" });
+    await assert.rejects(dup, (err) => err instanceof KivaError && err.code === "UNIQUE" && /already holds/.test(err.message));
+    await assert.rejects(db.exec('set place:x {"type": "VILLE", "parent": null, "name": "goma"}'), (err) => err.code === "UNIQUE");
+    const other = await db.query("place:*", { field: "name", cmp: "like", value: "%x%" });
+    assert.deepEqual(other, []);
+    await assert.rejects(db.set("ghost", "x", { mode: "update" }), (err) => err.code === undefined);
+  });
+
   await t.test("change notifications", async () => {
     const seen = [];
     db.on("change", (e) => seen.push(e));
