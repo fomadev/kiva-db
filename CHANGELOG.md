@@ -2,7 +2,7 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased
+## 1.6.0 - 2026-10-26
 
 ### Added
 
@@ -13,8 +13,8 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 * `memory` shows where a workspace's memory goes: keys, secondary and vector indexes, pinned values, value cache.
 * `storage.max_memory_mb` bounds a workspace's memory: past it, the value cache gives its memory back, then new keys are refused with an `OOM:` error; changing, reading and deleting keys still work ([18.6](DOCUMENTATION.md#186-a-memory-bound)).
 * Redis clients reach vector search and the semantic cache: `KIVA.SIMILAR <pattern>.<field> <vector> [LIMIT n] [METRIC m] [EF n] [EXACT]` answers `[key, score, document]` triples, and `KIVA.API <json>` runs any structured request (`similar`, `semantic`, `query`...) ([23.10](DOCUMENTATION.md#2310-vector-search-and-the-semantic-cache-from-a-redis-client)).
-* Queries say plainly what the language leaves out: several conditions (`and`, `or`), joins (two patterns, or a value taken from other documents), pipelines (`group by`, `order by`...), other operators (`in`, `like`...) and distributed queries are refused with what to do instead, in the shell and in the structured `query` request ([11.6](DOCUMENTATION.md#116-what-a-query-does-not-do)).
-* Redis clients: unsupported commands are refused by an explicit list of the commands KivaDB runs, with the error Redis gives for an unknown command. For blocking commands (`BLPOP`, `BZPOPMIN`...), streams (`XADD`...), `WATCH`, cluster, functions, replication and module commands, the message also says why and what to use instead. `COMMAND COUNT` and `COMMAND LIST` answer that list ([23.3](DOCUMENTATION.md#233-supported-commands)).
+* Queries say plainly what the language leaves out: joins (two patterns, or a value taken from other documents), sorting pipelines (`order by`, `distinct`, `having`...), other operators (`in`, `like`...) and distributed queries are refused with what to do instead, in the shell and in the structured `query` request ([11.6](DOCUMENTATION.md#116-what-a-query-does-not-do)).
+* Redis clients: unsupported commands are refused by an explicit list of the commands KivaDB runs, with the error Redis gives for an unknown command. For cluster, Redis functions, replication and module commands, the message also says why and what to use instead. `COMMAND COUNT` and `COMMAND LIST` answer that list ([23.3](DOCUMENTATION.md#233-supported-commands)).
 * `resp.max_collection_members` (100 000 by default) bounds the members of a Redis set, sorted set or list: a command that would go past it changes nothing and answers an error; a key above a lowered limit can still shrink ([23.8](DOCUMENTATION.md#238-sets-and-sorted-sets)).
 * Redis clients: the rest of the classic commands on strings, keys, hashes and lists. Strings: `GETRANGE` (`SUBSTR`), `SETRANGE`, `MSETNX`. Keys: `RENAMENX`, `COPY`, `TOUCH`. Hashes: `HINCRBYFLOAT`, `HSTRLEN`, `HSCAN`, `HRANDFIELD`. Lists: `LPUSHX`, `RPUSHX`, `LSET`, `LREM`, `LTRIM`, `LINSERT`, `LPOS`, `LMOVE`, `RPOPLPUSH`, `LMPOP`, for reliable queues and capped lists. Checked with ioredis and node-redis ([23.3](DOCUMENTATION.md#233-supported-commands)).
 * Redis clients: the JSON commands of RedisJSON (`JSON.SET`, `JSON.GET`, `JSON.MGET`, `JSON.DEL`, `JSON.TYPE`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, `JSON.STRLEN`, `JSON.ARRLEN`, `JSON.OBJLEN`, `JSON.OBJKEYS`). A document written this way is an ordinary KivaDB document: `HGET`, `get where`, secondary and vector indexes and `KIVA.SIMILAR` all reach it. Checked with node-redis (`client.json`, RESP3) and ioredis ([23.11](DOCUMENTATION.md#2311-json-documents-redisjson-commands)).
