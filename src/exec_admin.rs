@@ -714,7 +714,7 @@ impl Session {
             if name == self.ws {
                 return Err("you cannot remove the workspace you are in.".into());
             }
-            if !self.inst.cfg_mut().remove("workspaces", &name)? {
+            if !self.inst.remove_workspace(&name)? {
                 return Err(format!("workspace '{name}' does not exist."));
             }
             out.say(format!("Workspace '{name}' unregistered. Its data files were left on disk."));
@@ -867,6 +867,7 @@ impl Session {
                 out.say(format!("  Link: {}", if l.running { l.status.as_str() } else { "stopped" }));
                 out.say(format!("  Applied sequence: {} ({} operations since connect)", l.applied_seq, l.applied_ops));
                 out.say(format!("  Last sync: {}", l.last_sync.map(fmt_time).unwrap_or_else(|| "never".into())));
+                out.say(format!("  Workspaces: {}", workspace_names(&inst)));
             } else {
                 let reps = inst.repl.replicas();
                 let seq = inst.repl.seq();
@@ -878,6 +879,7 @@ impl Session {
                     cfg.get("replication", "min_slaves_ack")
                 ));
                 out.say(format!("  Sequence: {seq}"));
+                out.say(format!("  Workspaces: {}", workspace_names(&inst)));
                 out.say(format!("  Connected replicas: {}", reps.len()));
                 for r in reps {
                     out.say(format!(
@@ -1419,4 +1421,10 @@ fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), Stri
         pattern.push('*');
     }
     Ok((pattern, field.trim_start_matches('.').to_string()))
+}
+
+/// `3 (default, hr, sales)`: the workspaces replication covers.
+fn workspace_names(inst: &crate::instance::Instance) -> String {
+    let names: Vec<String> = inst.workspaces().into_iter().map(|(n, _)| n).collect();
+    format!("{} ({})", names.len(), names.join(", "))
 }

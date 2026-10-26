@@ -3803,7 +3803,7 @@ Replication keeps a live copy of a database on another KivaDB. The one that rece
 * **Read load**: applications can read from replicas.
 * **Standby**: a replica can be promoted to master.
 
-Replication covers the `default` workspace.
+Replication covers **every workspace**, and the users, stored scripts and triggers they share ([25.9](#259-what-is-replicated)).
 
 ### 25.2 Setting it up
 
@@ -3818,9 +3818,12 @@ Now replicating from 192.168.1.10:2911. Local data is replaced by the master's.
 
 What happens then:
 
-1. The replica **erases its own default workspace**.
-2. The master sends a full copy (a snapshot).
-3. The master then sends every change as it happens.
+1. The replica **replaces its own data with the master's**:
+   * every workspace of the master is emptied on the replica, or created there if it does not exist yet;
+   * the replica's users, stored scripts and triggers are replaced by the master's;
+   * the replica's workspaces that the master does not have are unregistered, as `workspace remove` does: their files stay on disk.
+2. The master sends a full copy (a snapshot) of all of it.
+3. The master then sends every change as it happens, whatever the workspace.
 
 The choice is remembered in the configuration: after a restart, the replica resumes following its master. If the connection drops, the replica retries every two seconds and resynchronises by itself.
 
@@ -3838,6 +3841,8 @@ kiva> set nope 1
 Error: READONLY: this node is a replica; write to the master or run 'replica promote'
 ```
 
+This holds in every workspace. Triggers do not run on a replica: what the master's triggers write reaches it with the rest, and running them again would apply their effects twice.
+
 ### 25.4 Watching it
 
 On the master:
@@ -3847,6 +3852,7 @@ kiva> replica status
 Role: master
   Mode: async (min acks: 1)
   Sequence: 1024
+  Workspaces: 3 (default, hr, sales)
   Connected replicas: 1
     #7 192.168.1.20:51344 (listens on 192.168.1.20:2911) lag: 0 ops, connected 2026-10-12 09:50:01
 ```
@@ -3862,7 +3868,10 @@ Role: replica (read-only)
   Link: connected
   Applied sequence: 1024 (318 operations since connect)
   Last sync: 2026-10-12 09:50:01
+  Workspaces: 3 (default, hr, sales)
 ```
+
+The sequence counts the operations of all workspaces together, in one order: a replica that acknowledged operation 1024 has everything before it, in every workspace. `wait` and the lag mean the same.
 
 ### 25.5 Asynchronous or synchronous
 
@@ -3937,7 +3946,7 @@ With **`failover.auto`** on, the replicas watch the master and, when it dies, ch
 kiva> config set failover.auto true
 ```
 
-Every node logs in to the others with the replication account (`config set master_user ...` and `master_password ...`, [25.2](#252-setting-it-up)): use the same administrator account and password on all of them. The replicas must all name the master with the same address (the same IP, or the same host name).
+Every node logs in to the others with the replication account (`config set master_user ...` and `master_password ...`, [25.2](#252-setting-it-up)): use the same administrator account and password on all of them. Once the replicas follow the master, its accounts are theirs ([25.9](#259-what-is-replicated)). The replicas must all name the master with the same address (the same IP, or the same host name).
 
 ```text
 kiva> failover status
@@ -3975,6 +3984,19 @@ With the defaults, a new master is in place a few seconds after the old one stop
 | `failover.priority` | `100` | `0` = never become master by itself |
 
 KivaDB keeps its group state in `[failover]` too (`node_id`, `epoch`, `voted`, `nodes`): leave those alone.
+
+### 25.9 What is replicated
+
+| Replicated | Not replicated |
+| :--- | :--- |
+| The keys of every workspace, with their TTL | The configuration (`kivadb.conf`, `config set`): set it on each node |
+| The creation and removal of workspaces | Secondary and vector indexes: create them on each node (`create index` works on a replica), so that each one serves the queries it receives |
+| Users, passwords, roles and grants | Pinned patterns (`memory pin`) and the value cache |
+| Stored scripts and triggers | The semantic cache, and publish/subscribe messages |
+
+* **Users.** A replica has the master's accounts: an account created, changed or removed on the master is the same on its replicas. That is what lets applications log in to the new master after a failover. The replica's own accounts are replaced when it starts following: keep the master's administrator password at hand.
+* **One stream.** Every workspace travels on the same connection and the same sequence, in the order the master committed the operations. A replica therefore never sees a workspace further ahead than another.
+* **Versions.** A master refuses a replica of an older version, which knew only the default workspace: it would apply every workspace's changes to its default one. Upgrade the replicas first, then the master. A replica following an older master receives the default workspace only, as before.
 
 ---
 
@@ -4825,7 +4847,7 @@ KivaDB 1.5.1 keeps the whole database on each node, with replicas and automatic 
 **Design limits**
 
 * All keys must fit in memory ([19.6](#196-limits)).
-* Replication covers the `default` workspace only.
+* Replication copies whole nodes: every workspace is on every replica. A workspace is never split across machines (no sharding): its data must fit on one node, its keys in that node's memory ([19.6](#196-limits)).
 * A transaction lives in one connection; it cannot span several HTTP requests.
 * Listing and query commands do not show the uncommitted writes of your own transaction.
 * Strings have no escape sequences: a text cannot contain both kinds of quotes at once from the shell (it can through the REST API or the binary protocol).

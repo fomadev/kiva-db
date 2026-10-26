@@ -45,6 +45,13 @@ pub const R_SNAP_END: u16 = 34;
 pub const R_PROMOTE: u16 = 35;
 /// Heartbeat with the group's nodes (JSON), sent while the stream is idle.
 pub const R_PING: u16 = 36;
+/// The names of every workspace of the master, one per line: the replica
+/// creates the missing ones and unregisters the others.
+pub const R_WORKSPACES: u16 = 37;
+/// The following operations are on this workspace (its name).
+pub const R_USE: u16 = 38;
+/// The master unregistered this workspace (its name).
+pub const R_WS_REMOVE: u16 = 39;
 
 pub const MAX_FRAME: usize = 300 * 1024 * 1024;
 

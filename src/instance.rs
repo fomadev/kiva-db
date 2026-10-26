@@ -279,6 +279,13 @@ impl Instance {
             weak: weak.clone(),
             _lock: lock,
         });
+        // Users, stored scripts and triggers are replicated like a workspace.
+        let weak = Arc::downgrade(&inst);
+        inst.system.add_listener(move |op| {
+            if let Some(inst) = weak.upgrade() {
+                inst.repl.broadcast(crate::repl::SYSTEM, op);
+            }
+        });
         inst.reload_triggers();
         inst.start_trigger_worker();
         // Open the default workspace eagerly so problems surface at startup.
@@ -394,7 +401,20 @@ impl Instance {
         };
         fs::create_dir_all(&dir)?;
         self.cfg_mut().set("workspaces", name, &dir.display().to_string())?;
+        self.repl.workspace_changed(name, false);
         Ok(dir)
+    }
+
+    /// Unregisters a workspace; its files stay on disk. Returns whether it existed.
+    pub fn remove_workspace(&self, name: &str) -> Result<bool> {
+        if name == "default" {
+            return Err(KivaError::Invalid("the default workspace cannot be removed".into()));
+        }
+        let removed = self.cfg_mut().remove("workspaces", name)?;
+        if removed {
+            self.repl.workspace_changed(name, true);
+        }
+        Ok(removed)
     }
 
     /// The server's TLS certificate, loading or creating it on first use.
@@ -448,10 +468,10 @@ impl Instance {
             }
             Op::Reset => self.semantic.reset(workspace),
         }
-        if workspace == "default" {
-            self.repl.broadcast(op);
-        }
-        if IN_TRIGGER.with(|c| c.get()) {
+        self.repl.broadcast(workspace, op);
+        // On a replica, what the master's triggers wrote arrives with the
+        // rest: running them again would apply their effects twice.
+        if IN_TRIGGER.with(|c| c.get()) || self.repl.is_replica() {
             return;
         }
         let (event, key) = match op {

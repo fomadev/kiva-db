@@ -691,3 +691,98 @@ fn environment_configures_a_hosted_server() {
     db.exec("shutdown").unwrap();
     assert!(server.wait().unwrap().success());
 }
+
+#[test]
+fn replication_covers_every_workspace() {
+    let (dir_m, dir_r) = (TempDir::new("ws-master"), TempDir::new("ws-replica"));
+    let (master, replica) = (instance(&dir_m), instance(&dir_r));
+    let port_m = server::start_tcp(&master, "127.0.0.1", 0).unwrap();
+    server::start_tcp(&replica, "127.0.0.1", 0).unwrap();
+    let mut m = Session::new(master.clone(), true, None);
+    let mut r = Session::new(replica.clone(), true, None);
+
+    ok(&mut m, "workspace create sales");
+    ok(&mut m, "workspace switch sales");
+    for i in 0..50 {
+        ok(&mut m, &format!(r#"set order:{i:02} {{"total": {i}}}"#));
+    }
+    ok(&mut m, "workspace switch default");
+    ok(&mut m, "set config:mode \"live\"");
+    // A workspace only the replica has is unregistered by the sync.
+    ok(&mut r, "workspace create local_only");
+    ok(&mut r, &format!("replica of 127.0.0.1 {port_m}"));
+    wait_for("the snapshot of every workspace", || replica.repl.link().status == "connected");
+    assert_eq!(replica.engine("sales").unwrap().len(), 50);
+    assert!(replica.engine("default").unwrap().contains("config:mode"));
+    let list = ok(&mut r, "workspace list");
+    assert!(list.contains("sales") && !list.contains("local_only"), "{list}");
+    assert!(ok(&mut r, "replica status").contains("Workspaces: 2 (default, sales)"));
+    assert!(ok(&mut m, "replica status").contains("Workspaces: 2 (default, sales)"));
+
+    // Live operations name their workspace; one sequence covers them all.
+    ok(&mut m, "workspace switch sales");
+    ok(&mut m, r#"set order:99 {"total": 99}"#);
+    ok(&mut m, "del order:00");
+    ok(&mut m, "workspace switch default");
+    ok(&mut m, "update config:mode \"maintenance\"");
+    ok(&mut m, "workspace switch sales");
+    ok(&mut m, r#"json set order:01 .total 1000"#);
+    assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
+    ok(&mut r, "workspace switch sales");
+    assert_eq!(
+        ok(&mut r, "get order:99.total and order:00 and order:01.total"),
+        "order:99.total: 99 [number]\norder:00: (nil)\norder:01.total: 1000 [number]"
+    );
+    ok(&mut r, "workspace switch default");
+    assert_eq!(ok(&mut r, "get config:mode"), "config:mode: maintenance [string]");
+
+    // Every replicated workspace is read-only on the replica.
+    ok(&mut r, "workspace switch sales");
+    assert!(fails(&mut r, "set nope 1").contains("READONLY"));
+    ok(&mut r, "workspace switch default");
+    assert!(fails(&mut r, "set nope 1").contains("READONLY"));
+
+    // Users, stored scripts and triggers follow; triggers fire on the master
+    // only, their writes reaching the replica with the rest.
+    let script = dir_m.path().join("count.lua");
+    std::fs::write(&script, "kiva.incr('fired', 1)\n").unwrap();
+    ok(&mut m, "workspace switch default");
+    ok(&mut m, &format!("script load \"{}\" as \"count\"", script.display()));
+    ok(&mut m, r#"create trigger on_evt on set "evt:*" run "count""#);
+    ok(&mut m, r#"create user "amani" identified by "secret" role editor"#);
+    ok(&mut m, "set evt:1 1");
+    wait_for("the trigger on the master", || master.engine("default").unwrap().contains("fired"));
+    assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
+    assert!(ok(&mut r, "users").contains("amani"));
+    assert!(ok(&mut r, "triggers").contains("on_evt"));
+    assert!(ok(&mut r, "script list").contains("count"));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ok(&mut r, "get fired"), "fired: 1 [number]", "not run again on the replica");
+
+    // Workspaces created and removed on the master follow.
+    ok(&mut m, "workspace switch default");
+    ok(&mut m, "workspace create hr");
+    wait_for("the new workspace", || ok(&mut r, "workspace list").contains("hr"));
+    ok(&mut m, "workspace switch hr");
+    ok(&mut m, "set staff:1 \"Amani\"");
+    ok(&mut m, "workspace switch default");
+    assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
+    assert!(replica.engine("hr").unwrap().contains("staff:1"));
+    ok(&mut m, "workspace remove sales");
+    wait_for("the removal", || !ok(&mut r, "workspace list").contains("sales"));
+
+    // A reset of one workspace leaves the others alone.
+    ok(&mut m, "workspace switch hr");
+    ok(&mut m, "del all keys");
+    ok(&mut m, "workspace switch default");
+    assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
+    assert_eq!(replica.engine("hr").unwrap().len(), 0);
+    assert!(replica.engine("default").unwrap().contains("config:mode"));
+
+    // A replica that does not announce every workspace is refused.
+    let mut old = connect(port_m);
+    assert_eq!(call(&mut old, CMD_HELLO, &[]).0, ST_OK);
+    let (code, msg) = call(&mut old, CMD_REPL_SYNC, b"127.0.0.1:1 node=old");
+    assert_eq!(code, ST_ERR);
+    assert!(msg.contains("replicates every workspace"), "{msg}");
+}
