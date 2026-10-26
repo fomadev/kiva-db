@@ -26,6 +26,43 @@ fn invalid(msg: impl Into<String>) -> KivaError {
 
 /// The filter of a vector search: `{"field": value, ...}` for equalities,
 /// or `[{"field": f, "cmp": ">=", "value": v}, ...]`; every condition must hold.
+/// The query of a structured request:
+/// - `"target": "user:*", "where": {...}` (see [`crate::query::Expr::from_json`]);
+/// - `"target": "user:*.age", "cmp": ">", "value": 18`: one comparison;
+/// - for an aggregate, `"target": "user:*"` alone: every document.
+fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
+    use crate::query::{Expr, Query};
+    let target = str_field(req, "target")?;
+    let single = !req["cmp"].is_null() || !req["value"].is_null();
+    if !req["where"].is_null() {
+        if single {
+            return Err(invalid("give either \"where\" or \"cmp\" and \"value\", not both"));
+        }
+        if crate::exec::split_target(target).is_ok() {
+            return Err(invalid(format!(
+                "with \"where\", \"target\" is the key pattern alone ('{target}' names a field after it): \
+                 the fields go in the conditions"
+            )));
+        }
+        let expr = Expr::from_json(&req["where"], target).map_err(KivaError::Invalid)?;
+        return Ok(Query { pattern: target.to_string(), expr: Some(expr) });
+    }
+    if aggregate && !single {
+        if crate::exec::split_target(target).is_ok() {
+            return Err(invalid(format!(
+                "\"target\" is the key pattern alone ('{target}' names a field after it): the fields \
+                 an aggregate reads go in \"compute\", e.g. {{\"avg\": \"age\"}}"
+            )));
+        }
+        return Ok(Query { pattern: target.to_string(), expr: None });
+    }
+    let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
+    let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
+        .ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
+    let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };
+    Query::single(cond).map_err(KivaError::Invalid)
+}
+
 fn vector_filter(j: &Json, pattern: &str) -> Result<Vec<crate::engine::Cond>> {
     let cond = |field: &str, cmp: &str, value: &Json| -> Result<crate::engine::Cond> {
         let field = field.strip_prefix(pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
@@ -184,26 +221,39 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             }
             Ok(json!({ "deleted": deleted }))
         }
-        "query" | "explain" => {
+        "query" | "explain" | "aggregate" => {
             sess.check(Need::Read)?;
-            // One pattern, one condition: see crate::query.
+            // One pattern, a condition, no join or sorting: see crate::query.
             crate::query::check_request(req).map_err(KivaError::Invalid)?;
-            let target = str_field(req, "target")?;
-            let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
-            crate::query::check_field(&field).map_err(KivaError::Invalid)?;
-            crate::query::check_value(&req["value"]).map_err(KivaError::Invalid)?;
-            let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
-                .ok_or_else(|| invalid("cmp must be one of = != > >= < <="))?;
-            let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };
+            let q = request_query(req, op == "aggregate")?;
             let plan_json = |p: &crate::engine::Plan| json!({ "strategy": p.strategy, "index": p.index, "candidates": p.candidates, "total_keys": p.total_keys });
             if op == "explain" {
-                let plan = sess.engine.explain(&cond);
-                let suggestion =
-                    plan.index.is_none().then(|| format!("create index on {} ({})", cond.pattern, cond.field));
-                return Ok(json!({ "plan": plan_json(&plan), "suggestion": suggestion }));
+                let plan = sess.engine.explain_query(&q);
+                let suggestion = plan.index.is_none().then(|| {
+                    let conds = q.expr.iter().flat_map(|e| e.positive_conditions());
+                    let missing = conds.into_iter().find(|c| sess.engine.explain(c).index.is_none());
+                    missing.map(|c| format!("create index on {} ({})", c.pattern, c.field))
+                });
+                return Ok(json!({ "plan": plan_json(&plan), "suggestion": suggestion.flatten() }));
+            }
+            if op == "aggregate" {
+                use crate::query::{aggregated_json, Aggregation};
+                let aggs = Aggregation::functions_from_json(&req["compute"]).map_err(KivaError::Invalid)?;
+                let group_by = match &req["group_by"] {
+                    Json::Null => None,
+                    g => Some(g.as_str().ok_or_else(|| invalid("\"group_by\" is a field name"))?),
+                };
+                let group_by =
+                    group_by.map(|g| g.strip_prefix(&q.pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(g));
+                let mut acc = Aggregation::new(aggs, group_by).map_err(KivaError::Invalid)?;
+                let limit = req["limit"].as_u64().unwrap_or(0) as usize;
+                let plan = sess.engine.scan_query(&q, limit, |_, doc| acc.add(&doc))?;
+                let mut out = aggregated_json(&acc.finish(), group_by.is_some());
+                out["plan"] = plan_json(&plan);
+                return Ok(out);
             }
             let limit = req["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
-            let (rows, plan) = sess.engine.query(&cond, limit)?;
+            let (rows, plan) = sess.engine.query_expr(&q, limit)?;
             let rows: Vec<Json> = rows.into_iter().map(|(k, doc)| json!({ "key": k, "value": doc })).collect();
             Ok(json!({ "rows": rows, "plan": plan_json(&plan) }))
         }

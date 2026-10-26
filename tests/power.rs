@@ -659,7 +659,7 @@ fn vector_filters_limits_and_embeddings_from_the_shell_and_the_api() {
     assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang = "fr" or lang = "en""#)
         .contains("'and' only"));
     assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where user:*.lang = "fr""#)
-        .contains("fields of the documents searched (doc:*)"));
+        .contains("fields of the documents of doc:*"));
     assert!(fails(&mut s, r#"get similar doc:*.embedding to [1, 0, 0] where lang in "fr""#).contains("operators"));
 
     // KivaDB receives vectors; text to embed is the application's job.
@@ -1756,4 +1756,36 @@ fn structured_queries_and_plans() {
         (&json!("INDEX SCAN"), &json!(3), &Json::Null)
     );
     assert!(db.api(&json!({"op": "query", "target": "user:*.age", "cmp": "~", "value": 1})).is_err());
+}
+
+/// What one-condition queries cost, to compare across versions.
+/// `cargo test --release --test power query_speed -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn query_speed() {
+    use kivadb::engine::{CmpOp, Cond};
+    let dir = TempDir::new("query_speed");
+    let e = Engine::open(dir.path().join("store.kiva"), quiet(256 * 1024 * 1024)).unwrap();
+    let n = 100_000;
+    for i in 0..n {
+        let role = ["dev", "ops", "admin", "sales"][i % 4];
+        let doc = json!({"role": role, "age": 18 + i % 60, "city": i % 100});
+        e.put(&format!("u:{i:06}"), &Value::Doc(doc), 0, false).unwrap();
+    }
+    e.create_index("u:*", "city").unwrap();
+    let cond = |field: &str, op: CmpOp, value: Json| Cond { pattern: "u:*".into(), field: field.into(), op, value };
+    let cases = [
+        ("index =, 1000 rows", cond("city", CmpOp::Eq, json!(7)), 200),
+        ("scan =, 25000 rows", cond("role", CmpOp::Eq, json!("dev")), 10),
+        ("scan >, 10 rows (limit)", cond("age", CmpOp::Gt, json!(70)), 200),
+    ];
+    for (name, c, runs) in cases {
+        let limit = if name.contains("limit") { 10 } else { 0 };
+        e.query(&c, limit).unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(e.query(&c, limit).unwrap());
+        }
+        println!("{name}: {:?} per query", t.elapsed() / runs);
+    }
 }

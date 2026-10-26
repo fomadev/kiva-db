@@ -42,6 +42,9 @@ const COMMANDS: &[&str] = &[
     "range",
     "count",
     "sum",
+    "avg",
+    "min",
+    "max",
     "explain",
     "json",
     "convert",
@@ -95,8 +98,8 @@ fn followers(first: &str) -> &'static [&'static str] {
         "set" | "update" | "del" | "has" => {
             &["string", "number", "boolean", "null", "array", "object", "bytes", "ttl", "and"]
         }
-        "count" | "sum" => &["where"],
-        "explain" => &["get", "count", "sum", "range"],
+        "count" | "sum" | "avg" | "min" | "max" => &["where"],
+        "explain" => &["get", "count", "sum", "avg", "min", "max", "range"],
         "json" => &["get", "set", "delete"],
         "transaction" => &["status"],
         "rollback" => &["to"],

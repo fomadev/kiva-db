@@ -1412,11 +1412,25 @@ So far every command named the keys it wanted. A **query** finds documents by wh
 
 The field starts at the first dot after the last `*`: in `user:*.address.city`, the pattern is `user:*` and the field is `address.city`. Spaces around the operator are optional (`user:*.age>26`). If the pattern itself needs quoting, quote the whole left side: `"*.active" = true`.
 
+**Several comparisons** are joined with `and`, `or` and `not`, grouped with parentheses. The first comparison names the pattern; the next ones name the field alone, or repeat the pattern:
+
+```text
+user:*.age > 26 and (role = "dev" or role = "admin")
+user:*.role = "dev" and not address.city = "Goma"
+```
+
+* `not` applies first, then `and`, then `or`: `a or b and c` means `a or (b and c)`. Use parentheses when in doubt.
+* A comparison on a field the document lacks is false, so `not` of it is true: `not user:*.city = "Goma"` also keeps the users without a city.
+* Every comparison tests a field of the same documents: `user:*.age > 20 and order:*.total > 5` is refused (that would be a join, [11.6](#116-what-a-query-does-not-do)).
+* A query holds at most 64 comparisons, nested at most 16 levels deep.
+
 ### 11.2 `get where` — find documents
 
 ```text
 get where <condition> [limit N] [return field1, field2]
 ```
+
+The condition is one comparison or several ([11.1](#111-the-condition)).
 
 ```text
 kiva> get where user:*.address.city = "Kinshasa"
@@ -1429,18 +1443,49 @@ user:2: {"name":"Bob","address.city":"Goma"}
 (2 matches)
 ```
 
-Comparisons are made between values of the same kind: numbers with numbers, text with text (alphabetical order). A document that lacks the field never matches.
+```text
+kiva> get where user:*.age > 26 and (role = "admin" or address.city = "Goma")
+user:1: {"name":"Alice","role":"admin","age":30,"address":{"city":"Kinshasa"}}
+(1 matches)
+```
 
-### 11.3 `count` and `sum` — aggregates
+Comparisons are made between values of the same kind: numbers with numbers, text with text (alphabetical order). A document that lacks the field never matches that comparison.
+
+### 11.3 Aggregates: `count`, `sum`, `avg`, `min`, `max`, `group by`
+
+```text
+count where <condition>                 sum|avg|min|max where <condition>
+count <pattern>[.<field>] [where <condition>]
+sum|avg|min|max <pattern>.<field> [where <condition>]
+                                        ... [group by <field>] [limit N]
+```
 
 ```text
 kiva> count where user:*.age > 26
 Count: 2
 kiva> sum where user:*.age > 0
 Sum: 96 (3 matches)
+kiva> avg user:*.age where role = "dev"
+Avg: 33 (2 values, 2 matches)
+kiva> max user:*.name
+Max: "Carol" (3 values, 3 matches)
+kiva> count user:* group by address.city
+Count by address.city (2 groups, 3 matches):
+  "Goma": 1
+  "Kinshasa": 2
+kiva> avg user:*.age group by role
+Avg of age by role (2 groups, 3 matches):
+  "admin": 30 (1 values)
+  "dev": 33 (2 values)
 ```
 
-`sum` adds up the field named in the condition, over the documents that satisfy it.
+* **What is read.** After `where`, `sum`, `avg`, `min` and `max` read the field the condition tests; when it tests several fields, name the one to read first: `avg user:*.age where role = "dev"`. Without `where`, every document of the pattern counts.
+* **Values.** `sum` and `avg` take the numbers and skip the other values (`"n/a"`, a missing field); `avg` says how many it took. `min` and `max` compare numbers with numbers and text alphabetically, and put text after numbers. With no value, `avg`, `min` and `max` give `null`. `count <pattern>.<field>` counts the documents that have the field.
+* **`group by <field>`** gives one line per distinct value of the field, in order: `null` (documents without it) first, then booleans, numbers, text. One aggregation builds at most 100 000 groups; group by a field with fewer distinct values.
+* **`limit N`** stops after N matching documents, before grouping.
+* **Cost.** An aggregate reads the documents its condition selects, once, through an index when it can ([11.4](#114-indexes--making-queries-fast)), and keeps only the running totals: no document is held in memory. `explain avg ...` shows the plan.
+
+From programs, the structured request `aggregate` computes several aggregates at once ([20.4](#204-structured-requests-for-tools)).
 
 ### 11.4 Indexes — making queries fast
 
@@ -1512,33 +1557,60 @@ Query Plan
 | Strategy | Meaning |
 | :--- | :--- |
 | `INDEX SCAN` | A secondary index gives the candidates directly |
+| `INDEX MERGE` | Several indexes, intersected for `and` and merged for `or` |
 | `PREFIX SCAN` | Only the keys sharing the pattern's prefix are examined |
 | `FULL SCAN` | Every key is examined (pattern starting with `*`) |
 | `ORDERED INDEX RANGE SCAN` | A `range` query: a slice of the sorted keys |
 | `POINT LOOKUP` | A `get` on one key |
 
-`explain` also works with `count where`, `sum where`, `range` and `get <key>`. An index is used for `=`, `>`, `>=`, `<` and `<=`; the `!=` operator always scans.
+`explain` also works with the aggregates ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)), `range` and `get <key>`. An index is used for `=`, `>`, `>=`, `<` and `<=`; the `!=` operator always scans.
+
+With several comparisons, KivaDB uses every index it can:
+
+* `and`: the keys of each indexed comparison are intersected, smallest list first. One indexed comparison is enough; the others are tested on the documents it gives.
+* `or`: the keys of each part are merged, but only when **every** part has an index. One part without an index means reading the whole pattern anyway.
+* `not`: never an index, since it selects what the index does not list.
+
+Whatever the plan, every candidate document is tested against the whole condition, so an index changes the speed, never the answer. With indexes on `role` and `age`:
+
+```text
+kiva> explain get where user:*.role = "dev" and age > 30
+Query Plan
+  Filter    : user:* where role = "dev" and age > 30
+  Strategy  : INDEX MERGE
+  Index     : user:* (role) and user:* (age)
+  Estimated : 1 of 8 keys examined
+kiva> explain get where user:*.role = "dev" or address.city = "Goma"
+Query Plan
+  Filter    : user:* where role = "dev" or address.city = "Goma"
+  Strategy  : PREFIX SCAN
+  Index     : none
+  Estimated : 3 of 8 keys examined
+  Tip       : create index on user:* (address.city)
+```
+
+A query with one comparison runs exactly as before: the same index, the same reading.
 
 ### 11.6 What a query does not do
 
-A query reads **one key pattern** and tests **one condition** on one field, against one value. That is a choice: every query is then a single pass over one index or one range of keys, in memory, and `explain` can say in advance what it will cost. KivaDB refuses the rest at once, and says what to do instead:
+A query reads **one key pattern**, tests its documents against comparisons with literal values, and returns them in key order or folds them into aggregates. That is a choice: every query is then one pass over indexes or one range of keys, in memory, and `explain` can say in advance what it will cost. KivaDB refuses the rest at once, and says what to do instead:
 
 | Refused | Example | Instead |
 | :--- | :--- | :--- |
-| Several conditions | `... = "dev" and user:*.age > 20`, `or`, `not` | One query per condition, combined in your application; or a field holding the combined value |
-| Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
-| Pipelines | `group by`, `order by`, `distinct`, `having`, `min`, `max` | `count where`, `sum where`; `range` and `keys` return keys in order |
-| Other operators | `in [...]`, `like`, `between`, a list of values | The six comparisons, one value |
+| Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user`, `... and order:*.total > 5` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
+| Sorting pipelines | `order by`, `distinct`, `having`, `group by` on `get` | The aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
+| Other operators | `in [...]`, `like`, `between`, a list of values | The six comparisons, one value each; several values with `or` |
+| Other combinations | `&&`, `\|\|`, `xor` | `and`, `or`, `not` and parentheses |
 | Distributed queries | `@node2`, `across`, `shard`, `explain distributed` | Nothing to do: one server holds all of a workspace's data |
 
 ```text
-kiva> get where user:*.role = "dev" and user:*.age > 20
-Error: 'and': a query tests one condition: 'and' / 'or' are not supported. Run one query per condition and combine the keys in your application, or store the combined value in a field of its own and query that field.
+kiva> get where user:*.role = "dev" order by age
+Error: 'order': sorting pipelines (order by, distinct, having...) are not supported: the aggregates are count, sum, avg, min and max, with 'group by <field>'; 'range' and 'keys' return keys in order.
 kiva> get where user:*.name = order:*.user
 Error: 'order:*.user' names a field of other documents: joins are not supported: a query reads one key pattern and compares with a literal value. Keep related data in the same document, or read the related keys by name (get a and b).
 ```
 
-Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` request follows the same rules: a request with a field such as `join`, `and`, `order_by` or `group_by`, or with an array or object as `value`, is refused.
+Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` and `aggregate` requests follow the same rules: a request with a field such as `join`, `order_by` or `distinct`, or with an array or object as `value`, is refused; `and`, `or` and `not` go inside `where` ([20.4](#204-structured-requests-for-tools)).
 
 ---
 
@@ -2977,9 +3049,22 @@ The command language answers with text written for people. A program that needs 
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
 | `users` | - | `users`: name, role, grants, created, home workspace, whether the password is empty (admin only) |
-| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=`), `value`, `limit` | `rows`: key and document; `plan`. One pattern, one condition ([11.6](#116-what-a-query-does-not-do)) |
+| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=`), `value`, `limit`; or `target` (`user:*`) and `where` (below) | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
+| `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
 | `explain` | the same as `query` | `plan`: strategy, index, candidates, total keys; `suggestion`: the index to create, if any |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
+
+Notes on `query` and `aggregate`:
+
+* `where` is the condition of [11.1](#111-the-condition) as JSON: `{"field": "age", "cmp": ">", "value": 18}` (`cmp` defaults to `=`), `{"role": "dev", "city": "Goma"}` (equalities joined by `and`), `{"and": [...]}`, `{"or": [...]}`, `{"not": {...}}`, or a list (its items joined by `and`). With `where`, `target` is the key pattern alone.
+* `compute` names each aggregate: `{"n": "count", "mean_age": {"avg": "age"}, "top": {"max": "salary"}}`, or a list `["count", {"avg": "age"}]` whose results are named `count`, `avg_age`. Without it, `count`. At most 32 per request.
+
+```json
+{"op": "aggregate", "target": "user:*", "where": {"not": {"role": "ops"}}, "group_by": "role",
+ "compute": {"n": "count", "mean_age": {"avg": "age"}}}
+```
+
+answers `{"matches": 3, "groups": [{"key": "admin", "matches": 1, "values": {"n": 1, "mean_age": 30}}, {"key": "dev", "matches": 2, "values": {"n": 2, "mean_age": 33}}], "plan": {...}}`.
 
 Notes on `put`:
 
@@ -4621,8 +4706,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `json insert <key> <.path[n]> <value>` | Insert into an array |
 | `json incr <key> <.path> <number>` | Add to a number |
 | `json type / len / keys <key> [<.path>]` | Type, length, field names |
-| `get where <pat>.<field> <op> <value> [limit N] [return f1, f2]` | Find documents |
-| `count where ...` / `sum where ...` | Aggregates |
+| `get where <pat>.<field> <op> <value> [and\|or ...] [limit N] [return f1, f2]` | Find documents; `and`, `or`, `not`, parentheses |
+| `count` / `sum` / `avg` / `min` / `max` `where ...` or `<pat>[.<field>] [where ...]` `[group by <field>]` | Aggregates |
 | `create index on <pat> (<field>) [using btree\|hash]` | Create an index; also `on <pat>.<field>` (admin) |
 | `drop index on <pat> (<field>)` | Remove it (admin) |
 | `indexes` | List indexes |

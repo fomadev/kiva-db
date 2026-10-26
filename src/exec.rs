@@ -11,7 +11,7 @@ use crate::expr;
 use crate::format::FLAG_COMP_MASK;
 use crate::jsonpath;
 use crate::lexer::{split_by_and, tokenize, Kind, Token};
-use crate::query;
+use crate::query::{self, Agg, Aggregation, Expr, Func, Query};
 use crate::session::{Need, Session};
 use crate::util::{b64_decode, fmt_time, hex_decode, human_size, now_secs};
 use crate::value::{fmt_f64, is_valid_number, Type, Value};
@@ -334,6 +334,74 @@ fn parse_tail(c: &mut Cur) -> Result<Tail, String> {
     Ok(tail)
 }
 
+fn aggregate_usage(func: Func) -> String {
+    let verb = func.name();
+    let target = if func == Func::Count { "<pattern>[.<field>]" } else { "<pattern>.<field>" };
+    format!("{verb} where <condition> | {verb} {target} [where <condition>] [group by <field>] [limit N]")
+}
+
+/// What an aggregate reads: `where <condition>` (the field is then the one
+/// the condition tests), or `<pattern>[.<field>] [where <condition>]`, then
+/// `group by <field>` and `limit N` in any order.
+fn parse_aggregate(c: &mut Cur, func: Func) -> Result<(Query, Option<String>, Option<String>, usize), String> {
+    let verb = func.name();
+    let usage = || format!("Usage: {}", aggregate_usage(func));
+    let (q, field) = if c.eat("where") {
+        let q = parse_query(c, None)?;
+        let field = if func == Func::Count {
+            None
+        } else {
+            let mut fields: Vec<&str> = q.expr.iter().flat_map(|e| e.conditions()).map(|c| c.field.as_str()).collect();
+            fields.sort();
+            fields.dedup();
+            match fields.as_slice() {
+                [f] => Some(f.to_string()),
+                _ => {
+                    return Err(format!(
+                        "the condition tests several fields: say which one {verb} reads, before 'where': \
+                         {verb} {}.<field> where ...",
+                        q.pattern
+                    ))
+                }
+            }
+        };
+        (q, field)
+    } else {
+        let target = word(c.next(), "a key pattern").map_err(|e| format!("{e}\n{}", usage()))?;
+        let (pattern, field) = match split_target(&target) {
+            Ok((p, f)) => (p, Some(f)),
+            Err(_) if func == Func::Count => (target, None),
+            Err(e) => return Err(format!("{e}\n{}", usage())),
+        };
+        if let Some(f) = &field {
+            query::check_field(f)?;
+        }
+        let expr = if c.eat("where") { parse_query(c, Some(&pattern))?.expr } else { None };
+        (Query { pattern, expr }, field)
+    };
+    let (mut group_by, mut limit) = (None, 0);
+    loop {
+        if c.eat("group") {
+            if !c.eat("by") {
+                return Err("expected 'by' after 'group': group by <field>".into());
+            }
+            let f = word(c.next(), "the field to group by")?;
+            let f = f.strip_prefix(q.pattern.as_str()).and_then(|f| f.strip_prefix('.')).unwrap_or(&f).to_string();
+            query::check_field(&f)?;
+            group_by = Some(f);
+        } else if c.eat("limit") {
+            limit = uint(c.next(), "limit")? as usize;
+            if limit == 0 {
+                return Err("ValueError: limit must be greater than zero.".into());
+            }
+        } else {
+            break;
+        }
+    }
+    refuse_unsupported(c.peek())?;
+    Ok((q, field, group_by, limit))
+}
+
 fn project(doc: &Json, fields: &[String]) -> Json {
     let mut m = serde_json::Map::new();
     for f in fields {
@@ -390,16 +458,71 @@ fn condition_value(text: &str) -> Result<Json, String> {
     literal_json(text, false)
 }
 
-/// Parses `<pattern>.<field> <op> <value>`; spaces around the operator are
-/// optional. One pattern, one condition: see [`crate::query`].
-fn parse_cond(c: &mut Cur) -> Result<Cond, String> {
-    let cond = parse_one_cond(c, None)?;
-    // A second condition, a join or a pipeline right after the first one.
+/// Parses the condition of a query: comparisons `<field> <op> <value>`
+/// joined by `and`, `or`, `not` and parentheses (`not` first, then
+/// `and`, then `or`). The first comparison names the key pattern
+/// (`user:*.age > 18`) unless `pattern` is given; the others may repeat it
+/// or name the field alone (`role = "dev"`). See [`crate::query`].
+fn parse_query(c: &mut Cur, pattern: Option<&str>) -> Result<Query, String> {
+    let mut p = QueryParser { pattern: pattern.map(String::from) };
+    let expr = p.or(c, 0)?;
+    expr.check_size()?;
+    // A list of values, a join or a pipeline right after the condition.
     match c.peek() {
         Some(t) if t.kind == Kind::Comma => return Err(query::Unsupported::Operator.message().into()),
+        Some(t) if t.kind == Kind::RParen => return Err("')' without its '('".into()),
+        // `group by` is read by the aggregates, and refused by the others.
+        Some(t) if t.is_kw("group") => {}
         t => refuse_unsupported(t)?,
     }
-    Ok(cond)
+    let pattern = p.pattern.ok_or("expected a condition such as: user:*.role = \"admin\"")?;
+    Ok(Query { pattern, expr: Some(expr) })
+}
+
+struct QueryParser {
+    /// Set by the first comparison when the command did not name it.
+    pattern: Option<String>,
+}
+
+impl QueryParser {
+    fn or(&mut self, c: &mut Cur, depth: usize) -> Result<Expr, String> {
+        let mut parts = vec![self.and(c, depth)?];
+        while c.eat("or") {
+            parts.push(self.and(c, depth)?);
+        }
+        Ok(Expr::or(parts))
+    }
+
+    fn and(&mut self, c: &mut Cur, depth: usize) -> Result<Expr, String> {
+        let mut parts = vec![self.unary(c, depth)?];
+        while c.eat("and") {
+            parts.push(self.unary(c, depth)?);
+        }
+        Ok(Expr::and(parts))
+    }
+
+    fn unary(&mut self, c: &mut Cur, depth: usize) -> Result<Expr, String> {
+        if depth > query::MAX_DEPTH {
+            return Err(format!("a query nests and / or / not at most {} levels deep", query::MAX_DEPTH));
+        }
+        if c.eat("not") {
+            return Ok(Expr::negate(self.unary(c, depth + 1)?));
+        }
+        if c.peek().is_some_and(|t| t.kind == Kind::LParen) {
+            c.next();
+            let e = self.or(c, depth + 1)?;
+            if !c.peek().is_some_and(|t| t.kind == Kind::RParen) {
+                return Err("missing ')' to close the '('".into());
+            }
+            c.next();
+            return Ok(e);
+        }
+        let cond = parse_one_cond(c, self.pattern.as_deref())?;
+        if self.pattern.is_none() {
+            self.pattern = Some(cond.pattern.clone());
+        }
+        Expr::test(cond)
+    }
 }
 
 /// The filter of a vector search: `<field> <op> <value>` conditions joined
@@ -474,7 +597,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<Cond, String> {
                 Some(f) => f.to_string(),
                 None if target.contains('*') => {
                     return Err(format!(
-                        "a vector filter tests fields of the documents searched ({p}): {}",
+                        "a condition tests fields of the documents of {p}, not of '{target}': {}",
                         query::Unsupported::Join.message()
                     ))
                 }
@@ -538,8 +661,9 @@ const HELP: &str = r#"
   json get|set|delete <key> <.path> [value]
   json append|insert|incr <key> <.path> <v> : Change an array or a number in place.
   json type|len|keys <key> [<.path>]  : Inspect a document.
-  get where <pat>.<field> <op> <v> [limit N] [return f1, f2]
-  count where ... | sum where ...   : Aggregates (op: = != > >= < <=).
+  get where <condition> [limit N] [return f1, f2]
+  count|sum|avg|min|max where ... [group by f] : Aggregates; also <verb> <pat>.<field> [where ...].
+  conditions: <pat>.<f> <op> <v> [and|or ...], not, ( ) (op: = != > >= < <=).
   create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
                                     Also <pat>.<field>; drop index, indexes.
   get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
@@ -673,7 +797,7 @@ impl Session {
                 if a.first().is_some_and(|x| x.is_kw("range")) {
                     self.cmd_range(&a[1..], out)
                 } else if a.first().is_some_and(|x| x.is_kw("where")) {
-                    self.cmd_where("get", &a[1..], out)
+                    self.cmd_where(&a[1..], out)
                 } else if a.first().is_some_and(|x| x.is_kw("similar")) {
                     self.cmd_similar(&a[1..], out)
                 } else {
@@ -689,13 +813,7 @@ impl Session {
             "scan" => self.cmd_scan(a, out),
             "keys" => self.cmd_keys(a, out),
             "range" => self.cmd_range(a, out),
-            "count" | "sum" => {
-                if a.first().is_some_and(|x| x.is_kw("where")) {
-                    self.cmd_where(cmd, &a[1..], out)
-                } else {
-                    Err(format!("Usage: {cmd} where <pattern>.<field> <op> <value>"))
-                }
-            }
+            "count" | "sum" | "avg" | "min" | "max" => self.cmd_aggregate(cmd, a, out),
             "explain" => self.cmd_explain(a, out),
             "json" => self.cmd_json(a, out),
             "convert" => self.cmd_convert(a, out),
@@ -1190,29 +1308,64 @@ impl Session {
         Ok(())
     }
 
-    fn cmd_where(&mut self, verb: &str, a: &[Token], out: &mut Out) -> R {
+    fn cmd_where(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
-        let cond = parse_cond(&mut c)?;
+        let q = parse_query(&mut c, None)?;
         let tail = parse_tail(&mut c)?;
         refuse_unsupported(c.peek())?;
-        c.finish(&format!("{verb} where <pattern>.<field> <op> <value> [limit N]"))?;
-        let (rows, _) = self.engine.query(&cond, tail.limit)?;
-        match verb {
-            "count" => out.say(format!("Count: {}", rows.len())),
-            "sum" => {
-                let path = jsonpath::parse_path(&cond.field)?;
-                let total: f64 =
-                    rows.iter().filter_map(|(_, d)| jsonpath::get(d, &path).and_then(|v| v.as_f64())).sum();
-                out.say(format!("Sum: {} ({} matches)", fmt_f64(total), rows.len()));
+        c.finish("get where <condition> [limit N] [return f1, f2]")?;
+        let (rows, _) = self.engine.query_expr(&q, tail.limit)?;
+        for (key, doc) in &rows {
+            match &tail.fields {
+                Some(f) => out.say(format!("{key}: {}", project(doc, f))),
+                None => out.say(format!("{key}: {doc}")),
             }
-            _ => {
-                for (key, doc) in &rows {
-                    match &tail.fields {
-                        Some(f) => out.say(format!("{key}: {}", project(doc, f))),
-                        None => out.say(format!("{key}: {doc}")),
-                    }
+        }
+        out.say(format!("({} matches)", rows.len()));
+        Ok(())
+    }
+
+    /// `count | sum | avg | min | max`, over the documents a query selects,
+    /// optionally per value of a field.
+    fn cmd_aggregate(&mut self, verb: &str, a: &[Token], out: &mut Out) -> R {
+        let func = Func::parse(verb).ok_or("not an aggregate")?;
+        let mut c = Cur::new(a);
+        let (q, field, group_by, limit) = parse_aggregate(&mut c, func)?;
+        c.finish(&aggregate_usage(func))?;
+        let agg = Agg::new(verb, func, field.as_deref())?;
+        let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
+        self.engine.scan_query(&q, limit, |_, doc| acc.add(&doc))?;
+        let r = acc.finish();
+        let name = {
+            let mut n = verb[..1].to_uppercase() + &verb[1..];
+            if let (Some(f), Some(_)) = (&field, &group_by) {
+                n.push_str(&format!(" of {f}"));
+            }
+            n
+        };
+        // Count shows the number alone; the others, how many values made it.
+        let detail = |v: u64, matches: usize, grouped: bool| match func {
+            Func::Count if field.is_none() => String::new(),
+            Func::Count | Func::Sum => format!(" ({matches} matches)"),
+            _ if grouped => format!(" ({v} values)"),
+            _ => format!(" ({v} values, {matches} matches)"),
+        };
+        let show = |v: &Json| match v {
+            Json::Number(n) => n.as_f64().map(fmt_f64).unwrap_or_else(|| n.to_string()),
+            v => v.to_string(),
+        };
+        match &group_by {
+            None => {
+                let (_, v, n) = &r.groups[0].values[0];
+                out.say(format!("{name}: {}{}", show(v), detail(*n, r.matches, false)));
+            }
+            Some(g) => {
+                out.say(format!("{name} by {g} ({} groups, {} matches):", r.groups.len(), r.matches));
+                for grp in &r.groups {
+                    let (_, v, n) = &grp.values[0];
+                    let key = grp.key.as_ref().map(|k| k.to_string()).unwrap_or_default();
+                    out.say(format!("  {key}: {}{}", show(v), detail(*n, grp.matches, true)));
                 }
-                out.say(format!("({} matches)", rows.len()));
             }
         }
         Ok(())
@@ -1316,8 +1469,7 @@ impl Session {
     }
 
     fn cmd_explain(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str =
-            "Usage: explain get where ... | explain count where ... | explain range <A> to <B> | explain get <key>";
+        const USAGE: &str = "Usage: explain get where ... | explain count|sum|avg|min|max ... | explain range <A> to <B> | explain get <key>";
         let mut c = Cur::new(a);
         if c.eat("distributed") {
             return Err(query::Unsupported::Distributed.message().into());
@@ -1325,13 +1477,27 @@ impl Session {
         let verb = c.next().ok_or(USAGE)?;
         let total = self.engine.len();
         out.say("Query Plan");
-        if (verb.is_kw("get") || verb.is_kw("count") || verb.is_kw("sum")) && c.eat("where") {
-            let cond = parse_cond(&mut c)?;
-            parse_tail(&mut c)?;
-            refuse_unsupported(c.peek())?;
+        let agg = Func::parse(&verb.text).filter(|_| verb.is_bare());
+        if (verb.is_kw("get") && c.eat("where")) || agg.is_some() {
+            let q = match agg {
+                Some(f) => parse_aggregate(&mut c, f)?.0,
+                None => {
+                    let q = parse_query(&mut c, None)?;
+                    parse_tail(&mut c)?;
+                    refuse_unsupported(c.peek())?;
+                    q
+                }
+            };
             c.finish(USAGE)?;
-            let plan = self.engine.explain(&cond);
-            out.say(format!("  Filter    : {}.{} {} {}", cond.pattern, cond.field, cond.op.symbol(), cond.value));
+            let plan = self.engine.explain_query(&q);
+            let filter = match q.expr.as_ref() {
+                Some(Expr::Test(t)) => {
+                    let cond = &t.cond;
+                    format!("{}.{} {} {}", cond.pattern, cond.field, cond.op.symbol(), cond.value)
+                }
+                _ => q.describe(),
+            };
+            out.say(format!("  Filter    : {filter}"));
             out.say(format!("  Strategy  : {}", plan.strategy));
             match &plan.index {
                 Some(ix) => out.say(format!("  Index     : {ix}")),
@@ -1339,7 +1505,17 @@ impl Session {
             }
             out.say(format!("  Estimated : {} of {} keys examined", plan.candidates, plan.total_keys));
             if plan.index.is_none() {
-                out.say(format!("  Tip       : create index on {} ({})", cond.pattern, cond.field));
+                // The comparisons an index would serve, and that have none.
+                let mut tips: Vec<String> = Vec::new();
+                for cond in q.expr.iter().flat_map(|e| e.positive_conditions()) {
+                    let tip = format!("create index on {} ({})", cond.pattern, cond.field);
+                    if cond.op != CmpOp::Ne && self.engine.explain(cond).index.is_none() && !tips.contains(&tip) {
+                        tips.push(tip);
+                    }
+                }
+                for tip in tips {
+                    out.say(format!("  Tip       : {tip}"));
+                }
             }
         } else if verb.is_kw("range") || (verb.is_kw("get") && c.eat("range")) {
             let from = word(c.next(), "a lower bound")?;
