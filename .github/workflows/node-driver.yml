@@ -1,0 +1,142 @@
+# Copyright (c) 2026 Fordima Inc. All rights reserved.
+# Licensed under the Fordima Public License (FPL) v1.0.
+# See the LICENSE file in the project root for full license information.
+#
+# The Node.js driver (drivers/node), tested against a real KivaDB built from
+# the same commit, on Windows, Linux and macOS, with every Node.js version it
+# supports ("engines" in package.json). Runs when the driver or the server
+# changes.
+
+name: Node.js driver
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'drivers/node/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/node-driver.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'drivers/node/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/node-driver.yml'
+  workflow_dispatch:
+
+jobs:
+  server:
+    name: KivaDB for ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-driver-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build KivaDB
+        run: cargo build
+
+      - name: Pack the executable
+        # A tar keeps the executable bit, which artifacts lose.
+        shell: bash
+        run: tar -cf kivadb.tar -C target/debug $([[ "$RUNNER_OS" == "Windows" ]] && echo kivadb.exe || echo kivadb)
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivadb-${{ matrix.os }}
+          path: kivadb.tar
+          retention-days: 1
+
+  test:
+    name: Node.js ${{ matrix.node }} on ${{ matrix.os }}
+    needs: server
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        node: [ 18, 20, 22 ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Download KivaDB
+        uses: actions/download-artifact@v4
+        with:
+          name: kivadb-${{ matrix.os }}
+
+      - name: Unpack KivaDB
+        # A relative path: on Windows, tar reads "D:" in an absolute one as
+        # the name of a remote machine.
+        shell: bash
+        run: mkdir -p kivadb-bin && tar -xf kivadb.tar -C kivadb-bin
+
+      - name: Test the driver
+        shell: bash
+        working-directory: drivers/node
+        run: |
+          BIN="$GITHUB_WORKSPACE/kivadb-bin/kivadb"
+          [[ "$RUNNER_OS" == "Windows" ]] && BIN="$BIN.exe"
+          KIVADB_BIN="$BIN" npm test
+
+  package:
+    name: npm package contents
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check what npm would publish
+        # Exactly the files listed in package.json, nothing else (no tests).
+        working-directory: drivers/node
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const files = require("./pack.json")[0].files.map((f) => f.path).sort();
+            const want = ["LICENSE", "README.md", "index.d.ts", "index.js", "package.json"];
+            console.log(files.join("\n"));
+            if (JSON.stringify(files) !== JSON.stringify(want)) {
+              console.error("expected " + want.join(", "));
+              process.exit(1);
+            }'
+
+      - name: Check the TypeScript types
+        # In a folder of its own, so that nothing is added to the package.
+        run: |
+          mkdir "$RUNNER_TEMP/types" && cp drivers/node/index.d.ts "$RUNNER_TEMP/types"
+          cd "$RUNNER_TEMP/types"
+          npm install --no-save --no-audit --no-fund typescript@5.6.3 @types/node@22.7.5
+          npx tsc --noEmit --strict --types node index.d.ts
