@@ -53,7 +53,9 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
   });
 
   const db = await connect({ port });
-  assert.equal(db.server, `KivaDB ${require("../package.json").version}`);
+  // The driver has its own version; the server reports the one in Cargo.toml.
+  const cargo = fs.readFileSync(path.join(__dirname, "..", "..", "..", "Cargo.toml"), "utf8");
+  assert.equal(db.server, `KivaDB ${cargo.match(/^version = "(.+)"/m)[1]}`);
 
   await t.test("typed values round-trip", async () => {
     await db.set("s", "both \" and ' quotes");

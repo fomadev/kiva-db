@@ -58,7 +58,7 @@ KivaDB is built with Cargo.
 Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Node.js driver tests (`cd drivers/node && npm test`, on Linux). A pull request is merged only when all three systems are green.
 
 ### Releasing (maintainers)
-1. Update the version in `Cargo.toml`, `drivers/node/package.json`, the Docker tag in `docker-compose.yml` and the documentation.
+1. Update the version in `Cargo.toml`, the Docker tag in `docker-compose.yml` and the documentation. The Node.js driver (`drivers/node/package.json`) has a version of its own, raised only when the driver changes, following semver.
 2. Commit, push, and wait for the three systems to be green.
 3. Tag the version and push the tag:
    ```bash

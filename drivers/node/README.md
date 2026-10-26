@@ -8,6 +8,8 @@ The official Node.js driver for [KivaDB](../../README.md). It speaks KivaDB's bi
 npm install kivadb
 ```
 
+The driver has its own version numbers, separate from the server's: driver 1.0.0 is tested with KivaDB 1.6.0, and `semanticCached` needs a server of 1.6.0 or later.
+
 Until the package is published on npm, install it from a copy of the repository:
 
 ```bash
