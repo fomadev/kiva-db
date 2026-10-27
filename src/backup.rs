@@ -301,7 +301,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 
 /// Checks the framing and the checksum of every record of a data file
 /// (encrypted records too: their checksum covers the encrypted bytes).
-fn check_log(path: &Path) -> std::result::Result<u64, String> {
+pub fn check_log(path: &Path) -> std::result::Result<u64, String> {
     let data = fs::read(path).map_err(|e| e.to_string())?;
     if data.len() < FILE_HEADER_LEN as usize {
         return Err("the data file is too short".into());
@@ -573,7 +573,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kivadb-checklog-{:x}", crate::util::random_u64()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("store.kiva");
-        let mut data = crate::format::file_header(7).to_vec();
+        let mut data = crate::format::file_header(7, crate::format::FORMAT_V1).to_vec();
         data.extend(crate::format::encode_record("a", b"1", 1, 0, 0, 0));
         data.extend(crate::format::encode_record("b", b"2", 1, 0, 0, 0));
         fs::write(&path, &data).unwrap();

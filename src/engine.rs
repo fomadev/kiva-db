@@ -805,6 +805,8 @@ struct Inner {
     file: File,
     file_len: u64,
     file_id: u64,
+    /// Format number in the data file's header (`crate::format`).
+    format: u32,
     /// A handle of the data file `file_id` for its fsyncs (group commit).
     sync_file: Option<(u64, Arc<File>)>,
     index: BTreeMap<String, Entry>,
@@ -1310,6 +1312,15 @@ impl Inner {
         if self.closed {
             return Err(KivaError::Other("database is closed".into()));
         }
+        let need = format_needed(buf);
+        if need > self.format {
+            // Before the records: a crash in between leaves a file of the new
+            // format holding only old types, which every version of 2.x reads.
+            self.file.seek(SeekFrom::Start(4))?;
+            self.file.write_all(&need.to_le_bytes())?;
+            self.file.sync_data()?;
+            self.format = need;
+        }
         let offset = self.file_len;
         let res = self.file.seek(SeekFrom::Start(offset)).and_then(|_| self.file.write_all(buf)).and_then(|_| {
             if sync {
@@ -1644,11 +1655,13 @@ impl Engine {
         let mut corrupted = 0u64;
         let mut recovered_bytes = 0u64;
         let file_id;
+        let format;
         let mode;
 
         if file_len == 0 {
             file_id = random_u64();
-            file.write_all(&file_header(file_id))?;
+            format = FORMAT_V1;
+            file.write_all(&file_header(file_id, format))?;
             file.sync_data()?;
             file_len = FILE_HEADER_LEN;
             mode = "new";
@@ -1656,7 +1669,7 @@ impl Engine {
             let mut h = [0u8; FILE_HEADER_LEN as usize];
             file.seek(SeekFrom::Start(0))?;
             file.read_exact(&mut h).map_err(|_| KivaError::Format("file header is truncated".into()))?;
-            file_id = parse_file_header(&h).map_err(KivaError::Format)?;
+            (file_id, format) = parse_file_header(&h).map_err(KivaError::Format)?;
 
             let mut scan_from = FILE_HEADER_LEN;
             let mut m = "scan";
@@ -1716,6 +1729,7 @@ impl Engine {
             file,
             file_len,
             file_id,
+            format,
             sync_file: None,
             index,
             live_bytes: 0,
@@ -2438,9 +2452,10 @@ impl Engine {
         let file_id = random_u64();
         inner.file.set_len(0)?;
         inner.file.seek(SeekFrom::Start(0))?;
-        inner.file.write_all(&file_header(file_id))?;
+        inner.file.write_all(&file_header(file_id, FORMAT_V1))?;
         inner.file.sync_data()?;
         inner.file_id = file_id;
+        inner.format = FORMAT_V1;
         inner.file_len = FILE_HEADER_LEN;
         inner.index.clear();
         for s in &mut inner.sec {
@@ -2550,7 +2565,7 @@ impl Engine {
         let new_id = random_u64();
         let mut reader = File::open(&self.path)?;
         let mut out = BufWriter::with_capacity(1 << 20, File::create(tmp_path)?);
-        out.write_all(&file_header(new_id))?;
+        out.write_all(&file_header(new_id, FORMAT_V1))?;
         let mut pos = FILE_HEADER_LEN;
         let mut moved: HashMap<String, (u64, Entry)> = HashMap::with_capacity(snapshot.len());
         let mut dropped = 0usize;
@@ -2618,6 +2633,12 @@ impl Engine {
             let tail = inner.read_at(snap_len, tail_len)?;
             tmp_file.write_all(&tail)?;
             pos += tail.len() as u64;
+        }
+        // The copy keeps the format of the file it replaces (types of 2.0 may
+        // be among the records, or have been appended while it was made).
+        if inner.format > FORMAT_V1 {
+            tmp_file.seek(SeekFrom::Start(4))?;
+            tmp_file.write_all(&inner.format.to_le_bytes())?;
         }
         tmp_file.sync_all()?;
         drop(tmp_file);

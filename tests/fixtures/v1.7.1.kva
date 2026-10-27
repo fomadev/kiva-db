@@ -1,0 +1,25 @@
+# A KivaDB 1.7.1 home, for the 2.0 compatibility test.
+set greeting "hello"
+set n:count 41
+set flag true
+set nothing null
+set list [1, 2, 3]
+set blob 0x00010203
+set user:1 {"name": "Ana", "role": "dev", "age": 31, "city": "Goma"}
+set user:2 {"name": "Ben", "role": "ops", "age": 45, "city": "Bukavu"}
+set user:3 {"name": "Chloe", "role": "dev", "age": 27, "city": "Goma"}
+create index on user: (role)
+create index on user:*.city using hash
+create unique index on user: (name) ignore case
+set session:abc "token" ttl 315360000
+set doc:1 {"title": "first", "embedding": [1.0, 0.0, 0.0]}
+set doc:2 {"title": "second", "embedding": [0.0, 1.0, 0.0]}
+set doc:3 {"title": "third", "embedding": [0.7, 0.7, 0.0]}
+create vector index on doc: (embedding) using hnsw
+workspace create shop
+workspace switch shop
+set item:1 {"label": "pen", "price": 2.5}
+workspace switch default
+create user "ana" identified by "ana-pw"
+create user "guest" identified by "guest-pw" role viewer
+set long "kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb kivadb "

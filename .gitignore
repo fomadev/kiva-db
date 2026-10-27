@@ -46,3 +46,6 @@ data/
 tests/test_runner
 # --- Node.js ---
 node_modules/
+
+# Homes written by earlier versions, opened by tests/compat.rs.
+!tests/fixtures/**

@@ -143,6 +143,31 @@ pub fn physical_memory() -> Option<u64> {
     }
 }
 
+/// Free space, in bytes, on the disk holding `path`, for this user.
+/// `None` when it cannot be read.
+pub fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        extern "system" {
+            fn GetDiskFreeSpaceExW(dir: *const u16, free: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let (mut free, mut total, mut total_free) = (0u64, 0u64, 0u64);
+        // SAFETY: `wide` is a NUL-terminated path; the three outputs are valid u64s.
+        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) } != 0;
+        ok.then_some(free)
+    }
+    #[cfg(not(windows))]
+    {
+        // `df` is on every Unix; its POSIX output gives the available 1024-byte blocks in column 4.
+        let out = std::process::Command::new("df").arg("-Pk").arg(path).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let blocks: u64 = text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()?;
+        Some(blocks * 1024)
+    }
+}
+
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);

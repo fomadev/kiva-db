@@ -1,0 +1,29 @@
+{
+  "indexes": [
+    {
+      "pattern": "user:*",
+      "field": "role"
+    },
+    {
+      "pattern": "user:*",
+      "field": "city",
+      "kind": "hash"
+    },
+    {
+      "pattern": "user:*",
+      "field": "name",
+      "unique": true,
+      "ignore_case": true
+    }
+  ],
+  "vector_indexes": [
+    {
+      "pattern": "doc:*",
+      "field": "embedding",
+      "kind": "hnsw",
+      "metric": "cosine",
+      "m": 16,
+      "ef_construction": 200
+    }
+  ]
+}

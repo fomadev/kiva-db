@@ -141,8 +141,24 @@ pub struct Metrics {
     pub others: AtomicU64,
     pub errors: AtomicU64,
     pub micros: AtomicU64,
+    /// Commands by duration: `latency[i]` counts those up to `LATENCY_BUCKETS_US[i]`
+    /// (and above the previous bound), the last one those beyond every bound.
+    pub latency: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
     pub http_requests: AtomicU64,
     pub failed_logins: AtomicU64,
+}
+
+/// Upper bounds of the latency histogram, in microseconds: from a value read
+/// from memory (well under a millisecond) to a long scan or script.
+pub const LATENCY_BUCKETS_US: [u64; 10] =
+    [100, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000];
+
+impl Metrics {
+    pub fn record_latency(&self, micros: u64) {
+        self.micros.fetch_add(micros, Ordering::Relaxed);
+        let i = LATENCY_BUCKETS_US.iter().position(|b| micros <= *b).unwrap_or(LATENCY_BUCKETS_US.len());
+        self.latency[i].fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub struct Semaphore {

@@ -1,0 +1,9 @@
+{
+  "indexes": [
+    {
+      "pattern": "secret*",
+      "field": "pin"
+    }
+  ],
+  "vector_indexes": []
+}

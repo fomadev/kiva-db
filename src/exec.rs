@@ -993,7 +993,7 @@ impl Session {
         if out.has_err() {
             m.errors.fetch_add(1, Ordering::Relaxed);
         }
-        m.micros.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        m.record_latency(started.elapsed().as_micros() as u64);
         out
     }
 

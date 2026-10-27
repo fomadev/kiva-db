@@ -53,7 +53,7 @@ jobs:
       - name: Install Rust (stable)
         shell: bash
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
 
       - name: Cache build
@@ -65,8 +65,20 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
 
+      - name: Formatting
+        run: cargo fmt --check
+
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Fetch KivaDB 1.7.1
+        # tests/compat.rs then also goes back to 1.x for real (KIVADB_V1_BIN).
+        if: matrix.os-name == 'linux'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/v1"
+          curl -sSfL https://github.com/fomadev/kiva-db/releases/download/v1.7.1/kivadb_linux_x64.tar.gz | tar xz -C "$RUNNER_TEMP/v1"
+          echo "KIVADB_V1_BIN=$RUNNER_TEMP/v1/kivadb" >> "$GITHUB_ENV"
 
       - name: Test
         run: cargo test

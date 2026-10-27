@@ -55,7 +55,7 @@ KivaDB is built with Cargo.
 - To try the shell on a throwaway database: `cargo run -- --home ./scratch-home`
 
 ### Continuous integration
-Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo clippy --all-targets -- -D warnings`, `cargo test`, and the Redis client checks (on Linux). When the driver or the server changes, `.github/workflows/node-driver.yml` tests the Node.js driver against a KivaDB built from the same commit, with Node.js 18, 20 and 22 on the three systems, and checks the npm package contents and its TypeScript types (locally: `cd drivers/node && KIVADB_BIN=../../target/debug/kivadb npm test`). A pull request is merged only when every check is green.
+Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux and macOS: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (which opens the homes of earlier versions kept in `tests/fixtures`, and on Linux runs the released 1.7.1 executable on homes written by this version; locally: `KIVADB_V1_BIN=<path to kivadb 1.7.1> cargo test --test compat`), and the Redis client checks (on Linux). When the driver or the server changes, `.github/workflows/node-driver.yml` tests the Node.js driver against a KivaDB built from the same commit, with Node.js 18, 20 and 22 on the three systems, and checks the npm package contents and its TypeScript types (locally: `cd drivers/node && KIVADB_BIN=../../target/debug/kivadb npm test`). A pull request is merged only when every check is green.
 
 ### Releasing (maintainers)
 1. Update the version in `Cargo.toml`, the Docker tag in `docker-compose.yml` and the documentation. The Node.js driver (`drivers/node/package.json`) has a version of its own, raised only when the driver changes, following semver.
@@ -73,7 +73,7 @@ The same tag also publishes the Node.js driver on npm as `@fomadev/kivadb` (`.gi
 ## Style Guide
 
 Consistency is key to a maintainable database engine.
-- **Storage engine** (`src/engine.rs`, `format.rs`, `hint.rs`): any change to the on-disk format must stay readable by existing files, or bump the format number and say so in the pull request.
+- **Storage engine** (`src/engine.rs`, `format.rs`, `hint.rs`): any change to the on-disk format must stay readable by existing files, or bump the format number and say so in the pull request. `tests/compat.rs` opens homes written by earlier versions (`tests/fixtures`, made with the `.kva` file next to them); never regenerate them with the current version, add a new one made with the released executable instead.
 - **Command language** (`src/exec.rs`, `exec_admin.rs`): every new command needs an entry in `help`, in DOCUMENTATION.md (its chapter and the cheat sheet) and in the privilege table (`required`).
 - **Errors**: return `KivaError` values; never panic on user input or on corrupted data.
 - **Formatting**: `cargo fmt`. Use descriptive names and comment the reasoning, not the mechanics.
