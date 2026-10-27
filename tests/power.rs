@@ -521,7 +521,13 @@ fn vector_search_filters_on_metadata_before_or_after_the_similarity() {
     for (k, v, meta) in &docs {
         embed(&e, k, v, meta.clone());
     }
-    let cond = |field: &str, op: CmpOp, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op, value };
+    let cond = |field: &str, op: CmpOp, value: Json| Cond {
+        pattern: "chunk:*".into(),
+        field: field.into(),
+        op,
+        value,
+        func: None,
+    };
     let fr = || cond("lang", CmpOp::Eq, json!("fr"));
     let recent = || cond("year", CmpOp::Ge, json!(2020));
     let is_fr_recent = |d: &Json| d["lang"] == "fr" && d["year"].as_i64().unwrap() >= 2020;
@@ -1129,6 +1135,21 @@ fn redis_numbered_databases_are_workspaces() {
     let mut q = Redis::connect(port);
     assert_eq!(q.cmd(&["AUTH", "pay", "paypw"]), ok_reply());
     assert_eq!(q.cmd(&["GET", "mine"]), b("1"));
+}
+
+#[test]
+fn redis_clients_read_dates_as_iso_text() {
+    let dir = TempDir::new("resp_dates");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "timezone +01:00");
+    ok(&mut admin, r#"set datetime at "2026-10-27 14:30:00" and date born "2004-05-09" and time opens "08:00""#);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    assert_eq!(r.cmd(&["GET", "at"]), b("2026-10-27T13:30:00.000Z"));
+    assert_eq!(r.cmd(&["GET", "born"]), b("2004-05-09"));
+    assert_eq!(r.cmd(&["GET", "opens"]), b("08:00:00"));
+    assert_eq!(r.cmd(&["TYPE", "at"]), R::S("string".into()));
 }
 
 #[test]
@@ -1800,7 +1821,13 @@ fn query_speed() {
         e.put(&format!("u:{i:06}"), &Value::Doc(doc), 0, false).unwrap();
     }
     e.create_index("u:*", "city").unwrap();
-    let cond = |field: &str, op: CmpOp, value: Json| Cond { pattern: "u:*".into(), field: field.into(), op, value };
+    let cond = |field: &str, op: CmpOp, value: Json| Cond {
+        pattern: "u:*".into(),
+        field: field.into(),
+        op,
+        value,
+        func: None,
+    };
     let cases = [
         ("index =, 1000 rows", cond("city", CmpOp::Eq, json!(7)), 200),
         ("scan =, 25000 rows", cond("role", CmpOp::Eq, json!("dev")), 10),
@@ -1869,7 +1896,13 @@ fn hnsw_filter_speed() {
     let dir = TempDir::new("hnsw_filter_speed");
     let (e, queries) = bench_corpus(&dir);
     e.create_vector_index_with("chunk:*", "embedding", hnsw(Metric::Cosine)).unwrap();
-    let cond = |field: &str, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op: CmpOp::Eq, value };
+    let cond = |field: &str, value: Json| Cond {
+        pattern: "chunk:*".into(),
+        field: field.into(),
+        op: CmpOp::Eq,
+        value,
+        func: None,
+    };
     let cases =
         [("group = 2 (1 in 5)", cond("group", json!(2))), ("rare = true (1 in 100)", cond("rare", json!(true)))];
     for (name, c) in &cases {
@@ -1950,7 +1983,13 @@ fn quantized_graphs_rank_with_the_full_vectors_and_filters_apply_while_walking()
     assert!(hits >= 180, "recall@10 {hits}/200");
 
     // Filters are tested while the graph is walked: enough results, all passing.
-    let cond = |field: &str, value: Json| Cond { pattern: "chunk:*".into(), field: field.into(), op: CmpOp::Eq, value };
+    let cond = |field: &str, value: Json| Cond {
+        pattern: "chunk:*".into(),
+        field: field.into(),
+        op: CmpOp::Eq,
+        value,
+        func: None,
+    };
     for c in [cond("group", json!(2)), cond("rare", json!(true))] {
         let mut q = query("chunk:*", vectors[7].clone(), Metric::Cosine, 10);
         q.filter = vec![c.clone()];

@@ -498,6 +498,8 @@ fn bytes_of(v: &Value) -> Option<Vec<u8>> {
         Value::Null => Vec::new(),
         Value::Bytes(b) => b.clone(),
         Value::Doc(_) => return None,
+        // ISO 8601; a datetime in UTC: 2026-10-27T13:30:00.000Z.
+        Value::Date(_) | Value::DateTime(_) | Value::Time(_) => v.encode(false).ok()?,
     })
 }
 
@@ -526,6 +528,7 @@ impl Conn {
     }
 
     pub fn handle(&mut self, args: &[Vec<u8>]) -> Reply {
+        self.sess.use_zone();
         let name = String::from_utf8_lossy(&args[0]).to_ascii_uppercase();
         // In RESP2, a listening connection only receives messages.
         if self.subs > 0 && !self.resp3 && !WHILE_SUBSCRIBED.contains(&name.as_str()) {

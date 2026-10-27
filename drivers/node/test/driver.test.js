@@ -82,6 +82,15 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     assert.deepEqual(await db.get("doc"), { name: "Alice", tags: ["a"] });
     assert.deepEqual(await db.get("raw"), Buffer.from([0, 1, 255]));
     assert.equal(await db.get("ghost"), undefined);
+    // A Date is a datetime, to the millisecond; dates and times are text.
+    const at = new Date("2026-10-27T13:30:00.250Z");
+    await db.set("at", at);
+    await db.set("born", "2004-05-09", { type: "date" });
+    await db.set("opens", "08:00", { type: "time" });
+    assert.equal((await db.get("at")).toISOString(), at.toISOString());
+    assert.equal(await db.get("born"), "2004-05-09");
+    assert.equal(await db.get("opens"), "08:00:00");
+    await assert.rejects(db.set("bad", "27/10/2026", { type: "date" }), /is not a date/);
     const keys = await db.scan("d*");
     assert.equal(keys[0].key, "doc");
     assert.ok(keys[0].ttl > 50);

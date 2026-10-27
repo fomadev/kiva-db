@@ -13,6 +13,7 @@ use crate::jsonpath;
 use crate::lexer::{split_by_and, tokenize, Kind, Token};
 use crate::query::{self, Agg, Aggregation, Expr, Func, Query};
 use crate::session::{Need, Session};
+use crate::time;
 use crate::util::{b64_decode, deadline_in, fmt_time, hex_decode, human_size, now_ms, secs_left};
 use crate::value::{fmt_f64, is_valid_number, Type, Value};
 use serde_json::Value as Json;
@@ -89,6 +90,16 @@ pub fn validate_key_name(key: &str) -> Result<(), String> {
         return Err(format!("InvalidKeyName: '{key}' contains the forbidden character '{}'.", c.escape_default()));
     }
     Ok(())
+}
+
+/// The type written before the key: `set number n 5`. `set date "..."` names
+/// a key `date`, and so does `set date now()`.
+fn forced_type(a: &[Token]) -> Option<Type> {
+    let ty = a.first().and_then(type_kw)?;
+    if a.len() < 3 || (ty.is_temporal() && a[2].kind == Kind::LParen) {
+        return None;
+    }
+    Some(ty)
 }
 
 pub(crate) fn type_kw(t: &Token) -> Option<Type> {
@@ -247,9 +258,140 @@ pub(crate) fn parse_value(t: &Token, forced: Option<Type>, key: &str) -> Result<
                 .map(Value::Bytes)
                 .ok_or_else(|| "Bytes must be written as 0x<hex>, b64:<base64> or a quoted string.".into())
         }
+        Some(ty @ (Type::Date | Type::DateTime | Type::Time)) => {
+            if !quoted {
+                let example = match ty {
+                    Type::Date => "2026-10-27",
+                    Type::Time => "14:30",
+                    _ => "2026-10-27 14:30:00",
+                };
+                return Err(format!(
+                    "A {0} is quoted: set {0} {key} \"{example}\" (or now(), today(), current_time).",
+                    ty.name()
+                ));
+            }
+            temporal_literal(ty, &t.text)
+        }
     }
 }
 
+/// The text of a `date`, `datetime` or `time`; a datetime without a zone is a
+/// wall clock of the session's zone.
+fn temporal_literal(ty: Type, text: &str) -> Result<Value, String> {
+    match ty {
+        Type::Date => time::parse_date(text).map(Value::Date),
+        Type::Time => time::parse_time(text).map(Value::Time),
+        _ => time::parse_datetime(text, &time::zone()).map(Value::DateTime),
+    }
+}
+
+/// A moment written with a function or a typed text, then moved by
+/// durations: `now()`, `today()`, `current_timestamp`, `current_date`,
+/// `current_time`, `datetime "2026-10-27 14:30"`, `date "..."`, `time "..."`,
+/// each optionally followed by `+ 7 days`, `- 2 hours`... `None` (nothing
+/// read) when the tokens do not start one.
+pub(crate) fn time_expr(c: &mut Cur) -> Option<Result<Value, String>> {
+    let t = c.peek().filter(|t| t.is_bare())?;
+    let rest = c.rest();
+    let call = |i: usize| {
+        rest.get(i).is_some_and(|t| t.kind == Kind::LParen) && rest.get(i + 1).is_some_and(|t| t.kind == Kind::RParen)
+    };
+    let word = t.text.to_ascii_lowercase();
+    let (value, used) = match word.as_str() {
+        "now" if call(1) => (Value::DateTime(time::now()), 3),
+        "today" if call(1) => (Value::Date(time::today()), 3),
+        "current_timestamp" | "current_date" | "current_time" => {
+            let v = match word.as_str() {
+                "current_timestamp" => Value::DateTime(time::now()),
+                "current_date" => Value::Date(time::today()),
+                _ => Value::Time(time::current_time()),
+            };
+            (v, if call(1) { 3 } else { 1 })
+        }
+        "datetime" | "date" | "time" if rest.get(1).is_some_and(|t| t.is_quoted()) => {
+            let ty = Type::from_name(&word).expect("a temporal type");
+            match temporal_literal(ty, &rest[1].text) {
+                Ok(v) => (v, 2),
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        _ => return None,
+    };
+    for _ in 0..used {
+        c.next();
+    }
+    Some(shift(c, value))
+}
+
+/// Applies `+ 7 days`, `- 2 hours`... that follow a moment.
+fn shift(c: &mut Cur, mut value: Value) -> Result<Value, String> {
+    loop {
+        let Some(t) = c.peek().filter(|t| t.is_bare()) else { return Ok(value) };
+        let (sign, glued) = match t.text.as_str() {
+            "+" => (1, None),
+            "-" => (-1, None),
+            s if s.len() > 1 && s.starts_with(['+', '-']) && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+                (if s.starts_with('-') { -1 } else { 1 }, Some(s[1..].to_string()))
+            }
+            _ => return Ok(value),
+        };
+        c.next();
+        let n = match glued {
+            Some(n) => n,
+            None => word(c.next(), "a number of days, hours...")?,
+        };
+        let n: i64 = n.parse().map_err(|_| format!("'{n}' is not a whole number: write now() - 7 days"))?;
+        let unit = word(c.next(), "a unit (ms, seconds, minutes, hours, days, weeks)")?;
+        let d = time::duration(sign * n, &unit).ok_or_else(|| {
+            format!(
+                "'{unit}' is not a unit: use ms, seconds, minutes, hours, days or weeks (months and years vary in length)"
+            )
+        })?;
+        value = match value {
+            Value::DateTime(i) => Value::DateTime(i.checked_add_signed(d).ok_or("this date is out of range")?),
+            Value::Date(day) => {
+                if d.num_milliseconds() % 86_400_000 != 0 {
+                    return Err("a date moves by days or weeks; for hours, use now() or a datetime".into());
+                }
+                Value::Date(day.checked_add_signed(d).ok_or("this date is out of range")?)
+            }
+            Value::Time(t) => Value::Time(t.overflowing_add_signed(d).0),
+            other => other,
+        };
+    }
+}
+
+/// The value of `set` and `update`, read in two steps so that a syntax error
+/// after it is reported first: a moment (`now()`, `date "..."`...) is read
+/// at once, a literal token only taken here.
+enum Pending<'a> {
+    Moment(Value),
+    Literal(&'a Token),
+}
+
+fn value_of<'a>(c: &mut Cur<'a>, forced: Option<Type>) -> Result<Pending<'a>, String> {
+    match time_expr(c) {
+        Some(v) => {
+            let v = v?;
+            match forced {
+                Some(ty) if ty != v.ty() => Err(format!("Value is a {}, not a {}.", v.ty().name(), ty.name())),
+                _ => Ok(Pending::Moment(v)),
+            }
+        }
+        None => Ok(Pending::Literal(c.next().ok_or("Syntax error. Missing value.")?)),
+    }
+}
+
+impl Pending<'_> {
+    fn value(self, forced: Option<Type>, key: &str) -> Result<Value, String> {
+        match self {
+            Pending::Moment(v) => Ok(v),
+            Pending::Literal(t) => parse_value(t, forced, key),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct Cur<'a> {
     pub t: &'a [Token],
     pub i: usize,
@@ -385,10 +527,23 @@ fn parse_aggregate(c: &mut Cur, func: Func) -> Result<(Query, Option<String>, Op
             if !c.eat("by") {
                 return Err("expected 'by' after 'group': group by <field>".into());
             }
-            let f = word(c.next(), "the field to group by")?;
+            let mut f = word(c.next(), "the field to group by")?;
+            // `group by month(order:*.created_at)`.
+            let func = time::TimeFn::parse(&f).filter(|_| c.peek().is_some_and(|t| t.kind == Kind::LParen));
+            if func.is_some() {
+                c.next();
+                f = word(c.next(), "the field inside the parentheses")?;
+                if !c.peek().is_some_and(|t| t.kind == Kind::RParen) {
+                    return Err("expected ')' after the field: group by month(order:*.created_at)".into());
+                }
+                c.next();
+            }
             let f = f.strip_prefix(q.pattern.as_str()).and_then(|f| f.strip_prefix('.')).unwrap_or(&f).to_string();
             query::check_field(&f)?;
-            group_by = Some(f);
+            group_by = Some(match func {
+                Some(func) => format!("{}({f})", func.name()),
+                None => f,
+            });
         } else if c.eat("limit") {
             limit = uint(c.next(), "limit")? as usize;
             if limit == 0 {
@@ -555,13 +710,30 @@ fn parse_filter(c: &mut Cur, pattern: &str) -> Result<Vec<Cond>, String> {
 /// ilike`. With `pattern`, the target is a field of its documents.
 fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), String> {
     const USAGE: &str = "expected a condition such as: user:*.role = \"admin\"";
-    let t0 = c.next().ok_or(USAGE)?;
+    let mut t0 = c.next().ok_or(USAGE)?;
+    // `month(place:*.created_at) = 10`: a part of the field's date.
+    let mut func = None;
+    if let Some(f) = t0.is_bare().then(|| time::TimeFn::parse(&t0.text)).flatten() {
+        if c.peek().is_some_and(|t| t.kind == Kind::LParen) {
+            c.next();
+            t0 = c.next().filter(|t| t.is_bare()).ok_or(USAGE)?;
+            if !c.peek().is_some_and(|t| t.kind == Kind::RParen) {
+                return Err(format!(
+                    "{}() takes one field and a closing parenthesis: {}(place:*.created_at) = 10",
+                    f.name(),
+                    f.name()
+                ));
+            }
+            c.next();
+            func = Some(f);
+        }
+    }
     let mut target = t0.text.clone();
     let mut op_text = String::new();
     let mut value: Option<Json> = None;
 
     // Unquoted target may have the operator (and value) glued to it: age>18
-    if t0.is_bare() {
+    if t0.is_bare() && func.is_none() {
         if let Some((pos, len)) = find_op(&t0.text) {
             target = t0.text[..pos].to_string();
             op_text = t0.text[pos..pos + len].to_string();
@@ -600,6 +772,13 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
     let value = match value {
         Some(v) => v,
+        // `now() - 7 days`, `datetime "2026-01-01"`, `today()`, `time "08:00"`.
+        None if op != CmpOp::In && time_expr(&mut c.clone()).is_some() => match time_expr(c).expect("a moment")? {
+            Value::DateTime(i) => time::datetime_json(i),
+            Value::Date(d) => Json::String(time::date_text(d)),
+            Value::Time(t) => time::time_json(t),
+            other => other.to_json(),
+        },
         None => {
             let t = c.next().ok_or(USAGE)?;
             match t.kind {
@@ -630,7 +809,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
         None => split_target(&target)?,
     };
     query::check_field(&field)?;
-    Ok((Cond { pattern, field, op, value }, negated))
+    Ok((Cond { pattern, field, op, value, func }, negated))
 }
 
 /// Splits `<pattern>.<field>`: the field starts at the first '.' after the last wildcard.
@@ -741,6 +920,7 @@ const HELP: &str = r#"
 impl Session {
     /// Runs one command line and returns what it printed.
     pub fn execute(&mut self, line: &str) -> Out {
+        self.use_zone();
         let mut out = Out::default();
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
@@ -899,16 +1079,15 @@ impl Session {
         const USAGE: &str = "set [type] <key> <value> [ttl <sec>] [if not exists]";
         let (a, if_absent) = strip_clause(a, &["if", "not", "exists"]);
         let mut c = Cur::new(a);
-        let forced = match c.peek().and_then(type_kw) {
-            Some(ty) if a.len() >= 3 => {
-                c.next();
-                Some(ty)
-            }
-            _ => None,
-        };
-        let (Some(kt), Some(vt)) = (c.next(), c.next()) else {
+        let forced = forced_type(a);
+        if forced.is_some() {
+            c.next();
+        }
+        let (Some(kt), Some(_)) = (c.next(), c.peek()) else {
             return Err(format!("Syntax error. Missing key or value.\nUsage: {USAGE}"));
         };
+        let key = key_for_write(kt)?;
+        let pending = value_of(&mut c, forced)?;
         let mut ttl = 0i64;
         if c.eat("ttl") {
             ttl = uint(c.next(), "TTL")? as i64;
@@ -919,8 +1098,7 @@ impl Session {
         if let Some(extra) = c.peek() {
             return Err(format!("Invalid set syntax near '{}'\nUsage: {USAGE}", extra.text));
         }
-        let key = key_for_write(kt)?;
-        let value = parse_value(vt, forced, &key)?;
+        let value = pending.value(forced, &key)?;
         if self.kv_exists(&key)? {
             if if_absent {
                 out.say(format!("OK: {key} skipped (already exists)"));
@@ -937,20 +1115,18 @@ impl Session {
     fn update_one(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str = "update [type] <key> <value>";
         let mut c = Cur::new(a);
-        let forced = match c.peek().and_then(type_kw) {
-            Some(ty) if a.len() >= 3 => {
-                c.next();
-                Some(ty)
-            }
-            _ => None,
-        };
-        let (Some(kt), Some(vt)) = (c.next(), c.next()) else {
+        let forced = forced_type(a);
+        if forced.is_some() {
+            c.next();
+        }
+        let (Some(kt), Some(_)) = (c.next(), c.peek()) else {
             return Err(format!("Syntax error. Missing key or value.\nUsage: {USAGE}"));
         };
+        let key = key_for_write(kt)?;
+        let pending = value_of(&mut c, forced)?;
         if let Some(extra) = c.peek() {
             return Err(format!("Invalid update syntax near '{}'\nUsage: {USAGE}", extra.text));
         }
-        let key = key_for_write(kt)?;
         let Some((old, meta)) = self.kv_get(&key)? else {
             return Err(format!("Key '{key}' not found. Use 'set' to create it."));
         };
@@ -960,7 +1136,7 @@ impl Session {
                 return Err(format!("Type mismatch. '{key}' is a [{}].", actual.name()));
             }
         }
-        let value = parse_value(vt, forced, &key)?;
+        let value = pending.value(forced, &key)?;
         // A key holding null has no type yet: it may take any value.
         if actual != Type::Null && value.ty() != actual {
             return Err(format!(
@@ -1562,7 +1738,7 @@ impl Session {
             let filter = match q.expr.as_ref() {
                 Some(Expr::Test(t)) => {
                     let cond = &t.cond;
-                    format!("{}.{} {} {}", cond.pattern, cond.field, cond.op.symbol(), cond.value)
+                    format!("{} {} {}", cond.target(), cond.op.symbol(), time::show_value(&cond.value))
                 }
                 _ => q.describe(),
             };
@@ -1679,7 +1855,10 @@ impl Session {
             Incr(serde_json::Number),
         }
         let change = match sub.as_str() {
-            "set" => Change::Set(parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json()),
+            "set" => Change::Set(match time_expr(&mut c) {
+                Some(v) => v?.to_json(),
+                None => parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json(),
+            }),
             "delete" | "del" => Change::Delete,
             "append" => {
                 let mut values = Vec::new();
@@ -1921,14 +2100,29 @@ impl Session {
             out.say(format!(" > Replication          : replica of {} ({})", l.master, l.status));
             out.say(format!(
                 " > Last Sync            : {}",
-                l.last_sync.map(fmt_time).unwrap_or_else(|| "never".into())
+                l.last_sync.map(time::show_secs).unwrap_or_else(|| "never".into())
             ));
+            if let Some(drift) = l.clock_drift_ms {
+                let warn = if drift.abs() > crate::repl::MAX_CLOCK_DRIFT_MS {
+                    "  [WARN: synchronize the clocks (NTP)]"
+                } else {
+                    ""
+                };
+                out.say(format!(" > Clock                : {} the master{warn}", crate::util::drift_text(drift)));
+            }
         } else {
             let reps = repl.replicas();
             let seq = repl.seq();
             let lag = reps.iter().map(|r| seq.saturating_sub(r.acked)).max().unwrap_or(0);
             out.say(format!(" > Replication          : master, {} replica(s), max lag {lag} ops", reps.len()));
         }
+        let now = time::now();
+        out.say(format!(
+            " > Clock (UTC)          : {} ({} in {})",
+            time::iso(now),
+            time::show(now),
+            time::zone().name()
+        ));
         out.say(format!(" > Database Path        : {}", s.path));
         out.say(format!("{}\n", "=".repeat(58)));
         Ok(())
@@ -1950,7 +2144,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         // Compacting only rewrites the workspace's file: allowed to the project's managers.
         "compact" => Need::Owner,
         // Changing one's own password needs no workspace; the rest is checked inside.
-        "whoami" | "modify" => Need::Login,
+        "whoami" | "modify" | "timezone" => Need::Login,
         "project" if sub("create") || sub("remove") => Need::Admin,
         "project" => Need::Login,
         // Creating is checked against the project: its managers may.

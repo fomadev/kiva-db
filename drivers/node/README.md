@@ -12,6 +12,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
+| 1.2.0 | KivaDB 2.0.0 | `date`, `datetime` (a `Date`) and `time`: 2.0.0 or later |
 | 1.1.0 | KivaDB 1.7.0 | `add`, and `in` / `like` / `ilike` in `query`: 1.7.0 or later |
 | 1.0.0 | KivaDB 1.6.0 | `semanticCached`: 1.6.0 or later |
 
@@ -57,8 +58,8 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | Method | Does |
 | :--- | :--- |
 | `connect({host, port, user, password, timeout, tls})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }` |
-| `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer` |
-| `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`). `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
+| `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer`, a `datetime` as a `Date`, a `date` (`"2026-10-27"`) and a `time` (`"14:30:00"`) as text |
+| `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`, `Date` for a `datetime`). For a `date` or a `time`, give the text and the type: `set("born", "2004-05-09", { type: "date" })`. `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
 | `add(prefix, value, {ttl, type})` | Stores the value under a key KivaDB names: `add("place:", {name: "Goma"})` resolves to `{key: "place:6adf9c3c...", id: "6adf9c3c..."}`. The identifier has MongoDB's ObjectId format and sorts by creation time |
 | `query(pattern, where, {limit})` | The documents that satisfy a condition, in key order: `query("place:*", {type: "VILLE", parent: null})`, `query("place:*", {field: "name", cmp: "ilike", value: "kin%"})`, `query("place:*", {parent: ["place:1", "place:2"]})` (a list means `in`), `{and: [...]}`, `{or: [...]}`, `{not: {...}}`. Resolves to `{key, value}`; `limit` defaults to 100 |
 | `del(key)` | Resolves to whether the key existed |

@@ -318,6 +318,11 @@ impl Instance {
         self.config.write().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// The server's time zone (`time.zone`); the machine's when it is not valid.
+    pub fn zone(&self) -> crate::time::Zone {
+        crate::time::Zone::parse(&self.cfg().get("time", "zone")).unwrap_or(crate::time::Zone::Local)
+    }
+
     pub fn auth_required(&self) -> bool {
         !self.opts.skip_auth && self.cfg().get_bool("security", "auth_required")
     }

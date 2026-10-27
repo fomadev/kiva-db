@@ -76,6 +76,8 @@ pub struct User {
     pub grants: BTreeMap<String, Priv>,
     /// The workspace a session enters at login, when the user can reach it.
     pub default_workspace: Option<String>,
+    /// The time zone dates are shown and read in for this user (`Africa/Kinshasa`).
+    pub timezone: Option<String>,
     pub created: i64,
     salt: Vec<u8>,
     hash: Vec<u8>,
@@ -107,6 +109,7 @@ impl User {
             role,
             grants: BTreeMap::new(),
             default_workspace: None,
+            timezone: None,
             created: now_secs(),
             salt,
             hash,
@@ -186,6 +189,7 @@ impl User {
             "role": self.role.name(),
             "grants": grants,
             "default_workspace": self.default_workspace,
+            "timezone": self.timezone,
             "created": self.created,
             "model": MODEL,
         })
@@ -208,6 +212,7 @@ impl User {
             role: Role::from_name(j["role"].as_str()?)?,
             grants,
             default_workspace: j["default_workspace"].as_str().map(str::to_string),
+            timezone: j["timezone"].as_str().map(str::to_string),
             created: j["created"].as_i64().unwrap_or(0),
             salt: hex_decode(j["salt"].as_str()?)?,
             hash: hex_decode(j["hash"].as_str()?)?,

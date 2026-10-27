@@ -499,7 +499,7 @@ fn secondary_indexes_follow_every_change() {
         e.put(&format!("user:{i:03}"), &Value::Doc(doc), 0, i % 2 == 0).unwrap();
     }
     e.put("user:str", &s("not a document"), 0, false).unwrap();
-    let cond = |field: &str, op, value| Cond { pattern: "user:*".into(), field: field.into(), op, value };
+    let cond = |field: &str, op, value| Cond { pattern: "user:*".into(), field: field.into(), op, value, func: None };
     let admins = cond("role", CmpOp::Eq, json!("admin"));
 
     let (rows, plan) = e.query(&admins, 0).unwrap();

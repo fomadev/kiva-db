@@ -72,6 +72,7 @@ fn to_json(v: Value) -> Json {
         Value::Bool(b) => Json::Bool(b),
         Value::Null => Json::Null,
         Value::Bytes(b) => Json::String(String::from_utf8_lossy(&b).into_owned()),
+        other => other.to_json(),
     }
 }
 

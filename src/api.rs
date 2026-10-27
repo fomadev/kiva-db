@@ -59,7 +59,7 @@ fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
     let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
     let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
         .ok_or_else(|| invalid(format!("cmp must be one of {}", crate::engine::CmpOp::LIST)))?;
-    let cond = crate::engine::Cond { pattern, field, op: cmp, value: req["value"].clone() };
+    let cond = crate::engine::Cond::new(pattern, field, cmp, req["value"].clone());
     Query::single(cond).map_err(KivaError::Invalid)
 }
 
@@ -70,7 +70,7 @@ fn vector_filter(j: &Json, pattern: &str) -> Result<Vec<crate::engine::Cond>> {
         let op = crate::engine::CmpOp::parse(cmp)
             .ok_or_else(|| invalid(format!("cmp must be one of {}", crate::engine::CmpOp::LIST)))?;
         crate::query::check_value(op, value).map_err(KivaError::Invalid)?;
-        Ok(crate::engine::Cond { pattern: pattern.to_string(), field: field.to_string(), op, value: value.clone() })
+        Ok(crate::engine::Cond::new(pattern, field, op, value.clone()))
     };
     match j {
         Json::Null => Ok(Vec::new()),
@@ -120,6 +120,16 @@ fn value_in(ty: Type, j: &Json) -> Result<Value> {
         Type::Object if j.is_object() => Value::Doc(j.clone()),
         Type::Array | Type::Object => return Err(mismatch()),
         Type::Bytes => Value::Bytes(j.as_str().and_then(b64_decode).ok_or_else(mismatch)?),
+        // Text, read in the zone of the session when it has no offset; a datetime may also be
+        // milliseconds since 1970.
+        Type::DateTime => Value::DateTime(match j {
+            Json::Number(n) => n.as_i64().and_then(chrono::DateTime::from_timestamp_millis).ok_or_else(mismatch)?,
+            _ => {
+                crate::time::parse_datetime(j.as_str().ok_or_else(mismatch)?, &crate::time::zone()).map_err(invalid)?
+            }
+        }),
+        Type::Date => Value::Date(crate::time::parse_date(j.as_str().ok_or_else(mismatch)?).map_err(invalid)?),
+        Type::Time => Value::Time(crate::time::parse_time(j.as_str().ok_or_else(mismatch)?).map_err(invalid)?),
     })
 }
 
@@ -133,6 +143,7 @@ fn ttl_of(expires_at: i64) -> Json {
 
 /// Runs one structured request.
 pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
+    sess.use_zone();
     let op = str_field(req, "op")?;
     match op {
         "whoami" => {

@@ -9,11 +9,13 @@
 //! expr    := term (('+' | '-') term)*
 //! term    := unary (('*' | '/' | '%') unary)*
 //! unary   := '-' unary | primary
-//! primary := NUMBER | STRING | '(' expr ')' | KEY | `KEY`
+//! primary := NUMBER | STRING | '(' expr ')' | KEY | `KEY` | CALL
+//! call    := ('now' | 'today') '(' ')' | ('year' | 'month' | ... ) '(' expr ')'
 //! ```
 //! Strings support `${expr}` interpolation. `+` adds numbers or concatenates
 //! strings; mixing the two is a type error.
 
+use crate::time::{self, TimeFn};
 use crate::value::{fmt_f64, is_valid_number, Value};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +74,10 @@ pub fn eval_list<'a>(src: &'a [char], resolve: &mut Resolver<'a>) -> Result<Vec<
         }
     }
     Ok(out)
+}
+
+fn is_call(word: &str) -> bool {
+    matches!(word.to_ascii_lowercase().as_str(), "now" | "today") || TimeFn::parse(word).is_some()
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -185,11 +191,41 @@ impl<'a, 'r> Parser<'a, 'r> {
                 let word: String = self.src[start..self.pos].iter().collect();
                 if is_valid_number(&word) {
                     Ok(EVal::Num(word.parse::<f64>().map_err(|_| "SyntaxError: bad number".to_string())?))
+                } else if self.peek() == Some('(') && is_call(&word) {
+                    self.call(&word)
                 } else {
                     self.lookup(&word)
                 }
             }
             other => Err(format!("SyntaxError: unexpected character '{other}'")),
+        }
+    }
+
+    /// `now()`, `today()`, and `year(...)` to `weekday(...)` of a date, time or datetime.
+    fn call(&mut self, name: &str) -> Result<EVal, String> {
+        self.pos += 1;
+        let lower = name.to_ascii_lowercase();
+        let arg = if matches!(lower.as_str(), "now" | "today") { None } else { Some(self.expr()?) };
+        if self.peek() != Some(')') {
+            return Err(format!(
+                "SyntaxError: {lower}() takes {}",
+                if arg.is_some() { "one value" } else { "nothing" }
+            ));
+        }
+        self.pos += 1;
+        match (lower.as_str(), arg) {
+            ("now", _) => Ok(EVal::Str(time::show(time::now()))),
+            ("today", _) => Ok(EVal::Str(time::date_text(time::today()))),
+            (f, Some(v)) => {
+                let func = TimeFn::parse(f).expect("a time function");
+                let part = match &v {
+                    EVal::Str(s) => func.of(&serde_json::Value::String(s.clone())),
+                    EVal::Num(_) => None,
+                };
+                part.map(|n| EVal::Num(n as f64))
+                    .ok_or_else(|| format!("TypeError: {f}() takes a date, a time or a datetime, not '{}'", v.render()))
+            }
+            _ => unreachable!("the functions without a value are above"),
         }
     }
 

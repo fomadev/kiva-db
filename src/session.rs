@@ -77,6 +77,9 @@ pub struct Session {
     pub wrote: bool,
     /// Keys watched by Redis `WATCH`, with the engine they belong to.
     pub watch: Option<(Arc<Engine>, Vec<crate::engine::WatchedKey>)>,
+    /// The time zone of this session (`timezone ...`), or of its user;
+    /// `None`: the server's (`time.zone`).
+    pub tz: Option<crate::time::Zone>,
 }
 
 impl Session {
@@ -95,6 +98,7 @@ impl Session {
             subs: Vec::new(),
             wrote: false,
             watch: None,
+            tz: None,
         };
         if !s.inst.auth_required() {
             s.become_root();
@@ -112,6 +116,17 @@ impl Session {
     fn become_root(&mut self) {
         self.user = Some(UserCtx { name: auth::DEFAULT_ADMIN.into(), role: Role::Admin });
         self.ws_priv = Some(Priv::Write);
+    }
+
+    /// The zone dates are shown and read in: the session's, else the server's.
+    pub fn zone(&self) -> crate::time::Zone {
+        self.tz.clone().unwrap_or_else(|| self.inst.zone())
+    }
+
+    /// Makes this session's zone the one of the running thread; every front
+    /// end calls it before a command.
+    pub fn use_zone(&self) {
+        crate::time::set_session_zone(Some(self.zone()));
     }
 
     pub fn user_name(&self) -> &str {
@@ -159,6 +174,8 @@ impl Session {
             self.rollback();
         }
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
+        self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
+        self.use_zone();
         match user.arrival(&self.inst.workspace_names()) {
             Some(w) => {
                 let level = user.access(&w).unwrap_or(Priv::Read);

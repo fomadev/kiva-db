@@ -174,11 +174,14 @@ class KivaClient extends EventEmitter {
     await this._call(CMD.PING);
   }
 
-  /** The value of a key, or undefined. Bytes come back as a Buffer. */
+  /**
+   * The value of a key, or undefined. Bytes come back as a Buffer, a datetime
+   * as a Date; a date ("2026-10-27") and a time ("14:30:00") as text.
+   */
   async get(key) {
     const r = await this.api({ op: "get", key });
     if (!r.found) return undefined;
-    return r.type === "bytes" ? Buffer.from(r.value, "base64") : r.value;
+    return fromWire(r.type, r.value);
   }
 
   /**
@@ -187,7 +190,7 @@ class KivaClient extends EventEmitter {
    */
   async set(key, value, options = {}) {
     const type = options.type || typeOf(value);
-    const req = { op: "put", key, type, value: type === "bytes" ? Buffer.from(value).toString("base64") : value };
+    const req = { op: "put", key, type, value: toWire(type, value) };
     if (options.mode) req.mode = options.mode;
     if (options.ttl !== undefined) req.ttl = options.ttl;
     await this.api(req);
@@ -203,7 +206,7 @@ class KivaClient extends EventEmitter {
    */
   async add(prefix, value, options = {}) {
     const type = options.type || typeOf(value);
-    const req = { op: "add", prefix, type, value: type === "bytes" ? Buffer.from(value).toString("base64") : value };
+    const req = { op: "add", prefix, type, value: toWire(type, value) };
     if (options.ttl) req.ttl = options.ttl;
     const r = await this.api(req);
     return { key: r.key, id: r.id };
@@ -302,9 +305,23 @@ class KivaClient extends EventEmitter {
   }
 }
 
+// A value as the structured requests carry it: bytes in base64, a datetime in ISO 8601.
+function toWire(type, value) {
+  if (type === "bytes") return Buffer.from(value).toString("base64");
+  if (type === "datetime" && value instanceof Date) return value.toISOString();
+  return value;
+}
+
+function fromWire(type, value) {
+  if (type === "bytes") return Buffer.from(value, "base64");
+  if (type === "datetime") return new Date(value);
+  return value;
+}
+
 function typeOf(value) {
   if (value === null || value === undefined) return "null";
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return "bytes";
+  if (value instanceof Date) return "datetime";
   if (Array.isArray(value)) return "array";
   switch (typeof value) {
     case "string":

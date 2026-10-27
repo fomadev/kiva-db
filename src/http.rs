@@ -299,6 +299,7 @@ fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
 }
 
 fn route(sess: &mut Session, req: &Request) -> Result<Response> {
+    sess.use_zone();
     let method = req.method.as_str();
     let path = req.path.trim_end_matches('/');
     let q = |name: &str| req.query.get(name).map(|s| s.as_str());

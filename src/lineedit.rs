@@ -64,6 +64,7 @@ const COMMANDS: &[&str] = &[
     "compress",
     "workspace",
     "project",
+    "timezone",
     "config",
     "create",
     "drop",
