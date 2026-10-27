@@ -59,13 +59,14 @@ Every push and pull request runs `.github/workflows/build.yml` on Windows, Linux
 
 ### Releasing (maintainers)
 1. Update the version in `Cargo.toml`, the Docker tag in `docker-compose.yml` and the documentation. The Node.js driver (`drivers/node/package.json`) has a version of its own, raised only when the driver changes, following semver.
-2. Commit, push, and wait for the three systems to be green.
-3. Tag the version and push the tag:
+2. Write the version in `CHANGELOG.md`: a heading `## 1.7.1 - 2026-10-27` (the `Unreleased` section renamed), one sentence on what the version is about, then `### Upgrading` (what to know before installing it), `### Added`, `### Changed` and `### Fixed`, for readers who were not there: what each change does and why it matters, with a link to the documentation. This section becomes the text of the GitHub release.
+3. Commit, push, and wait for the three systems to be green.
+4. Tag the version and push the tag:
    ```bash
    git tag v1.7.1
    git push origin v1.7.1
    ```
-The workflow then publishes a GitHub release with the Windows, Linux and macOS executables and their SHA-256 checksums, and pushes the Docker image `fomadev0/kiva-db:<version>` and `:latest`. Docker Hub access comes from the repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token, never a password).
+The workflow then publishes a GitHub release with the Windows, Linux and macOS executables and their SHA-256 checksums. Its text comes from `.github/release-notes.mjs`: the section of the changelog, the pull requests merged since the previous tag, the contributors (bots left out) and how to install the version. A tag without its section in `CHANGELOG.md` publishes neither the release nor the Docker image: add the section, then delete and push the tag again (`git push origin :v1.7.1`). To see the text before tagging: `node .github/release-notes.mjs v1.7.1` (needs the GitHub CLI). The workflow also pushes the Docker image `fomadev0/kiva-db:<version>` and `:latest`. Docker Hub access comes from the repository secrets `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token, never a password).
 
 The same tag also publishes the Node.js driver on npm as `@fomadev/kivadb` (`.github/workflows/node-driver.yml`), after its tests pass on the three systems, with a provenance statement linking the package to the commit. A tag whose driver version is already on npm publishes nothing for the driver: raise `version` in `drivers/node/package.json` to publish a new one. npm access comes from the repository secret `NPM_TOKEN`, a granular access token with read and write access to the packages of the `fomadev` organization.
 
