@@ -278,7 +278,9 @@ fn queries_refuse_joins_and_sorting_pipelines_with_an_explanation() {
         ("get where user:*.name = order:*.user", "names a field of other documents"),
         (r#"get where user:*, order:*.role = "dev""#, "joins are not supported"),
         (r#"get where user:*.role = "dev" group by role"#, "sorting pipelines"),
-        (r#"get where user:*.role = "dev" limit 5 order by age"#, "sorting pipelines"),
+        (r#"get where user:*.role = "dev" limit 5 offset 2"#, "sorting pipelines"),
+        (r#"get where user:*.role = "dev" order age"#, "expected 'by'"),
+        (r#"get where user:*.role = "dev" order by age reverse"#, "rather than 'reverse'"),
         (r#"count where user:*.role = "dev" group by role order by role"#, "sorting pipelines"),
         (r#"get where user:*.age between 20 and 30"#, "comparison operators"),
         (r#"get where user:*.role in "dev""#, "takes a list of values"),
@@ -300,6 +302,10 @@ fn queries_refuse_joins_and_sorting_pipelines_with_an_explanation() {
         "user:1: {\"name\":\"Alice\"}\n(1 matches)"
     );
     assert!(ok(&mut s, r#"explain get where user:*.age > 20 limit 5"#).contains("PREFIX SCAN"));
+    assert_eq!(
+        ok(&mut s, r#"get where user:*.role = "dev" limit 5 order by age"#),
+        "user:1: {\"name\":\"Alice\",\"role\":\"dev\",\"age\":30}\n(1 matches)"
+    );
 
     let q = |extra: serde_json::Value| {
         let mut r = serde_json::json!({"op": "query", "target": "user:*.role", "cmp": "=", "value": "dev"});
@@ -311,7 +317,8 @@ fn queries_refuse_joins_and_sorting_pipelines_with_an_explanation() {
     assert!(kivadb::api::handle(&mut s, &q(serde_json::json!({}))).is_ok());
     for (extra, why) in [
         (serde_json::json!({"join": "order:*"}), "joins"),
-        (serde_json::json!({"order_by": "age"}), "sorting pipelines"),
+        (serde_json::json!({"order_by": "age sideways"}), "neither asc nor desc"),
+        (serde_json::json!({"offset": 2}), "sorting pipelines"),
         (serde_json::json!({"and": [{"target": "user:*.age"}]}), "\"where\""),
         (serde_json::json!({"where": {"age": 1}}), "not both"),
         (serde_json::json!({"value": ["dev", "admin"]}), "not with an array"),

@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "kivadb"
 path = "src/main.rs"
 
+[[bench]]
+name = "queries"
+harness = false
+
 [dependencies]
 crc32fast = "1"
 lz4_flex = "0.11"

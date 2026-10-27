@@ -5,7 +5,7 @@
 //! The command interpreter: turns one line of shell syntax into operations
 //! on a `Session` and collects the text to show.
 
-use crate::engine::{BatchOp, CmpOp, Cond};
+use crate::engine::{BatchOp, CmpOp, Cond, Measured, Order, Plan, ReadOpts};
 use crate::error::KivaError;
 use crate::expr;
 use crate::format::FLAG_COMP_MASK;
@@ -459,7 +459,7 @@ fn parse_tail(c: &mut Cur) -> Result<Tail, String> {
             while let Some(t) = c.peek() {
                 if t.kind == Kind::Comma {
                     c.next();
-                } else if t.is_kw("limit") || t.is_kw("reverse") {
+                } else if ["limit", "reverse", "order", "after"].iter().any(|k| t.is_kw(k)) {
                     break;
                 } else {
                     fields.push(word(c.next(), "a field name")?);
@@ -474,6 +474,115 @@ fn parse_tail(c: &mut Cur) -> Result<Tail, String> {
         }
     }
     Ok(tail)
+}
+
+/// The end of `get where`: what [`parse_tail`] reads, `order by <field>
+/// [asc|desc]` and `after <key>`, in any order.
+struct QueryTail {
+    tail: Tail,
+    order: Option<(String, bool)>,
+    after: Option<String>,
+}
+
+fn parse_query_tail(c: &mut Cur) -> Result<QueryTail, String> {
+    let mut qt = QueryTail { tail: Tail::default(), order: None, after: None };
+    loop {
+        if c.eat("order") {
+            if !c.eat("by") {
+                return Err("expected 'by' after 'order': order by <field> [asc|desc]".into());
+            }
+            let field = word(c.next(), "the field to order by")?;
+            let desc = c.eat("desc");
+            if !desc {
+                c.eat("asc");
+            }
+            if qt.order.replace((field, desc)).is_some() {
+                return Err("one 'order by' per query: rows of the same value come in key order".into());
+            }
+        } else if c.eat("after") {
+            qt.after = Some(word(c.next(), "the key to go on after")?);
+        } else {
+            let before = c.i;
+            let t = parse_tail(c)?;
+            if c.i == before {
+                break;
+            }
+            if t.limit > 0 {
+                qt.tail.limit = t.limit;
+            }
+            qt.tail.reverse |= t.reverse;
+            if t.fields.is_some() {
+                qt.tail.fields = t.fields;
+            }
+        }
+    }
+    Ok(qt)
+}
+
+/// How `get where` hands out its rows. The field of `order by` may repeat
+/// the pattern: `order by user:*.age`.
+fn read_opts(q: &Query, qt: &QueryTail) -> Result<ReadOpts, String> {
+    let order = match &qt.order {
+        Some((field, desc)) => {
+            let field = field.strip_prefix(q.pattern.as_str()).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
+            Some(Order::new(field, *desc)?)
+        }
+        None => None,
+    };
+    if order.is_some() && qt.tail.reverse {
+        return Err("with 'order by', write 'desc' rather than 'reverse'".into());
+    }
+    Ok(ReadOpts { limit: qt.tail.limit, order, after: qt.after.clone(), reverse: qt.tail.reverse })
+}
+
+fn ms(d: std::time::Duration) -> String {
+    format!("{:.3} ms", d.as_secs_f64() * 1000.0)
+}
+
+/// The lines of a plan shared by `explain` and `explain analyze`.
+fn plan_lines(plan: &Plan, opts: &ReadOpts, out: &mut Out) {
+    out.say(format!("  Strategy  : {}", plan.strategy));
+    out.say(format!("  Index     : {}", plan.index.as_deref().unwrap_or("none")));
+    if let Some(o) = &plan.order {
+        out.say(format!("  Order     : {o}"));
+    } else if opts.reverse {
+        out.say("  Order     : keys, last first");
+    }
+    if let Some(a) = &opts.after {
+        out.say(format!("  After     : {a}"));
+    }
+    if opts.limit > 0 {
+        out.say(format!("  Limit     : {}", opts.limit));
+    }
+    out.say(format!("  Estimated : {} of {} keys examined", plan.candidates, plan.total_keys));
+}
+
+/// What `explain analyze` counted.
+fn measured_lines(m: &Measured, groups: Option<usize>, out: &mut Out) {
+    out.say("Measured");
+    out.say(format!("  Index entries : {}", m.index_entries));
+    out.say(format!("  Keys examined : {}", m.keys_examined));
+    out.say(format!(
+        "  Documents     : {} read ({} from the value cache, {} from disk), {} filtered out",
+        m.docs_read,
+        m.from_cache,
+        m.docs_read - m.from_cache,
+        m.filtered_out
+    ));
+    if m.sorted > 0 {
+        out.say(format!("  Sorted        : {} rows in {}", m.sorted, ms(m.sort_time)));
+    }
+    match groups {
+        Some(g) => out.say(format!("  Groups        : {g} ({} documents folded)", m.returned)),
+        None => out.say(format!("  Returned      : {}", m.returned)),
+    }
+    out.say(format!(
+        "  Time          : {} (plan {}, read and filter {}, sort {})",
+        ms(m.total_time),
+        ms(m.plan_time),
+        ms(m.read_time),
+        ms(m.sort_time)
+    ));
 }
 
 fn aggregate_usage(func: Func) -> String {
@@ -626,8 +735,9 @@ fn parse_query(c: &mut Cur, pattern: Option<&str>) -> Result<Query, String> {
     match c.peek() {
         Some(t) if t.kind == Kind::Comma => return Err(query::Unsupported::Operator.message().into()),
         Some(t) if t.kind == Kind::RParen => return Err("')' without its '('".into()),
-        // `group by` is read by the aggregates, and refused by the others.
-        Some(t) if t.is_kw("group") => {}
+        // `group by` is read by the aggregates, `order by` by `get where`,
+        // each refused by the others.
+        Some(t) if t.is_kw("group") || t.is_kw("order") => {}
         t => refuse_unsupported(t)?,
     }
     let pattern = p.pattern.ok_or("expected a condition such as: user:*.role = \"admin\"")?;
@@ -1562,12 +1672,19 @@ impl Session {
     fn cmd_where(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
         let q = parse_query(&mut c, None)?;
-        let tail = parse_tail(&mut c)?;
+        let qt = parse_query_tail(&mut c)?;
         refuse_unsupported(c.peek())?;
-        c.finish("get where <condition> [limit N] [return f1, f2]")?;
-        let (rows, _) = self.engine.query_expr(&q, tail.limit)?;
+        c.finish(
+            "get where <condition> [order by <field> [asc|desc]] [limit N] [after <key>] [reverse] [return f1, f2]",
+        )?;
+        let opts = read_opts(&q, &qt)?;
+        let mut rows = Vec::new();
+        self.engine.find(&q, &opts, |key, doc| {
+            rows.push((key, doc));
+            Ok(())
+        })?;
         for (key, doc) in &rows {
-            match &tail.fields {
+            match &qt.tail.fields {
                 Some(f) => out.say(format!("{key}: {}", project(doc, f))),
                 None => out.say(format!("{key}: {doc}")),
             }
@@ -1585,7 +1702,7 @@ impl Session {
         c.finish(&aggregate_usage(func))?;
         let agg = Agg::new(verb, func, field.as_deref())?;
         let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
-        self.engine.scan_query(&q, limit, |_, doc| acc.add(&doc))?;
+        self.engine.find(&q, &ReadOpts { limit, ..ReadOpts::default() }, |_, doc| acc.add(&doc))?;
         let r = acc.finish();
         let name = {
             let mut n = verb[..1].to_uppercase() + &verb[1..];
@@ -1720,27 +1837,32 @@ impl Session {
     }
 
     fn cmd_explain(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: explain get where ... | explain count|sum|avg|min|max ... | explain range <A> to <B> | explain get <key>";
+        const USAGE: &str = "Usage: explain [analyze] get where ... | explain [analyze] count|sum|avg|min|max ... \
+                             | explain range <A> to <B> | explain get <key>";
         let mut c = Cur::new(a);
         if c.eat("distributed") {
             return Err(query::Unsupported::Distributed.message().into());
         }
+        let analyze = c.eat("analyze");
         let verb = c.next().ok_or(USAGE)?;
         let total = self.engine.len();
-        out.say("Query Plan");
         let agg = Func::parse(&verb.text).filter(|_| verb.is_bare());
         if (verb.is_kw("get") && c.eat("where")) || agg.is_some() {
-            let q = match agg {
-                Some(f) => parse_aggregate(&mut c, f)?.0,
+            let (q, opts, aggregate) = match agg {
+                Some(f) => {
+                    let (q, field, group_by, limit) = parse_aggregate(&mut c, f)?;
+                    let opts = ReadOpts { limit, ..ReadOpts::default() };
+                    (q, opts, Some((f, field, group_by)))
+                }
                 None => {
                     let q = parse_query(&mut c, None)?;
-                    parse_tail(&mut c)?;
+                    let qt = parse_query_tail(&mut c)?;
                     refuse_unsupported(c.peek())?;
-                    q
+                    let opts = read_opts(&q, &qt)?;
+                    (q, opts, None)
                 }
             };
             c.finish(USAGE)?;
-            let plan = self.engine.explain_query(&q);
             let filter = match q.expr.as_ref() {
                 Some(Expr::Test(t)) => {
                     let cond = &t.cond;
@@ -1748,16 +1870,36 @@ impl Session {
                 }
                 _ => q.describe(),
             };
+            // Run for real, the rows counted and dropped: only reads get here.
+            let measured = if analyze {
+                let (plan, m, groups) = match &aggregate {
+                    Some((f, field, group_by)) => {
+                        let agg = Agg::new(f.name(), *f, field.as_deref())?;
+                        let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
+                        let (plan, m) = self.engine.read_query(&q, &opts, |_, doc| acc.add(&doc))?;
+                        (plan, m, Some(acc.finish().groups.len()))
+                    }
+                    None => {
+                        let (plan, m) = self.engine.read_query(&q, &opts, |_, _| Ok(()))?;
+                        (plan, m, None)
+                    }
+                };
+                out.say("Query Plan (explain analyze: the query was run; its rows are not shown)");
+                Some((plan, m, groups))
+            } else {
+                out.say("Query Plan");
+                None
+            };
+            let plan = match &measured {
+                Some((plan, ..)) => plan.clone(),
+                None => self.engine.explain_read(&q, &opts),
+            };
             out.say(format!("  Filter    : {filter}"));
-            out.say(format!("  Strategy  : {}", plan.strategy));
-            match &plan.index {
-                Some(ix) => out.say(format!("  Index     : {ix}")),
-                None => out.say("  Index     : none"),
-            }
-            out.say(format!("  Estimated : {} of {} keys examined", plan.candidates, plan.total_keys));
+            plan_lines(&plan, &opts, out);
+            // The comparisons an index would serve, and that have none; the
+            // field of a limited sort, read in order with a B-tree on it.
+            let mut tips: Vec<String> = Vec::new();
             if plan.index.is_none() {
-                // The comparisons an index would serve, and that have none.
-                let mut tips: Vec<String> = Vec::new();
                 for cond in q.expr.iter().flat_map(|e| e.positive_conditions()) {
                     let tip = format!("create index on {} ({})", cond.pattern, cond.field);
                     if crate::engine::Engine::indexable(cond)
@@ -1767,11 +1909,33 @@ impl Session {
                         tips.push(tip);
                     }
                 }
-                for tip in tips {
-                    out.say(format!("  Tip       : {tip}"));
+            }
+            if let Some(o) = opts.order.as_ref().filter(|_| opts.limit > 0 && plan.strategy != "INDEX ORDER SCAN") {
+                if !self.engine.list_indexes().iter().any(|i| {
+                    i.kind == crate::engine::IndexKind::BTree
+                        && !i.ignore_case
+                        && i.field == o.field
+                        && i.pattern == q.pattern
+                }) {
+                    // One index may serve the filter and the order.
+                    let tip = format!("create index on {} ({})", q.pattern, o.field);
+                    tips.retain(|t| *t != tip);
+                    tips.push(format!("{tip} to read in its order and stop"));
                 }
             }
+            for tip in tips {
+                out.say(format!("  Tip       : {tip}"));
+            }
+            if let Some((_, m, groups)) = &measured {
+                measured_lines(m, *groups, out);
+            }
         } else if verb.is_kw("range") || (verb.is_kw("get") && c.eat("range")) {
+            out.say("Query Plan");
+            if analyze {
+                return Err("explain analyze runs get where and the aggregates: a range reads exactly the keys \
+                            explain counts"
+                    .into());
+            }
             let from = word(c.next(), "a lower bound")?;
             if !c.eat("to") {
                 return Err(USAGE.into());
@@ -1782,12 +1946,25 @@ impl Session {
             out.say("  Index     : primary (in-memory B-tree, keys sorted)");
             out.say(format!("  Estimated : {n} of {total} keys examined"));
         } else if verb.is_kw("get") {
+            if analyze {
+                return Err("explain analyze runs get where and the aggregates: a get reads one key".into());
+            }
+            out.say("Query Plan");
             let key = word(c.next(), "a key")?;
             out.say("  Strategy  : POINT LOOKUP");
             out.say("  Index     : primary (in-memory B-tree)");
             out.say(format!(
                 "  Estimated : 1 of {total} keys examined, {} disk read",
                 if self.engine.contains(&key) { 1 } else { 0 }
+            ));
+        } else if ["set", "add", "update", "del", "change", "bump", "json", "convert", "eval", "script"]
+            .iter()
+            .any(|w| verb.is_kw(w))
+        {
+            return Err(format!(
+                "explain{} never runs a write ('{}'): it explains the reads get where, count, sum, avg, min and max",
+                if analyze { " analyze" } else { "" },
+                verb.text
             ));
         } else {
             return Err(USAGE.into());
