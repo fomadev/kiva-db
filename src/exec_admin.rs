@@ -1109,7 +1109,9 @@ impl Session {
             }
             let name = word(c.next(), "a script name")?;
             c.finish(USAGE)?;
-            let source = std::fs::read_to_string(&file).map_err(|e| format!("cannot read '{file}': {e}"))?;
+            let bytes = std::fs::read(&file).map_err(|e| format!("cannot read '{file}': {e}"))?;
+            // Saved by a Windows editor or PowerShell: UTF-8 with a byte order mark, or UTF-16.
+            let source = crate::kva::decode(&bytes).map_err(|e| format!("cannot read '{file}': {e}"))?;
             script::store(self, &name, &source)?;
             out.say(format!("Script '{name}' stored ({} bytes).", source.len()));
             Ok(())
