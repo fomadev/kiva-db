@@ -4114,6 +4114,8 @@ A MongoDB collection becomes a key pattern: each document is stored under `<coll
 | Sessions and transactions | `begin` ... `commit` ([13](#chapter-13--transactions)) |
 | `sort`, `skip`, `$lookup` | Not part of the language: keys come back in key order, and related data is read by name ([11.6](#116-what-a-query-does-not-do)) |
 
+**A missing field in a unique index.** MongoDB counts a field a document lacks as `null`: two top-level places without `parentId`, of the same type and name, conflict. KivaDB does not constrain a document that lacks one of the fields of a unique index ([11.7](#117-unique-indexes)), so those two would both be written. Write the field as `null` instead of leaving it out, in the application and in the import: `{"type": "PROVINCE", "parentId": null, "name": "Nord-Kivu"}` is checked, `{"type": "PROVINCE", "name": "Nord-Kivu"}` is not. In the import script below, add `doc.parentId ??= null;` before `console.log` for each field of a unique index that documents may lack.
+
 **Copying a collection.** Export it as one JSON document per line, then write each one under its `_id` in a `.kva` file and run it with `kivadb run` ([3.10](#310-command-files-kva)):
 
 ```bash
