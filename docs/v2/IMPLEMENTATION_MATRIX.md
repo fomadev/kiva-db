@@ -40,8 +40,8 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 
 | # | Action | Item | Status | Proof | Left |
 | :- | :- | :- | :- | :- | :- |
-| 21 | add | optional schemas | planned | | validation on every write path (shell, REST, binary protocol, Redis, scripts), off by default |
-| 22 | add | constraints and default values | planned | | with 21: `required`, type, `min`/`max`, `enum`, default |
+| 21 | add | optional schemas | done | `src/schema.rs`, checked in the engine on every write path, `tests/schemas.rs`, [11.8](../../DOCUMENTATION.md#118-schemas-rules-for-the-documents-of-a-pattern) | |
+| 22 | add | constraints and default values | done | `required`, `nullable`, `unique` (unique index), `min`/`max`, `minLength`/`maxLength`, `pattern`, `enum`, arrays and nested objects; defaults, `now()`, `today()`, `current_time` | |
 | 23 | add | composite indexes | partial | unique indexes on several fields ([11.7](../../DOCUMENTATION.md#117-unique-indexes)) | non-unique composite indexes |
 | 24 | add | durable change feed (CDC) | planned | notifications exist but are lost when nobody listens ([chapter 22](../../DOCUMENTATION.md#chapter-22--change-notifications)) | a journal with a cursor to resume from, retention, at-least-once delivery |
 | 25 | add | value history | not planned | [ROADMAP.md](../../ROADMAP.md): needs a retention policy and disk budgeting | |

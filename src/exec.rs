@@ -871,6 +871,9 @@ const HELP: &str = r#"
   create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
                                     Also <pat>.<field>; drop index, indexes.
   create unique index on <pat> (<f1>[, <f2>...]) [ignore case] : Refuse two documents with the same values.
+  schema set <pat> {"<field>": {"type": "string", "required": true, "default": ...}}
+                                    : Rules and defaults for the documents of a pattern.
+                                    Also schemas, schema show|check|drop <pat>.
   get similar <pat>.<field> to [..] [where f = v [and ...]] [limit N] [metric cosine|dot|l2] [return f1, f2]
                                     : Vector similarity search (AI embeddings).
   create vector index on <pat> (<field>) [using hnsw] : Vector index (exact, or HNSW). Also: drop vector index.
@@ -2153,6 +2156,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
         | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
+        "schema" if sub("set") || sub("drop") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         _ => Need::Read,
     }
