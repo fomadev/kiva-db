@@ -24,6 +24,7 @@ USAGE:
   kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb keygen               Print a new encryption key (for KIVADB_ENCRYPTION_KEY)
+  kivadb doctor [--json]      Look for what could stop KivaDB or lose data (reads only)
   kivadb backup -o <f.tar.gz> Save the home (or -w <workspace>) to an archive, even while running
   kivadb restore <f.tar.gz>   Restore an archive (--target <dir>, --as <name>, --check: only verify)
   kivadb [OPTIONS]            Open the interactive shell
@@ -63,6 +64,7 @@ struct Args {
     connect: Option<String>,
     no_listen: bool,
     check_only: bool,
+    json: bool,
     renew: bool,
     run_file: Option<PathBuf>,
     /// `backup -o`, `restore <archive>`, `--target`, `--as`.
@@ -103,6 +105,8 @@ fn parse_args() -> Args {
             "update" => args.action = Some("update"),
             "tls" => args.action = Some("tls"),
             "keygen" => args.action = Some("keygen"),
+            "doctor" => args.action = Some("doctor"),
+            "--json" => args.json = true,
             "backup" => args.action = Some("backup"),
             "restore" => {
                 args.action = Some("restore");
@@ -630,6 +634,16 @@ fn main() {
     }
     if args.action == Some("backup") {
         exit(backup(&home, &args));
+    }
+    if args.action == Some("doctor") {
+        let running = running_port(&home).map(|p| (p, running_pid(&home)));
+        let report = kivadb::doctor::examine(&home, running);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&report.json()).unwrap_or_default());
+        } else {
+            print!("{}", report.text());
+        }
+        exit(report.exit_code());
     }
     if args.action == Some("keygen") {
         println!("{}", kivadb::crypt::generate_key());

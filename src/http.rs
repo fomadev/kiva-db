@@ -221,6 +221,7 @@ fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAdd
     // Pages that need no credentials.
     let open = match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/health") => Some(Response::ok(json!({ "version": VERSION }))),
+        ("GET", "/ready") => Some(readiness(inst)),
         ("GET", "/docs") => Some(Response::text("text/html; charset=utf-8", DOCS_HTML.to_string())),
         ("GET", "/openapi.json") => Some(Response::json(200, openapi())),
         _ => None,
@@ -423,6 +424,24 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
 }
 
 /// Prometheus text exposition.
+/// Whether this node should receive traffic: not stopping, and, for a
+/// replica, connected to its master (a replica still receiving its snapshot
+/// would serve old data).
+fn readiness(inst: &Instance) -> Response {
+    let not_ready = |why: String| Response::json(503, json!({ "ready": false, "reason": why }));
+    if inst.stop_requested.load(Ordering::SeqCst) || inst.shutting_down.load(Ordering::SeqCst) {
+        return not_ready("stopping".into());
+    }
+    if inst.repl.is_replica() {
+        let link = inst.repl.link();
+        if link.status != "connected" {
+            return not_ready(format!("replica of {}: {}", link.master, link.status));
+        }
+        return Response::ok(json!({ "ready": true, "role": "replica" }));
+    }
+    Response::ok(json!({ "ready": true, "role": "master" }))
+}
+
 fn metrics(sess: &Session) -> String {
     let inst = &sess.inst;
     let m = &inst.metrics;
@@ -432,7 +451,6 @@ fn metrics(sess: &Session) -> String {
     let reps = repl.replicas();
     let lag = reps.iter().map(|r| seq.saturating_sub(r.acked)).max().unwrap_or(0);
     let load = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
-    let total = load(&m.gets) + load(&m.sets) + load(&m.dels) + load(&m.others);
     let mut o = String::new();
     let mut metric = |name: &str, kind: &str, help: &str, lines: &[String]| {
         o.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n"));
@@ -452,15 +470,18 @@ fn metrics(sess: &Session) -> String {
             format!("kiva_requests_total{{type=\"other\"}} {}", load(&m.others)),
         ],
     );
-    metric(
-        "kiva_request_duration_seconds",
-        "summary",
-        "Time spent executing commands.",
-        &[
-            format!("kiva_request_duration_seconds_sum {}", load(&m.micros) as f64 / 1e6),
-            format!("kiva_request_duration_seconds_count {total}"),
-        ],
-    );
+    // A histogram: quantiles (p50, p95, p99) come from histogram_quantile() in Prometheus.
+    let mut lines = Vec::new();
+    let mut below = 0;
+    for (i, bound) in crate::instance::LATENCY_BUCKETS_US.iter().enumerate() {
+        below += load(&m.latency[i]);
+        lines.push(format!("kiva_request_duration_seconds_bucket{{le=\"{}\"}} {below}", *bound as f64 / 1e6));
+    }
+    let timed = below + load(&m.latency[crate::instance::LATENCY_BUCKETS_US.len()]);
+    lines.push(format!("kiva_request_duration_seconds_bucket{{le=\"+Inf\"}} {timed}"));
+    lines.push(format!("kiva_request_duration_seconds_sum {}", load(&m.micros) as f64 / 1e6));
+    lines.push(format!("kiva_request_duration_seconds_count {timed}"));
+    metric("kiva_request_duration_seconds", "histogram", "Time spent executing commands.", &lines);
     metric(
         "kiva_errors_total",
         "counter",
@@ -749,6 +770,7 @@ fn openapi() -> Json {
             },
             "/metrics": { "get": { "summary": "Prometheus metrics (text format)." } },
             "/health": { "get": { "summary": "Liveness probe. No authentication." } },
+            "/ready": { "get": { "summary": "Readiness probe: 503 while stopping, or on a replica not connected to its master. No authentication." } },
             "/v1/api": {
                 "post": {
                     "summary": "Structured request: whoami, scan, get, put, add, del, query, explain, aggregate, similar, semantic, stats, users, workspaces.",

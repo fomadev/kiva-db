@@ -3027,6 +3027,50 @@ READ : 100000 ops in 0.973s -> 102739 ops/sec (avg 0.010 ms)
 
 `bench` writes temporary keys (`__bench:...`) in the current workspace and removes them afterwards. The figures depend on your disk and processor.
 
+### 17.9 `kivadb doctor` — a health check of the home
+
+`kivadb doctor` looks for what could stop KivaDB from starting, from being reached safely or from keeping its data. It only reads: it works whether KivaDB is running or not, needs no password, and changes nothing in the home.
+
+```text
+$ kivadb doctor
+KivaDB 2.0.0 doctor, home /home/ana/.local/share/kivadb
+
+  OK    Home        /home/ana/.local/share/kivadb is writable
+  OK    Disk        41.20 GB free, data takes 12.07 MB
+  OK    Server      running (pid 4120) on port 2911
+  FAIL  Access      KivaDB listens on 0.0.0.0, open to other machines, without asking for a password
+                    -> config set security.auth_required true, after giving kiva a password (modify user "kiva" password ...)
+  OK    TLS         on, certificate /home/ana/.local/share/kivadb/tls/cert.pem (SHA-256 4f:9a:...)
+  OK    Encryption  off (data files are not encrypted)
+  OK    Time zone   Africa/Kinshasa, now 2026-10-27T13:50:40.759Z
+  OK    Replication master
+  OK    Data        3 file(s), 18204 record(s), every checksum matches
+  OK    Server log  no recent error
+
+9 check(s) passed, 0 warnings, 1 problem.
+```
+
+| Line | What is checked |
+| :--- | :--- |
+| Home | The folder can be written by this user |
+| Disk | Free space: below 1 GB, or below the size of the data, a compaction (which rewrites the live data) may fail |
+| Server | Whether KivaDB runs on this home; when it does not, whether its ports (TCP, REST, Redis) are free |
+| Access | A listening address open to other machines without `security.auth_required` is a problem |
+| TLS | The certificate can be loaded; open to the network without `tls.required` is a warning |
+| Encryption | The key is given when the data needs one ([16.12](#1612-encryption-at-rest)) |
+| Time zone | `time.zone` is a zone KivaDB knows ([5.9](#59-time-zones)) |
+| Replication | A replica has a master, reached with TLS when it is on another machine |
+| Data | Every record of every workspace and of `system`, against its checksum, read from the files |
+| Server log | Errors among the last 500 lines of `server.log` |
+
+A last record cut short is a warning, not a problem: a write was interrupted by a crash or a power cut, and KivaDB drops it the next time it opens the file. A checksum that does not match is a problem: `check` and `check repair` ([17.4](#174-integrity-check)) deal with it.
+
+`kivadb doctor --json` gives the same findings to programs: `level` (`ok`, `warning` or `problem`), `topic`, `message` and `advice`, and the counts in `summary`. The exit code is 0 when nothing is a problem (warnings allowed) and 1 otherwise, so that a deployment script or a monitoring check can stop on it:
+
+```bash
+kivadb doctor --json > doctor.json || echo "KivaDB needs attention"
+```
+
 ---
 
 ## Chapter 18 — Keeping values in memory (value cache)
@@ -3191,8 +3235,10 @@ All integers are little-endian.
 | Field | Size | Content |
 | :--- | :--- | :--- |
 | magic | 4 | The letters `KIVA` |
-| format | 4 | Storage format number: `1` |
+| format | 4 | Storage format number: `1`, or `2` once the file holds a `date`, `datetime` or `time` |
 | file_id | 8 | A random number, changed at every compaction and reset |
+
+A file is raised from format 1 to format 2 the first time a `date`, `datetime` or `time` is written to it, just before that record. KivaDB 1.x reads only format 1: it refuses such a file with `unsupported storage format 2` instead of misreading the new records. A workspace that holds none of them stays at format 1, readable by 1.x. The values of these types are stored as text that sorts in time order: `2026-10-27`, `2026-10-27T14:30:00.000Z` (always UTC, to the millisecond), `08:00:00`.
 
 **Record (28-byte header, then the key, then the value)**
 
@@ -3201,7 +3247,7 @@ All integers are little-endian.
 | crc32 | `u32` | 4 | Checksum of all the following bytes of the record |
 | k_size | `u16` | 2 | Length of the key |
 | v_size | `u32` | 4 | Length of the value as stored |
-| type | `u8` | 1 | 1 string, 2 number, 3 boolean, 4 null, 5 array, 6 object, 7 bytes |
+| type | `u8` | 1 | 1 string, 2 number, 3 boolean, 4 null, 5 array, 6 object, 7 bytes, 8 date, 9 datetime, 10 time |
 | flags | `u8` | 1 | See below |
 | timestamp | `i64` | 8 | When it was written (seconds since 1970) |
 | expires_at | `i64` | 8 | When it expires, Unix time in milliseconds; 0 = never. Files written by KivaDB 1.5.1 and earlier hold seconds: values below 10^11 are read as seconds |
@@ -4701,7 +4747,9 @@ Starting KivaDB with `--lua-debug` makes every script show the lines it executes
 
 * `stats` in a shell ([17.1](#171-stats--the-dashboard)).
 * `GET /v1/stats` for the same figures as JSON.
-* `GET /health` to check that the server answers.
+* `GET /health` to check that the server answers (a liveness probe).
+* `GET /ready` to check that it should receive traffic (a readiness probe): `503` while it stops, and on a replica that is not connected to its master, for instance while it receives its first snapshot. Neither needs a password.
+* `kivadb doctor` for a health check of the home ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)).
 * `kivadb status` to check that the process is running.
 
 ### 27.2 Prometheus
@@ -4724,7 +4772,7 @@ kiva_keys 2
 | Metric | Meaning |
 | :--- | :--- |
 | `kiva_requests_total{type=...}` | Operations processed: `get`, `set`, `del`, `other` |
-| `kiva_request_duration_seconds_sum` / `_count` | Total time spent executing commands, and how many |
+| `kiva_request_duration_seconds` | Histogram of the time spent executing commands: `_bucket{le=...}` from 0.0001 s to 5 s, `_sum` and `_count` |
 | `kiva_errors_total` | Commands that ended in an error |
 | `kiva_http_requests_total` | HTTP requests received |
 | `kiva_failed_logins_total` | Rejected logins |
@@ -4739,6 +4787,12 @@ kiva_keys 2
 | `kiva_replicas_connected` | Replicas attached |
 | `kiva_replication_lag_ops` | Operations the slowest replica is behind |
 | `kiva_uptime_seconds` | Time since start |
+
+The 95th percentile of the last five minutes, in PromQL:
+
+```text
+histogram_quantile(0.95, rate(kiva_request_duration_seconds_bucket[5m]))
+```
 
 A Prometheus configuration to collect them:
 
@@ -5130,6 +5184,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 ## Chapter 30 — Troubleshooting
 
+Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)): it checks the ports, the access, the certificate, the key and every record, and says what to do.
+
 ### 30.1 Starting
 
 | What you see | Cause and remedy |
@@ -5144,7 +5200,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `Error: refusing to listen on ... without authentication.` | You set a non-local `bind` without securing KivaDB. See [16.7](#167-opening-kivadb-to-the-network) |
 | `Error: database is locked by another process` | Another process has these files open. Check `kivadb status` |
 | `Error: invalid database file: missing KIVA signature` | The file is not a KivaDB data file. KivaDB does not touch it |
-| `Error: invalid database file: unsupported storage format N` | The file was written by an incompatible version of KivaDB |
+| `Error: invalid database file: unsupported storage format N` | The file was written by a newer KivaDB (format 2: by 2.0, with dates in it). Use that version, or restore the backup made before upgrading |
 | `kivadb start` says the server stopped right away | The reason is in the last lines of `server.log`, which are displayed |
 | `kivadb update`: `permission denied` | The executable is in a protected folder: `sudo kivadb update` (Linux, macOS) or a terminal run as administrator (Windows) |
 | `kivadb update`: `GitHub limits anonymous requests` | Too many requests from your network to GitHub in the last hour. Try again at the time shown |
@@ -5219,6 +5275,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `kivadb --connect <host:port> [--tls]` | Shell on a remote KivaDB, encrypted with `--tls` (`--tls-fingerprint <fp>` in scripts) |
 | `kivadb tls` / `kivadb tls renew` | Show the TLS certificate and its fingerprint / create a new one |
 | `kivadb keygen` | Print a new encryption key ([16.12](#1612-encryption-at-rest)) |
+| `kivadb doctor [--json]` | Look for what could stop KivaDB or lose data, reading only ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)) |
 | `kivadb backup -o <file.tar.gz> [-w <workspace>]` | Save the home or a workspace, even while KivaDB runs ([17.7](#177-backups)) |
 | `kivadb restore <file.tar.gz> [--target <dir>] [--as <name>] [--check]` | Check, then restore an archive (KivaDB stopped) |
 | `kivadb --no-listen` | Shell on local files that other shells cannot join |

@@ -165,6 +165,11 @@ impl Keys {
         Keys { current: Key::derive(current), old: old.iter().map(Key::derive).collect(), rng: SystemRandom::new() }
     }
 
+    /// The identifier of the key new records are sealed with.
+    pub fn id_hex(&self) -> String {
+        self.current.id_hex()
+    }
+
     /// The keys configured for an instance, from the environment first, then
     /// from the key files named in `kiva.conf`. `None` when encryption is off;
     /// an error when it is required but no key is given, or a key is unusable.

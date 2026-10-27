@@ -6,6 +6,13 @@
 //!
 //! File header (16 bytes): `KIVA` | format u32 | file_id u64
 //!
+//! Format 1 holds the types of KivaDB 1.x (codes 1 to 7). A file is raised to
+//! format 2 the first time a record of a type added by 2.0 (`date`,
+//! `datetime`, `time`) is written to it: KivaDB 1.x then refuses the file
+//! ("unsupported storage format 2") instead of taking those records for a
+//! damaged end of log and cutting them off. A file without them stays at
+//! format 1, readable by 1.x.
+//!
 //! Record (28-byte header + key + value), all integers little-endian:
 //! `crc32 u32 | k_size u16 | v_size u32 | type u8 | flags u8 | timestamp i64 | expires_at i64`
 //!
@@ -16,7 +23,10 @@
 use crate::compress::Compression;
 
 pub const MAGIC: &[u8; 4] = b"KIVA";
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest format this build reads and writes.
+pub const FORMAT_VERSION: u32 = 2;
+/// The format of KivaDB 1.x: what a file without the types of 2.0 keeps.
+pub const FORMAT_V1: u32 = 1;
 pub const FILE_HEADER_LEN: u64 = 16;
 pub const REC_HEADER_LEN: usize = 28;
 
@@ -56,24 +66,47 @@ impl RecHeader {
     }
 }
 
-pub fn file_header(file_id: u64) -> [u8; 16] {
+pub fn file_header(file_id: u64, format: u32) -> [u8; 16] {
     let mut h = [0u8; 16];
     h[..4].copy_from_slice(MAGIC);
-    h[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    h[4..8].copy_from_slice(&format.to_le_bytes());
     h[8..16].copy_from_slice(&file_id.to_le_bytes());
     h
 }
 
-/// Returns the file id, or a description of why the header is unusable.
-pub fn parse_file_header(h: &[u8]) -> std::result::Result<u64, String> {
+/// Returns the file id and the format, or a description of why the header is unusable.
+pub fn parse_file_header(h: &[u8]) -> std::result::Result<(u64, u32), String> {
     if h.len() < FILE_HEADER_LEN as usize || &h[..4] != MAGIC {
         return Err("missing KIVA signature".into());
     }
     let version = u32::from_le_bytes([h[4], h[5], h[6], h[7]]);
-    if version != FORMAT_VERSION {
-        return Err(format!("unsupported storage format {version} (this build reads format {FORMAT_VERSION})"));
+    if !(FORMAT_V1..=FORMAT_VERSION).contains(&version) {
+        return Err(format!(
+            "unsupported storage format {version} (this build reads formats {FORMAT_V1} to {FORMAT_VERSION}):              it was written by a newer KivaDB"
+        ));
     }
-    Ok(u64::from_le_bytes([h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]))
+    Ok((u64::from_le_bytes([h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]), version))
+}
+
+/// The format a record of type `ty` needs.
+pub fn format_for_type(ty: u8) -> u32 {
+    if ty >= 8 {
+        2
+    } else {
+        FORMAT_V1
+    }
+}
+
+/// The format the records of `buf` (whole records, one after the other) need.
+pub fn format_needed(buf: &[u8]) -> u32 {
+    let mut pos = 0;
+    let mut need = FORMAT_V1;
+    while buf.len() - pos >= REC_HEADER_LEN {
+        let h = parse_header(&buf[pos..]);
+        need = need.max(format_for_type(h.ty));
+        pos += h.total_len() as usize;
+    }
+    need
 }
 
 pub fn encode_record(key: &str, value: &[u8], ty: u8, flags: u8, timestamp: i64, expires_at: i64) -> Vec<u8> {

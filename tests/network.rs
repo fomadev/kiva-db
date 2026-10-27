@@ -215,12 +215,17 @@ fn rest_api() {
     assert_eq!(http_req(port, "OPTIONS", "/v1/key/x", None, None).status, 204);
     assert_eq!(get("/nowhere").status, 404);
     assert_eq!(get("/health").json()["version"], env!("CARGO_PKG_VERSION"));
+    let ready = get("/ready").json();
+    assert_eq!((&ready["ready"], &ready["role"]), (&json!(true), &json!("master")));
     assert!(get("/docs").body.contains("KivaDB REST API"));
     assert!(get("/openapi.json").json()["paths"]["/v1/key/{key}"].is_object());
     let m = get("/metrics").body;
     for name in [
         "kiva_requests_total{type=\"get\"}",
         "kiva_request_duration_seconds_sum",
+        "# TYPE kiva_request_duration_seconds histogram",
+        "kiva_request_duration_seconds_bucket{le=\"0.001\"}",
+        "kiva_request_duration_seconds_bucket{le=\"+Inf\"}",
         "kiva_storage_fragmentation_ratio",
         "kiva_keys 5",
     ] {
