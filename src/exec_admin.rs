@@ -51,6 +51,8 @@ impl Session {
             "backup" => self.cmd_backup(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
+            "schema" => self.cmd_schema(a, out),
+            "schemas" => self.cmd_schema(a, out),
             "compact" => {
                 if !a.is_empty() {
                     return Err("'compact' command does not accept arguments.".into());
@@ -1127,6 +1129,107 @@ impl Session {
         let (on, th) = self.engine.auto_compact();
         out.say(format!("Auto-compaction is {} (threshold {th}%).", if on { "ON" } else { "OFF" }));
         Ok(())
+    }
+
+    fn cmd_schema(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str =
+            "Usage: schema set <pattern> {<field>: {<rules>}} | schema show <pattern> | schema check <pattern> | schema drop <pattern> | schemas";
+        let mut c = Cur::new(a);
+        // `schemas`, or `schema` alone, lists them.
+        let sub = match c.next() {
+            None => "list".to_string(),
+            t => word(t, "set, show, check, drop or list").map_err(|_| USAGE.to_string())?.to_ascii_lowercase(),
+        };
+        if sub == "list" {
+            c.finish(USAGE)?;
+            let list = self.engine.schemas();
+            if list.is_empty() {
+                out.say("No schemas in this workspace.");
+            }
+            for (s, _) in list {
+                let fields: Vec<String> = s.spec.as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                let unique = s.unique_fields();
+                let unique =
+                    if unique.is_empty() { String::new() } else { format!(" (unique: {})", unique.join(", ")) };
+                out.say(format!("{} - {}{unique}", s.pattern, fields.join(", ")));
+            }
+            return Ok(());
+        }
+        let mut pattern = word(c.next(), "a key pattern").map_err(|_| USAGE.to_string())?;
+        if !pattern.contains(['*', '?']) {
+            pattern.push('*');
+        }
+        match sub.as_str() {
+            "set" => {
+                let spec = c.next().filter(|t| t.kind == Kind::Json).ok_or(USAGE)?;
+                let spec: serde_json::Value =
+                    serde_json::from_str(&spec.text).map_err(|e| format!("Invalid JSON literal: {e}"))?;
+                c.finish(USAGE)?;
+                let r = self.engine.set_schema(&pattern, &spec)?;
+                let fields = spec.as_object().map(|m| m.len()).unwrap_or(0);
+                let verb = if r.replaced { "replaced" } else { "set" };
+                out.say(format!("Schema {verb} on {pattern} ({fields} field{}).", if fields == 1 { "" } else { "s" }));
+                for f in &r.unique_indexes {
+                    out.say(format!("Unique index created on {pattern} ({f})."));
+                }
+                match (r.checked, r.nonconforming) {
+                    (0, _) => {}
+                    (n, 0) => out.say(format!("{n} document(s) already stored: all follow it.")),
+                    (n, bad) => out.say(format!(
+                        "{n} document(s) already stored, {bad} of them do not follow it: they stay as they are, and must follow it at their next change (schema check {pattern})."
+                    )),
+                }
+                Ok(())
+            }
+            "show" => {
+                c.finish(USAGE)?;
+                let list = self.engine.schemas();
+                let (s, _) =
+                    list.iter().find(|(s, _)| s.pattern == pattern).ok_or(format!("No schema on {pattern}."))?;
+                out.say(format!(
+                    "schema set {} {}",
+                    s.pattern,
+                    serde_json::to_string_pretty(&s.spec).unwrap_or_default()
+                ));
+                Ok(())
+            }
+            "check" => {
+                c.finish(USAGE)?;
+                let found = self.engine.check_schema(&pattern, 20)?;
+                let (read, bad, list) = (found.read, found.failing, found.examples);
+                if bad == 0 {
+                    out.say(format!("{pattern}: {read} document(s), all follow the schema."));
+                } else {
+                    out.say(format!("{pattern}: {read} document(s), {bad} do not follow the schema:"));
+                    for (k, why) in list {
+                        out.say(format!("  - {k}: {why}"));
+                    }
+                    if bad > 20 {
+                        out.say(format!("  ... and {} more", bad - 20));
+                    }
+                }
+                Ok(())
+            }
+            "drop" => {
+                c.finish(USAGE)?;
+                let owned = self
+                    .engine
+                    .schemas()
+                    .into_iter()
+                    .find(|(s, _)| s.pattern == pattern)
+                    .map(|(_, o)| o)
+                    .unwrap_or_default();
+                if !self.engine.drop_schema(&pattern)? {
+                    return Err(format!("No schema on {pattern}."));
+                }
+                out.say(format!("Schema dropped on {pattern}."));
+                for f in owned {
+                    out.say(format!("Unique index on {pattern} ({f}) dropped with it."));
+                }
+                Ok(())
+            }
+            _ => Err(USAGE.into()),
+        }
     }
 
     fn cmd_check(&mut self, a: &[Token], out: &mut Out) -> R {

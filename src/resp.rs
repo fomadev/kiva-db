@@ -248,6 +248,7 @@ impl From<KivaError> for Reply {
             KivaError::ReadOnly(m) => Reply::Error(format!("READONLY {m}")),
             KivaError::Conflict(m) => Reply::Error(format!("EXECABORT {m}")),
             KivaError::Unique(m) => Reply::Error(format!("UNIQUE {m}")),
+            KivaError::Schema(m) => Reply::Error(format!("SCHEMA {m}")),
             other => Reply::err(other.to_string()),
         }
     }

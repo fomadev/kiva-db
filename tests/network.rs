@@ -232,6 +232,22 @@ fn rest_api() {
         assert!(m.contains(name), "metrics lack {name}:\n{m}");
     }
 
+    // A schema answers 422 over REST.
+    ok(
+        &mut Session::new(inst.clone(), true, None),
+        r#"schema set acct: {"id": {"type": "integer", "required": true}}"#,
+    );
+    let r = post("/v1/key/acct:1", r#"{"name": "x"}"#);
+    assert_eq!(r.status, 422, "{}", r.body);
+    assert!(
+        r.json()["error"].as_str().unwrap_or_default().starts_with("SCHEMA: 'acct:1' not written: id: required"),
+        "{}",
+        r.body
+    );
+    assert_eq!(post("/v1/key/acct:1", r#"{"id": 1}"#).status, 200);
+    ok(&mut Session::new(inst.clone(), true, None), "del acct:1");
+    ok(&mut Session::new(inst.clone(), true, None), "schema drop acct:");
+
     // Basic authentication uses the same accounts as the shell.
     let mut admin = Session::new(inst.clone(), true, None);
     ok(&mut admin, r#"create user "fordi" identified by "mon_pass" role viewer"#);

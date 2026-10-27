@@ -14,6 +14,7 @@ use crate::hint;
 use crate::hnsw::{self, Hnsw};
 use crate::jsonpath;
 use crate::query::{Expr, Query};
+use crate::schema::{Moment, Schema};
 use crate::util::{glob_match, glob_prefix, now_ms, now_secs, random_u64};
 use crate::value::{Type, Value};
 pub use crate::vector::AutoTune;
@@ -197,6 +198,30 @@ pub struct EngineStats {
     pub compact_threshold: u8,
     pub indexes: usize,
     pub seq: u64,
+}
+
+/// The documents of a pattern against its schema (`check_schema`).
+#[derive(Debug)]
+pub struct SchemaCheck {
+    /// Documents read.
+    pub read: usize,
+    /// Those that do not follow the schema.
+    pub failing: usize,
+    /// Some of them, with the reason.
+    pub examples: Vec<(String, String)>,
+}
+
+/// What `set_schema` found and did.
+#[derive(Debug)]
+pub struct SchemaReport {
+    /// The pattern had a schema, now replaced.
+    pub replaced: bool,
+    /// Documents of the pattern already stored.
+    pub checked: usize,
+    /// Those that do not follow the schema: kept as they are.
+    pub nonconforming: usize,
+    /// Fields given a unique index for the schema.
+    pub unique_indexes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -823,6 +848,8 @@ struct Inner {
     threshold: u8,
     sec: Vec<SecIndex>,
     vecs: Vec<VecIndex>,
+    /// Optional schemas, with the unique indexes each one created (`crate::schema`).
+    schemas: Vec<(Schema, Vec<String>)>,
     cache: ValueCache,
     /// Sum of `key_cost` over the index, kept up to date on every change.
     key_bytes: usize,
@@ -1428,6 +1455,71 @@ impl Inner {
         left
     }
 
+    /// The value to write under `key` once the schemas of its patterns have
+    /// filled in their defaults: `None` when it is to be written as it is.
+    /// A value that breaks a schema is refused, unless it is exactly what the
+    /// key holds already (a TTL changed, a document stored before its schema).
+    fn conformed(&mut self, key: &str, value: &Value, at: Moment) -> Result<Option<Value>> {
+        if !self.schemas.iter().any(|(s, _)| glob_match(&s.pattern, key)) {
+            return Ok(None);
+        }
+        let mut doc = match value {
+            Value::Doc(d) => d.clone(),
+            _ => Json::Null,
+        };
+        let mut failure = None;
+        for (s, _) in self.schemas.iter().filter(|(s, _)| glob_match(&s.pattern, key)) {
+            let res = match value {
+                Value::Doc(_) => s.conform(&mut doc, at),
+                other => Err(format!("a JSON object is expected, not a [{}]", other.ty().name())),
+            };
+            if let Err(e) = res {
+                failure = Some(format!("'{key}' not written: {e} (schema on {})", s.pattern));
+                break;
+            }
+        }
+        if let Some(why) = failure {
+            if let Some(e) = self.live(key, now_ms()) {
+                if self.value_of(key, &e).is_ok_and(|current| &current == value) {
+                    return Ok(None);
+                }
+            }
+            return Err(KivaError::Schema(why));
+        }
+        Ok(match value {
+            Value::Doc(d) if *d != doc => Some(Value::Doc(doc)),
+            _ => None,
+        })
+    }
+
+    /// How many documents of the schema's pattern were read, how many do not
+    /// follow it, and up to `limit` of those with the reason.
+    fn schema_failures(&mut self, schema: &Schema, limit: usize) -> SchemaCheck {
+        let now = now_ms();
+        let keys: Vec<(String, Entry)> = self
+            .index
+            .iter()
+            .filter(|(k, e)| glob_match(&schema.pattern, k) && !e.is_expired(now))
+            .map(|(k, e)| (k.clone(), e.clone()))
+            .collect();
+        let mut failing = Vec::new();
+        let mut count = 0;
+        for (k, e) in &keys {
+            let why = match self.value_of(k, e) {
+                Ok(Value::Doc(d)) => schema.check(&d).err(),
+                Ok(other) => Some(format!("a [{}], not a JSON object", other.ty().name())),
+                Err(err) => Some(err.to_string()),
+            };
+            if let Some(why) = why {
+                count += 1;
+                if failing.len() < limit {
+                    failing.push((k.clone(), why));
+                }
+            }
+        }
+        SchemaCheck { read: keys.len(), failing: count, examples: failing }
+    }
+
     /// Refuses writes that would give two documents the same value in a
     /// unique index. `writes` holds each key written with the document it
     /// will hold (`None`: deleted, or no longer a document); keys written
@@ -1745,6 +1837,7 @@ impl Engine {
             key_bytes: 0,
             max_memory: opts.max_memory_bytes,
             max_vectors: opts.max_vector_bytes,
+            schemas: Vec::new(),
             keys: opts.keys.clone(),
             active_txns: 0,
             tomb_versions: HashMap::new(),
@@ -1816,6 +1909,20 @@ impl Engine {
                             let i = inner.sec.len() - 1;
                             inner.rebuild_sec(i);
                         }
+                    }
+                }
+                for def in meta["schemas"].as_array().cloned().unwrap_or_default() {
+                    let Some(p) = def["pattern"].as_str() else { continue };
+                    match Schema::parse(p, &def["spec"]) {
+                        Ok(s) => {
+                            let owned = def["indexes"]
+                                .as_array()
+                                .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+                                .unwrap_or_default();
+                            inner.schemas.push((s, owned));
+                        }
+                        // Written by this engine, so readable; say it rather than drop it silently.
+                        Err(e) => eprintln!("[WARN] the schema on {p} in {} is ignored: {e}", path.display()),
                     }
                 }
             }
@@ -2127,7 +2234,13 @@ impl Engine {
     ) -> Result<bool> {
         let arriving = self.arriving();
         let mut inner = self.lock();
+        let filled;
+        let mut value = value;
         if check {
+            filled = inner.conformed(key, value, Moment::now())?;
+            if let Some(v) = &filled {
+                value = v;
+            }
             inner.check_unique(&[(key, as_doc(value))])?;
             inner.check_vector_room(inner.vector_growth(key, as_doc(value)))?;
         }
@@ -2159,9 +2272,12 @@ impl Engine {
         };
         let current = inner.value_of(key, &e)?;
         let (new, out) = f(current)?;
-        let Some(new) = new else {
+        let Some(mut new) = new else {
             return Ok(Some((out, false)));
         };
+        if let Some(v) = inner.conformed(key, &new, Moment::now())? {
+            new = v;
+        }
         inner.check_unique(&[(key, as_doc(&new))])?;
         inner.check_vector_room(inner.vector_growth(key, as_doc(&new)))?;
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
@@ -2290,7 +2406,7 @@ impl Engine {
     /// `watched` keys changed: checked under the same lock as the writes.
     pub fn apply_batch_watched(
         &self,
-        ops: Vec<BatchOp>,
+        mut ops: Vec<BatchOp>,
         begin_seq: Option<u64>,
         watched: Option<&[WatchedKey]>,
     ) -> Result<()> {
@@ -2319,6 +2435,17 @@ impl Engine {
             }
         }
 
+        if !inner.schemas.is_empty() {
+            // One moment for every default of the transaction: its commit.
+            let at = Moment::now();
+            for op in &mut ops {
+                if let BatchOp::Put { key, value, .. } = op {
+                    if let Some(v) = inner.conformed(key, value, at)? {
+                        *value = v;
+                    }
+                }
+            }
+        }
         if inner.sec.iter().any(|s| s.unique) {
             // What each key holds once the whole batch is applied.
             let mut last: Vec<(&str, Option<&Json>)> = Vec::new();
@@ -3022,9 +3149,112 @@ impl Engine {
         if !inner.cache.patterns().is_empty() {
             meta["pinned"] = inner.cache.patterns().into();
         }
+        if !inner.schemas.is_empty() {
+            let list: Vec<Json> = inner
+                .schemas
+                .iter()
+                .map(|(s, owned)| serde_json::json!({ "pattern": s.pattern, "spec": s.spec, "indexes": owned }))
+                .collect();
+            meta["schemas"] = list.into();
+        }
         let text = serde_json::to_string_pretty(&meta)?;
         fs::write(sidecar(&self.path, "meta"), text)?;
         Ok(())
+    }
+
+    // -- schemas ------------------------------------------------------------
+
+    /// Gives `pattern` a schema, or replaces the one it has. Its `unique`
+    /// fields get a unique index, unless one is there already; the documents
+    /// already stored are not changed, and are counted when they do not
+    /// follow it. Nothing changes when an index cannot be created.
+    pub fn set_schema(&self, pattern: &str, spec: &Json) -> Result<SchemaReport> {
+        let schema = Schema::parse(pattern, spec).map_err(KivaError::Invalid)?;
+        let wanted = schema.unique_fields();
+        let previous: Vec<String> = self
+            .lock()
+            .schemas
+            .iter()
+            .find(|(s, _)| s.pattern == pattern)
+            .map(|(_, owned)| owned.clone())
+            .unwrap_or_default();
+        let mut owned: Vec<String> = previous.iter().filter(|f| wanted.contains(f)).cloned().collect();
+        let mut created = Vec::new();
+        for field in &wanted {
+            if owned.contains(field) {
+                continue;
+            }
+            let existing = self.lock().sec.iter().find(|s| s.pattern == pattern && s.field == *field).map(|s| s.unique);
+            match existing {
+                Some(true) => {}
+                Some(false) => {
+                    self.undo_indexes(pattern, &created);
+                    return Err(KivaError::Exists(format!(
+                        "{field} is unique in the schema, but the index on {pattern} ({field}) is not: \
+                         drop it (drop index on {pattern} ({field})), then set the schema again"
+                    )));
+                }
+                None => {
+                    if let Err(e) = self.create_unique_index(pattern, &[field.as_str()], IndexKind::BTree, true, false)
+                    {
+                        self.undo_indexes(pattern, &created);
+                        return Err(e);
+                    }
+                    created.push(field.clone());
+                    owned.push(field.clone());
+                }
+            }
+        }
+        let mut inner = self.lock();
+        // Indexes the previous version created and this one no longer needs.
+        let dropped: Vec<String> = previous.into_iter().filter(|f| !owned.contains(f)).collect();
+        inner.sec.retain(|s| !(s.pattern == pattern && dropped.contains(&s.field)));
+        let replaced = match inner.schemas.iter().position(|(s, _)| s.pattern == pattern) {
+            Some(i) => {
+                inner.schemas[i] = (schema.clone(), owned);
+                true
+            }
+            None => {
+                inner.schemas.push((schema.clone(), owned));
+                false
+            }
+        };
+        let found = inner.schema_failures(&schema, 0);
+        self.save_meta(&inner)?;
+        Ok(SchemaReport { replaced, checked: found.read, nonconforming: found.failing, unique_indexes: created })
+    }
+
+    fn undo_indexes(&self, pattern: &str, fields: &[String]) {
+        let mut inner = self.lock();
+        inner.sec.retain(|s| !(s.pattern == pattern && fields.contains(&s.field)));
+        let _ = self.save_meta(&inner);
+    }
+
+    /// Removes the schema of `pattern`, and the unique indexes it created.
+    pub fn drop_schema(&self, pattern: &str) -> Result<bool> {
+        let mut inner = self.lock();
+        let Some(i) = inner.schemas.iter().position(|(s, _)| s.pattern == pattern) else {
+            return Ok(false);
+        };
+        let (_, owned) = inner.schemas.remove(i);
+        inner.sec.retain(|s| !(s.pattern == pattern && owned.contains(&s.field)));
+        self.save_meta(&inner)?;
+        Ok(true)
+    }
+
+    /// The schemas of this workspace, with the unique indexes each one created.
+    pub fn schemas(&self) -> Vec<(Schema, Vec<String>)> {
+        self.lock().schemas.clone()
+    }
+
+    /// The documents of `pattern` against its schema: how many were read, how
+    /// many do not follow it, and up to `limit` of those with the reason.
+    pub fn check_schema(&self, pattern: &str, limit: usize) -> Result<SchemaCheck> {
+        let mut inner = self.lock();
+        let Some((schema, _)) = inner.schemas.iter().find(|(s, _)| s.pattern == pattern).cloned() else {
+            return Err(KivaError::NotFound(format!("no schema on {pattern}")));
+        };
+        Ok(inner.schema_failures(&schema, limit))
     }
 
     /// Creates an index on `field` of every document whose key matches

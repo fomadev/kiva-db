@@ -65,6 +65,7 @@ impl From<KivaError> for Response {
             KivaError::Denied(_) => 403,
             KivaError::NotFound(_) => 404,
             KivaError::Exists(_) | KivaError::Conflict(_) | KivaError::ReadOnly(_) | KivaError::Unique(_) => 409,
+            KivaError::Schema(_) => 422,
             KivaError::Invalid(_) | KivaError::Type(_) | KivaError::Script(_) => 400,
             _ => 500,
         };

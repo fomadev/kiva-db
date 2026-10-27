@@ -1153,6 +1153,26 @@ fn redis_clients_read_dates_as_iso_text() {
 }
 
 #[test]
+fn redis_writes_follow_the_schema() {
+    let dir = TempDir::new("resp_schema");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, r#"schema set acct: {"id": {"type": "string", "required": true}, "tier": {"default": "free"}}"#);
+    let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
+    let mut r = Redis::connect(port);
+    match r.cmd(&["HSET", "acct:1", "name", "x"]) {
+        R::E(e) => assert!(e.starts_with("SCHEMA ") && e.contains("id: required"), "{e}"),
+        other => panic!("HSET without the id was accepted: {other:?}"),
+    }
+    match r.cmd(&["JSON.SET", "acct:2", "$", r#"{"name": "x"}"#]) {
+        R::E(e) => assert!(e.starts_with("SCHEMA "), "{e}"),
+        other => panic!("JSON.SET without the id was accepted: {other:?}"),
+    }
+    assert_eq!(r.cmd(&["HSET", "acct:1", "id", "a1"]), R::I(1));
+    assert_eq!(r.cmd(&["HGET", "acct:1", "tier"]), b("free"));
+}
+
+#[test]
 fn redis_lua_scripts_run_atomically() {
     let dir = TempDir::new("resp_eval");
     let inst = instance(&dir);

@@ -37,6 +37,7 @@ pub mod pubsub;
 pub mod query;
 pub mod repl;
 pub mod resp;
+pub mod schema;
 pub mod script;
 pub mod semantic_cache;
 pub mod server;

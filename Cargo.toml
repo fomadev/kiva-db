@@ -28,6 +28,8 @@ pbkdf2 = "0.12"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10"
+# Schema patterns: linear time whatever the expression, with a size bound.
+regex = "1"
 rpassword = "7"
 rustyline = { version = "15", features = ["derive"] }
 ctrlc = { version = "3", features = ["termination"] }
