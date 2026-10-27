@@ -2,7 +2,7 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## 1.7.0 - 2026-10-26
+## 1.7.0 - 2026-10-27
 
 Queries with `in`, `like` and `ilike`, unique indexes (on several fields, optionally ignoring case), keys named by KivaDB with `add`, and a guide for applications coming from MongoDB.
 
