@@ -871,6 +871,9 @@ const HELP: &str = r#"
   create index on <pat> (<field>) [using hash] : Secondary index (B-tree, or hash for =).
                                     Also <pat>.<field>; drop index, indexes.
   create unique index on <pat> (<f1>[, <f2>...]) [ignore case] : Refuse two documents with the same values.
+  changes enable [keys only] [retain 24h] [max 256mb] : Keep a durable journal of the changes (admin).
+  changes read [from beginning|now|<cursor>] [as <consumer>] [limit N] [like <pat>]
+                                    : The changes after a cursor. Also changes status, disable, forget <consumer>.
   schema set <pat> {"<field>": {"type": "string", "required": true, "default": ...}}
                                     : Rules and defaults for the documents of a pattern.
                                     Also schemas, schema show|check|drop <pat>.
@@ -2157,6 +2160,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "schema" if sub("set") || sub("drop") => Need::Admin,
+        "changes" if sub("enable") || sub("disable") || sub("forget") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
         _ => Need::Read,
     }

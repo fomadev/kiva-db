@@ -5510,6 +5510,95 @@ stream.addEventListener("del", (e) => console.log(JSON.parse(e.data)));
 
 A comment line is sent every 15 seconds so that idle connections stay open. With authentication on, send Basic credentials (from a browser, a reverse proxy usually adds them). `config set stream false` turns the endpoint off.
 
+These notifications are not kept: a client that was not connected misses them. To read the changes again later, from where a program stopped, use the change journal (22.5).
+
+### 22.5 The change journal: changes kept, read again from a cursor
+
+The notifications above go to whoever listens at that moment: a program that was disconnected, or not started yet, misses them. The **change journal** keeps every committed write of a workspace on disk, numbered, for a retention period, so that a program (a search index, a cache, an analytics pipeline, another database) can read them in order and resume where it stopped, after a disconnection or a restart of either side.
+
+```text
+kiva> changes enable
+Change journal started for workspace 'default': keys and values, kept 1 day(s), at most 256.00 MB.
+kiva> set user:1 {"name": "Ana"}
+kiva> update user:1 {"name": "Ana", "age": 31}
+kiva> begin
+kiva> set order:1 {"total": 40} and del cart:ana
+kiva> commit
+kiva> changes read
+#1 2026-10-27T14:30:00.000Z insert user:1 (object) {"name":"Ana"}
+#2 2026-10-27T14:30:05.000Z update user:1 (object) {"name":"Ana","age":31}
+#3 2026-10-27T14:30:09.000Z insert order:1 (object) {"total":40} [transaction 3]
+#4 2026-10-27T14:30:09.000Z delete cart:ana [transaction 3, end]
+Cursor: 54a087b71d59813c0000000000000004
+kiva> changes read from 54a087b71d59813c0000000000000004
+No change after this point.
+Cursor: 54a087b71d59813c0000000000000004
+```
+
+The journal starts empty when it is enabled: the writes made before are not in it.
+
+| Command | Effect |
+| :--- | :--- |
+| `changes enable [keys only] [retain <24h>] [max <256mb>]` | Start the journal of the current workspace, or change its settings (admin). `keys only` keeps the keys and the operations, not the values |
+| `changes read [from beginning\|now\|<cursor>] [as <consumer>] [limit N] [like <pattern>]` | The changes after a point (20 by default, at most 1 000), and the cursor to go on from |
+| `changes status` | Settings, changes kept, size, named consumers and how far behind each one is |
+| `changes forget <consumer>` | Forget a named consumer (admin) |
+| `changes disable` | Stop and remove the journal; its cursors are no longer valid (admin) |
+
+**From programs**, `GET /v1/changes` on the REST port answers JSON:
+
+```bash
+curl "http://localhost:8080/v1/changes?from=beginning&limit=100"
+curl "http://localhost:8080/v1/changes?cursor=54a087b71d59813c0000000000000004&wait=25000"
+```
+
+```json
+{"workspace": "default", "cursor": "54a087b71d59813c0000000000000004", "more": false,
+ "first_seq": 1, "last_seq": 4, "changes": [
+  {"seq": 3, "cursor": "54a087b71d59813c0000000000000003", "op": "set", "created": true,
+   "key": "order:1", "type": "object", "value": {"total": 40},
+   "timestamp": "2026-10-27T14:30:09.000Z", "expires_at": null, "txn": 3, "txn_end": false},
+  {"seq": 4, "cursor": "54a087b71d59813c0000000000000004", "op": "delete", "created": null,
+   "key": "cart:ana", "type": null, "value": null,
+   "timestamp": "2026-10-27T14:30:09.000Z", "expires_at": null, "txn": 3, "txn_end": true}]}
+```
+
+| Parameter | Meaning |
+| :--- | :--- |
+| `cursor` (or `from`) | Read after this cursor; `beginning` (the oldest change kept) or `now` (only those to come) |
+| `consumer` | A name under which KivaDB remembers the position (below) |
+| `limit` | Changes per answer: 100 by default, at most 1 000 |
+| `pattern` | Only the keys matching it; the cursor still moves past the others |
+| `wait` | Milliseconds to wait for a change when there is none yet (at most 30 000): a long poll, answered as soon as one comes |
+
+`op` is `set` (with `created`: `true` for a new key, `false` for a key overwritten), `delete` or `reset` (`del all keys`). `value` is the value written, as the REST API gives it (bytes in base64, dates as ISO 8601 in UTC), `null` with `keys only`. The changes of one transaction carry the number of its first change in `txn`, and its last one has `txn_end`: a program can apply a transaction whole. Any other command that changes keys gives its changes too: `json set` and the other field changes, Redis clients, scripts, the REST API, the defaults of a schema ([11.8](#118-schemas-rules-for-the-documents-of-a-pattern)).
+
+#### What is guaranteed
+
+* **Only what was committed, in commit order.** A rolled-back transaction, or one a crash cut before its commit record, gives no change. A change is handed to a reader only once its data and itself are on disk: a read syncs both first, whatever `storage.sync_writes` says.
+* **Data and changes agree after a crash.** The data file stays the source of truth. Each change records where its data ends; when KivaDB opens a workspace, the changes whose data the crash lost are dropped (no reader ever got them), and those the journal lacks are rebuilt from the data file, with the same numbers. A change rebuilt that way says `"created": null`: whether the key was new is not known any more.
+* **Cursors** are opaque texts (the identity of the journal and a number). A cursor stands for a change: reading from it gives the changes **after** it, and the answer's `cursor` is where to go on. Cursors survive restarts and compactions (which remove old values from the data file, not changes from the journal).
+* **At least once.** A reader may get a change again: after a restart that rebuilt it, or when it reads from a cursor older than what it had handled. Make applying a change idempotent (`seq` is unique in a journal) rather than counting on exactly once.
+* **Expired and invalid cursors are refused**, never silently skipped. Past the retention, `CURSOR_EXPIRED: ...` (the oldest number kept is in the message): resynchronise, then read from `now` or the beginning. `CURSOR_INVALID: ...` for a cursor of another journal: another node, a journal disabled and enabled again, or restored from a backup.
+
+#### Retention, slow readers, consumers and at-least-once delivery
+
+The journal keeps changes for `retain` (one day by default) and at most `max` on disk (256 MB by default), in segment files that are removed whole, oldest first. Readers never hold writes back: a reader that is too slow, or stopped, finds its cursor expired rather than the disk filled.
+
+With `as <consumer>` (`consumer=` over REST), KivaDB remembers a position per name. The position moves when the consumer reads **from a cursor**: that says it handled everything up to it. Reading as the consumer without a cursor resumes after its last acknowledgement, so a batch it got but never acknowledged (it crashed while applying it) comes again. `changes status`, and `kiva_changes_consumer_lag{consumer=...}` in Prometheus, show how far behind each one is. A reader without a name keeps its cursor itself.
+
+#### Security
+
+Reading the journal needs read access to the workspace, checked at every read (and at every look of a `wait`): a grant revoked meanwhile ends the next read with `403`. Enabling, disabling and forgetting consumers need the admin role. With `keys only`, values (personal data, secrets) never reach the journal. In an encrypted workspace ([16.12](#1612-encryption-at-rest)) the journal is encrypted with the same key; a key rotation re-encrypts the data file, while the journal's older changes stay readable as long as the old key is given, and leave with the retention.
+
+#### Limits
+
+* **Per node.** Each node keeps its own journal and numbers its own changes. A replica with `changes enable` journals what its master sends; a cursor of the master means nothing there (`CURSOR_INVALID`). After a failover, readers resynchronise from the new master.
+* **Expirations** (keys whose TTL ran out) are not changes: they are not written to the data file either. A reader that mirrors keys with a TTL applies the `expires_at` of their changes.
+* **Backups** hold the data, not the journal: a restored workspace starts a new journal (its cursors are new), as does a reset cut short by a crash.
+* Writes cost a little more with a journal (the record is written twice, the value once more unless `keys only`); a workspace without one pays nothing.
+* KivaDB 1.x ignores the journal (`store.kiva.changes`), which does not change the data file.
+
 ---
 
 ## Chapter 23 — Redis compatibility
@@ -6629,6 +6718,8 @@ kiva_keys 2
 | `kiva_replicas_connected` | Replicas attached |
 | `kiva_replication_lag_ops` | Operations the slowest replica is behind |
 | `kiva_uptime_seconds` | Time since start |
+| `kiva_changes_last_seq`, `kiva_changes_retained`, `kiva_changes_bytes` | The change journal, when the workspace keeps one ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)) |
+| `kiva_changes_consumer_lag{consumer=...}` | Changes a named consumer has not acknowledged yet |
 
 The 95th percentile of the last five minutes, in PromQL:
 
@@ -6656,6 +6747,7 @@ Storage metrics describe the workspace of the user making the request (the `defa
 | `kiva_storage_fragmentation_ratio` stays high | Auto-compaction is off or cannot keep up |
 | `kiva_replication_lag_ops` keeps growing | A replica is too slow or the link is poor |
 | `kiva_failed_logins_total` rises fast | Someone is guessing passwords |
+| `kiva_changes_consumer_lag` keeps growing | A program reading the change journal is stopped or too slow: past the retention its cursor expires |
 | `kiva_memory_bytes` near your RAM | Too many keys for this machine |
 
 ---
@@ -7253,6 +7345,9 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `drop trigger <name>` / `triggers` | Remove / list triggers |
 | `bench script "<n>" iterations <N> [args]` | Time a script (admin) |
 | `subscribe <pattern>` / `unsubscribe [pattern]` | Change notifications |
+| `changes enable [keys only] [retain 24h] [max 256mb]` / `changes disable` | Keep a durable change journal, or remove it ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)) (admin) |
+| `changes read [from beginning|now|<cursor>] [as <consumer>] [limit N] [like <pat>]` | The changes after a cursor |
+| `changes status` / `changes forget <consumer>` | Journal and consumers / forget one (admin) |
 
 ### Replication (admin)
 

@@ -6,6 +6,7 @@
 //! in-memory index (`BTreeMap`) mapping each key to its latest record.
 
 use crate::cache::ValueCache;
+use crate::changes::{self, ChangeKind, Journal, NewChange};
 use crate::compress::{self, Compression};
 use crate::crypt::{self, Keys};
 use crate::error::{KivaError, Result};
@@ -198,6 +199,49 @@ pub struct EngineStats {
     pub compact_threshold: u8,
     pub indexes: usize,
     pub seq: u64,
+}
+
+/// Where a read of the change journal starts.
+pub enum ChangesFrom {
+    /// The oldest change kept.
+    Beginning,
+    /// After the last change: only those to come.
+    Now,
+    /// After the change a cursor stands for.
+    Cursor(String),
+    /// After the last change the named consumer said it handled.
+    Consumer,
+}
+
+/// What a read of the change journal gave.
+pub struct ChangesRead {
+    pub changes: Vec<changes::Change>,
+    /// Where the next read starts: after the last change looked at.
+    pub cursor: String,
+    /// More changes wait past `cursor`.
+    pub more: bool,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    id: u64,
+}
+
+impl ChangesRead {
+    /// The cursor standing for the change `seq`: reading from it gives the changes after it.
+    pub fn cursor_of(&self, seq: u64) -> String {
+        changes::cursor(self.id, seq)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ChangesStatus {
+    pub settings: changes::Settings,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub retained: u64,
+    pub bytes: u64,
+    /// Named consumers: the last change each one handled, and when it said so.
+    pub consumers: Vec<(String, u64, i64)>,
+    pub error: Option<String>,
 }
 
 /// The documents of a pattern against its schema (`check_schema`).
@@ -874,6 +918,10 @@ struct Inner {
     last_compact: Option<i64>,
     compact_error: Option<String>,
     closed: bool,
+    /// The change journal, when this workspace keeps one (`changes enable`).
+    changes: Option<Journal>,
+    /// Why the journal it should keep could not be opened.
+    changes_error: Option<String>,
 }
 
 struct Signal {
@@ -1455,6 +1503,155 @@ impl Inner {
         left
     }
 
+    /// Journals changes just written to the data file. A failure leaves the
+    /// data as written: the journal refuses reads until a restart rebuilds it.
+    fn journal(&mut self, list: &[NewChange], txn: bool) {
+        let file_id = self.file_id;
+        if let Some(j) = self.changes.as_mut() {
+            if let Err(e) = j.append(file_id, list, txn) {
+                eprintln!("[WARN] the change journal could not be written: {e}");
+            }
+        }
+    }
+
+    fn journal_del(&mut self, key: &str, timestamp: i64, data_end: u64) {
+        if self.changes.is_some() {
+            let del = NewChange {
+                kind: ChangeKind::Del,
+                key,
+                ty: 0,
+                raw: &[],
+                msgpack: false,
+                timestamp,
+                expires_at: 0,
+                created: None,
+                data_end,
+            };
+            self.journal(&[del], false);
+        }
+    }
+
+    /// Opens the change journal of the data file at `path`, then brings it
+    /// in line with the data: the changes whose data a crash lost are
+    /// dropped, those the journal lacks are rebuilt from the data file. A
+    /// journal that names another data file (a restore, a reset cut short)
+    /// starts again under a new identity, so that its old cursors are refused.
+    fn open_changes(&mut self, path: &Path, settings: changes::Settings) {
+        let dir = changes::dir_of(path);
+        let opened = Journal::open(&dir, self.keys.clone(), settings.clone()).and_then(|mut j| {
+            j.drop_after(self.file_id, self.file_len)?;
+            match j.position_for(self.file_id)? {
+                Some(end) if end <= self.file_len => {
+                    self.rebuild_changes(&mut j, end)?;
+                    Ok(j)
+                }
+                _ => {
+                    eprintln!(
+                        "[WARN] the change journal {} does not describe this data file: it starts again, and its \
+                         cursors are refused",
+                        dir.display()
+                    );
+                    j.destroy();
+                    let mut j = Journal::open(&dir, self.keys.clone(), settings.clone())?;
+                    j.mark(self.file_id, self.file_len)?;
+                    j.sync()?;
+                    Ok(j)
+                }
+            }
+        });
+        match opened {
+            Ok(mut j) => {
+                let _ = j.sync();
+                self.changes = Some(j);
+            }
+            Err(e) => {
+                eprintln!("[WARN] the change journal {} cannot be opened: {e}", dir.display());
+                self.changes_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// Journals the changes of the data records from `from` to the end of the
+    /// file: those a crash kept from reaching the journal. A transaction is
+    /// journaled whole, once its commit record is seen.
+    fn rebuild_changes(&mut self, j: &mut Journal, from: u64) -> Result<()> {
+        if from >= self.file_len {
+            return Ok(());
+        }
+        let data = self.read_at(from, (self.file_len - from) as usize)?;
+        let keys = self.keys.clone();
+        struct Owned {
+            del: bool,
+            key: String,
+            ty: u8,
+            raw: Vec<u8>,
+            msgpack: bool,
+            timestamp: i64,
+            expires_at: i64,
+            end: u64,
+        }
+        let mut pending: Vec<Owned> = Vec::new();
+        let mut pos = 0usize;
+        let file_id = self.file_id;
+        let flush = |j: &mut Journal, list: &[Owned], txn: bool| -> Result<()> {
+            let refs: Vec<NewChange> = list
+                .iter()
+                .map(|o| NewChange {
+                    kind: if o.del { ChangeKind::Del } else { ChangeKind::Set },
+                    key: &o.key,
+                    ty: o.ty,
+                    raw: &o.raw,
+                    msgpack: o.msgpack,
+                    timestamp: o.timestamp,
+                    expires_at: o.expires_at,
+                    created: None,
+                    data_end: o.end,
+                })
+                .collect();
+            j.append(file_id, &refs, txn)
+        };
+        while data.len() - pos >= REC_HEADER_LEN {
+            let h = parse_header(&data[pos..]);
+            let total = h.total_len() as usize;
+            if h.k_size == 0 || pos + total > data.len() {
+                break;
+            }
+            let rec = &data[pos..pos + total];
+            pos += total;
+            if !verify_record(rec) {
+                pending.clear();
+                continue;
+            }
+            let Ok((k, stored)) = crypt::open_record(keys.as_deref(), rec) else {
+                pending.clear();
+                continue;
+            };
+            let del = h.flags & FLAG_TOMBSTONE != 0;
+            let raw = if del { Vec::new() } else { compress::unpack(&stored, h.compression())? };
+            let change = Owned {
+                del,
+                key: String::from_utf8_lossy(&k).into_owned(),
+                ty: h.ty,
+                raw,
+                msgpack: h.flags & FLAG_MSGPACK != 0,
+                timestamp: h.timestamp,
+                expires_at: h.expires_at,
+                end: from + pos as u64,
+            };
+            if h.flags & FLAG_TXN != 0 {
+                pending.push(change);
+                if h.flags & FLAG_TXN_COMMIT != 0 {
+                    flush(j, &pending, true)?;
+                    pending.clear();
+                }
+            } else {
+                pending.clear();
+                flush(j, &[change], false)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The value to write under `key` once the schemas of its patterns have
     /// filled in their defaults: `None` when it is to be written as it is.
     /// A value that breaks a schema is refused, unless it is exactly what the
@@ -1838,6 +2035,8 @@ impl Engine {
             max_memory: opts.max_memory_bytes,
             max_vectors: opts.max_vector_bytes,
             schemas: Vec::new(),
+            changes: None,
+            changes_error: None,
             keys: opts.keys.clone(),
             active_txns: 0,
             tomb_versions: HashMap::new(),
@@ -1858,6 +2057,7 @@ impl Engine {
         inner.recount();
 
         // Secondary index definitions live in a small sidecar file.
+        let mut changes_settings = None;
         if let Ok(text) = fs::read_to_string(sidecar(&path, "meta")) {
             if let Ok(meta) = serde_json::from_str::<Json>(&text) {
                 let mut saved =
@@ -1911,6 +2111,9 @@ impl Engine {
                         }
                     }
                 }
+                if meta["changes"].is_object() {
+                    changes_settings = Some(changes::Settings::from_json(&meta["changes"]));
+                }
                 for def in meta["schemas"].as_array().cloned().unwrap_or_default() {
                     let Some(p) = def["pattern"].as_str() else { continue };
                     match Schema::parse(p, &def["spec"]) {
@@ -1926,6 +2129,9 @@ impl Engine {
                     }
                 }
             }
+        }
+        if let Some(settings) = changes_settings {
+            inner.open_changes(&path, settings);
         }
         inner.load.ms = started.elapsed().as_secs_f64() * 1000.0;
 
@@ -2300,6 +2506,20 @@ impl Engine {
         let (rec, mut entry, raw) = build_put(inner, key, value, expires_at, msgpack, timestamp, 0)?;
         let created = inner.live(key, now_ms()).is_none();
         entry.offset = inner.append(&rec, false)?;
+        if inner.changes.is_some() {
+            let change = NewChange {
+                kind: ChangeKind::Set,
+                key,
+                ty: value.ty() as u8,
+                raw: &raw,
+                msgpack: entry.is_msgpack(),
+                timestamp,
+                expires_at,
+                created: Some(created),
+                data_end: entry.offset + rec.len() as u64,
+            };
+            inner.journal(&[change], false);
+        }
         inner.seq += 1;
         entry.version = inner.seq;
         let msgpack = entry.is_msgpack();
@@ -2338,7 +2558,8 @@ impl Engine {
             return Ok(false);
         }
         let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
-        inner.append(&rec, false)?;
+        let at = inner.append(&rec, false)?;
+        inner.journal_del(key, now_secs(), at + rec.len() as u64);
         inner.seq += 1;
         inner.idx_remove(key);
         if inner.active_txns > 0 {
@@ -2533,6 +2754,38 @@ impl Engine {
             }
         }
         let base = inner.append(&buf, false)?;
+        if inner.changes.is_some() {
+            let ends: Vec<u64> = offs.iter().zip(&recs).map(|(o, r)| base + (*o + r.len()) as u64).collect();
+            let list: Vec<NewChange> = staged
+                .iter()
+                .zip(&ends)
+                .map(|(s, end)| match s {
+                    Staged::Put { key, entry, raw, ty, created, .. } => NewChange {
+                        kind: ChangeKind::Set,
+                        key,
+                        ty: *ty as u8,
+                        raw,
+                        msgpack: entry.is_msgpack(),
+                        timestamp: entry.timestamp,
+                        expires_at: entry.expires_at,
+                        created: Some(*created),
+                        data_end: *end,
+                    },
+                    Staged::Del { key } => NewChange {
+                        kind: ChangeKind::Del,
+                        key,
+                        ty: 0,
+                        raw: &[],
+                        msgpack: false,
+                        timestamp: ts,
+                        expires_at: 0,
+                        created: None,
+                        data_end: *end,
+                    },
+                })
+                .collect();
+            inner.journal(&list, true);
+        }
 
         for s in staged {
             inner.seq += 1;
@@ -2583,6 +2836,23 @@ impl Engine {
         inner.file.sync_data()?;
         inner.file_id = file_id;
         inner.format = FORMAT_V1;
+        if inner.changes.is_some() {
+            let reset = NewChange {
+                kind: ChangeKind::Reset,
+                key: "",
+                ty: 0,
+                raw: &[],
+                msgpack: false,
+                timestamp: now_secs(),
+                expires_at: 0,
+                created: None,
+                data_end: FILE_HEADER_LEN,
+            };
+            inner.journal(&[reset], false);
+            if let Some(j) = inner.changes.as_mut() {
+                let _ = j.sync();
+            }
+        }
         inner.file_len = FILE_HEADER_LEN;
         inner.index.clear();
         for s in &mut inner.sec {
@@ -2768,6 +3038,14 @@ impl Engine {
             tmp_file.write_all(&inner.format.to_le_bytes())?;
         }
         tmp_file.sync_all()?;
+        // The journal names data files: every change so far on disk, then
+        // where the new file ends, before it replaces the old one. A crash
+        // in between leaves the old file, which the journal still names.
+        if let Some(j) = inner.changes.as_mut() {
+            j.sync()?;
+            j.mark(new_id, pos)?;
+            j.sync()?;
+        }
         drop(tmp_file);
 
         let mut new_index = BTreeMap::new();
@@ -2845,7 +3123,8 @@ impl Engine {
             report.backup = Some(bak);
             for k in &report.corrupted {
                 let rec = inner.encode(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
-                inner.append(&rec, true)?;
+                let at = inner.append(&rec, true)?;
+                inner.journal_del(k, now_secs(), at + rec.len() as u64);
                 inner.seq += 1;
                 inner.idx_remove(k);
                 inner.dirty_ops += 1;
@@ -2980,6 +3259,9 @@ impl Engine {
             inner.save_graphs(&self.path);
         }
         inner.sync_file = None;
+        if let Some(j) = inner.changes.as_mut() {
+            let _ = j.sync();
+        }
         inner.closed = true;
     }
 
@@ -2990,6 +3272,11 @@ impl Engine {
                 return;
             }
             inner.ticks += 1;
+            if inner.ticks.is_multiple_of(60) {
+                if let Some(j) = inner.changes.as_mut() {
+                    j.trim(now_secs());
+                }
+            }
             // Every second: cheap, since only expired keys are visited. A
             // full batch means more are waiting: come back at once.
             if inner.purge_expired(now_ms()) == PURGE_BATCH {
@@ -3149,6 +3436,9 @@ impl Engine {
         if !inner.cache.patterns().is_empty() {
             meta["pinned"] = inner.cache.patterns().into();
         }
+        if let Some(j) = &inner.changes {
+            meta["changes"] = j.settings.to_json();
+        }
         if !inner.schemas.is_empty() {
             let list: Vec<Json> = inner
                 .schemas
@@ -3160,6 +3450,142 @@ impl Engine {
         let text = serde_json::to_string_pretty(&meta)?;
         fs::write(sidecar(&self.path, "meta"), text)?;
         Ok(())
+    }
+
+    // -- change journal -----------------------------------------------------
+
+    /// Starts keeping the changes of this workspace, from now on, or changes
+    /// the settings of the journal it keeps (for the changes to come).
+    pub fn enable_changes(&self, settings: changes::Settings) -> Result<bool> {
+        let mut inner = self.lock();
+        let started = match inner.changes.as_mut() {
+            Some(j) => {
+                j.settings = settings;
+                false
+            }
+            None => {
+                let dir = changes::dir_of(&self.path);
+                // What a journal left behind when it was turned off is no longer true.
+                let _ = fs::remove_dir_all(&dir);
+                let mut j = Journal::open(&dir, inner.keys.clone(), settings)?;
+                j.mark(inner.file_id, inner.file_len)?;
+                j.sync()?;
+                inner.changes = Some(j);
+                inner.changes_error = None;
+                true
+            }
+        };
+        self.save_meta(&inner)?;
+        Ok(started)
+    }
+
+    /// Stops keeping changes and removes the journal. Returns whether there was one.
+    pub fn disable_changes(&self) -> Result<bool> {
+        let mut inner = self.lock();
+        let had = inner.changes.is_some() || inner.changes_error.is_some();
+        if let Some(j) = inner.changes.take() {
+            j.destroy();
+        }
+        inner.changes_error = None;
+        let _ = fs::remove_dir_all(changes::dir_of(&self.path));
+        self.save_meta(&inner)?;
+        Ok(had)
+    }
+
+    pub fn changes_status(&self) -> Option<ChangesStatus> {
+        let inner = self.lock();
+        if let Some(e) = &inner.changes_error {
+            return Some(ChangesStatus { error: Some(e.clone()), ..Default::default() });
+        }
+        let j = inner.changes.as_ref()?;
+        Some(ChangesStatus {
+            settings: j.settings.clone(),
+            first_seq: j.first_seq(),
+            last_seq: j.last_seq,
+            retained: j.retained(),
+            bytes: j.bytes(),
+            consumers: j.consumers(),
+            error: j.broken.clone(),
+        })
+    }
+
+    /// Reads the changes after `from`. Every change handed out is on disk,
+    /// with its data: the read syncs both first. With a consumer name, its
+    /// position is remembered: reading from a cursor says that everything up
+    /// to it was handled, and `From::Consumer` resumes after that.
+    pub fn read_changes(
+        &self,
+        from: ChangesFrom,
+        limit: usize,
+        pattern: Option<&str>,
+        consumer: Option<&str>,
+    ) -> Result<ChangesRead> {
+        let mut inner = self.lock();
+        if let Some(e) = &inner.changes_error {
+            return Err(KivaError::Other(format!("the change journal cannot be opened: {e}")));
+        }
+        if inner.changes.is_none() {
+            return Err(KivaError::NotFound(
+                "this workspace keeps no change journal: changes enable (admin) starts one".into(),
+            ));
+        }
+        // The data first: a change is handed out only once its write is durable.
+        let fresh = inner.changes.as_ref().is_some_and(|j| j.written != j.read_synced);
+        if fresh {
+            inner.file.sync_data()?;
+            inner.unsynced = false;
+        }
+        let j = inner.changes.as_mut().expect("checked");
+        if fresh {
+            j.sync()?;
+            j.read_synced = j.written;
+        }
+        let after = match &from {
+            ChangesFrom::Beginning => j.first_seq() - 1,
+            ChangesFrom::Now => j.last_seq,
+            ChangesFrom::Cursor(c) => j.parse_cursor(c)?,
+            ChangesFrom::Consumer => {
+                let name = consumer.unwrap_or_default();
+                j.consumer(name).ok_or_else(|| {
+                    KivaError::NotFound(format!(
+                        "no consumer named '{name}' yet: give it a starting point (from beginning, from now or a cursor)"
+                    ))
+                })?
+            }
+        };
+        if let Some(name) = consumer {
+            j.ack(name, after, now_secs())?;
+        }
+        let batch = j.read(after, limit, pattern)?;
+        Ok(ChangesRead {
+            cursor: j.cursor(batch.next),
+            more: batch.more,
+            changes: batch.changes,
+            first_seq: j.first_seq(),
+            last_seq: j.last_seq,
+            id: j.id,
+        })
+    }
+
+    /// Applies the retention now (it otherwise runs every minute). Returns
+    /// how many changes were removed.
+    pub fn trim_changes(&self) -> u64 {
+        self.lock().changes.as_mut().map(|j| j.trim(now_secs())).unwrap_or(0)
+    }
+
+    /// Forgets a named consumer.
+    pub fn remove_consumer(&self, name: &str) -> Result<bool> {
+        let mut inner = self.lock();
+        match inner.changes.as_mut() {
+            Some(j) => j.remove_consumer(name),
+            None => Ok(false),
+        }
+    }
+
+    /// The last change number, when this workspace keeps a journal: for a
+    /// reader waiting for new changes, without syncing anything.
+    pub fn last_change(&self) -> Option<u64> {
+        self.lock().changes.as_ref().map(|j| j.last_seq)
     }
 
     // -- schemas ------------------------------------------------------------

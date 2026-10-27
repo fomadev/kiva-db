@@ -52,6 +52,7 @@ impl Session {
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
             "schema" => self.cmd_schema(a, out),
+            "changes" => self.cmd_changes(a, out),
             "schemas" => self.cmd_schema(a, out),
             "compact" => {
                 if !a.is_empty() {
@@ -1131,6 +1132,154 @@ impl Session {
         Ok(())
     }
 
+    fn cmd_changes(&mut self, a: &[Token], out: &mut Out) -> R {
+        use crate::engine::ChangesFrom;
+        const USAGE: &str = "Usage: changes enable [keys only] [retain <24h>] [max <256mb>] | changes disable | \
+                             changes status | changes read [from beginning|now|<cursor>] [as <consumer>] [limit N] \
+                             [like <pattern>] | changes forget <consumer>";
+        let mut c = Cur::new(a);
+        let sub = word(c.next(), "a subcommand").map_err(|_| USAGE.to_string())?.to_ascii_lowercase();
+        match sub.as_str() {
+            "enable" => {
+                let mut s = self.engine.changes_status().map(|s| s.settings).unwrap_or_default();
+                while let Some(t) = c.next() {
+                    if t.is_kw("keys") {
+                        if !c.eat("only") {
+                            return Err(USAGE.into());
+                        }
+                        s.values = false;
+                    } else if t.is_kw("values") {
+                        s.values = true;
+                    } else if t.is_kw("retain") {
+                        s.retain_secs = parse_span(&word(c.next(), "a duration such as 24h")?)?;
+                    } else if t.is_kw("max") {
+                        s.max_bytes = parse_bytes(&word(c.next(), "a size such as 256mb")?)?;
+                    } else {
+                        return Err(USAGE.into());
+                    }
+                }
+                let what = if s.values { "keys and values" } else { "keys only" };
+                let (retain, max) = (span_text(s.retain_secs), human_size(s.max_bytes));
+                let started = self.engine.enable_changes(s)?;
+                out.say(if started {
+                    format!("Change journal started for workspace '{}': {what}, kept {retain}, at most {max}.", self.ws)
+                } else {
+                    format!("Change journal of workspace '{}' now keeps {what}, for {retain}, at most {max}.", self.ws)
+                });
+                Ok(())
+            }
+            "disable" => {
+                c.finish(USAGE)?;
+                if self.engine.disable_changes()? {
+                    out.say(format!(
+                        "Change journal of workspace '{}' removed; its cursors are no longer valid.",
+                        self.ws
+                    ));
+                } else {
+                    out.say(format!("Workspace '{}' keeps no change journal.", self.ws));
+                }
+                Ok(())
+            }
+            "forget" => {
+                let name = word(c.next(), "a consumer name")?;
+                c.finish(USAGE)?;
+                if !self.engine.remove_consumer(&name)? {
+                    return Err(format!("No consumer named '{name}'."));
+                }
+                out.say(format!("Consumer '{name}' forgotten."));
+                Ok(())
+            }
+            "status" => {
+                c.finish(USAGE)?;
+                let Some(s) = self.engine.changes_status() else {
+                    out.say(format!("Workspace '{}' keeps no change journal (changes enable starts one).", self.ws));
+                    return Ok(());
+                };
+                if let Some(e) = &s.error {
+                    out.say(format!("Change journal: unusable ({e}). Restart KivaDB to rebuild it from the data."));
+                    return Ok(());
+                }
+                out.say(format!(
+                    "Change journal: {}, kept {}, at most {}.",
+                    if s.settings.values { "keys and values" } else { "keys only" },
+                    span_text(s.settings.retain_secs),
+                    human_size(s.settings.max_bytes)
+                ));
+                out.say(format!(
+                    "  Changes kept: {} (numbers {} to {}), {} on disk.",
+                    s.retained,
+                    s.first_seq,
+                    s.last_seq,
+                    human_size(s.bytes)
+                ));
+                for (name, seq, at) in &s.consumers {
+                    out.say(format!(
+                        "  Consumer {name}: handled up to {seq}, {} behind, last seen {}.",
+                        s.last_seq.saturating_sub(*seq),
+                        fmt_time(*at)
+                    ));
+                }
+                Ok(())
+            }
+            "read" => {
+                let (mut from, mut consumer, mut limit, mut pattern) = (None, None, 20, None);
+                while let Some(t) = c.next() {
+                    if t.is_kw("from") {
+                        let v = word(c.next(), "beginning, now or a cursor")?;
+                        from = Some(match v.to_ascii_lowercase().as_str() {
+                            "beginning" => ChangesFrom::Beginning,
+                            "now" => ChangesFrom::Now,
+                            _ => ChangesFrom::Cursor(v),
+                        });
+                    } else if t.is_kw("as") {
+                        consumer = Some(word(c.next(), "a consumer name")?);
+                    } else if t.is_kw("limit") {
+                        limit = uint(c.next(), "limit")? as usize;
+                    } else if t.is_kw("like") {
+                        pattern = Some(word(c.next(), "a key pattern")?);
+                    } else {
+                        return Err(USAGE.into());
+                    }
+                }
+                let from =
+                    from.unwrap_or(if consumer.is_some() { ChangesFrom::Consumer } else { ChangesFrom::Beginning });
+                let read = self.engine.read_changes(from, limit, pattern.as_deref(), consumer.as_deref())?;
+                for ch in &read.changes {
+                    let j = crate::changes::to_json(ch, "");
+                    let what = match ch.kind {
+                        crate::changes::ChangeKind::Set => format!(
+                            "{} {} ({}){}",
+                            if ch.created == Some(true) {
+                                "insert"
+                            } else if ch.created.is_none() {
+                                "set"
+                            } else {
+                                "update"
+                            },
+                            ch.key,
+                            j["type"].as_str().unwrap_or("?"),
+                            if j["value"].is_null() { String::new() } else { format!(" {}", j["value"]) }
+                        ),
+                        crate::changes::ChangeKind::Del => format!("delete {}", ch.key),
+                        crate::changes::ChangeKind::Reset => "reset (all keys deleted)".to_string(),
+                    };
+                    let txn = match (ch.txn, ch.txn_end) {
+                        (Some(t), true) => format!(" [transaction {t}, end]"),
+                        (Some(t), false) => format!(" [transaction {t}]"),
+                        _ => String::new(),
+                    };
+                    out.say(format!("#{} {} {what}{txn}", ch.seq, j["timestamp"].as_str().unwrap_or("")));
+                }
+                if read.changes.is_empty() {
+                    out.say("No change after this point.");
+                }
+                out.say(format!("Cursor: {}{}", read.cursor, if read.more { " (more after it)" } else { "" }));
+                Ok(())
+            }
+            _ => Err(USAGE.into()),
+        }
+    }
+
     fn cmd_schema(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
             "Usage: schema set <pattern> {<field>: {<rules>}} | schema show <pattern> | schema check <pattern> | schema drop <pattern> | schemas";
@@ -1860,6 +2009,45 @@ fn parse_ef_search(t: Option<&Token>) -> Result<usize, String> {
         return Err("ef_search must be between 1 and 100000, or default".into());
     }
     Ok(ef)
+}
+
+/// `24h`, `7d`, `30m`, `90s`, or seconds.
+fn parse_span(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_ascii_lowercase();
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = n.parse().map_err(|_| format!("'{s}' is not a duration: write it as 24h, 7d, 30m or seconds"))?;
+    let mult = match unit {
+        "" | "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        _ => return Err(format!("'{s}' is not a duration: write it as 24h, 7d, 30m or seconds")),
+    };
+    n.checked_mul(mult).filter(|v| *v > 0).ok_or_else(|| format!("'{s}' is not a usable duration"))
+}
+
+fn span_text(secs: u64) -> String {
+    match secs {
+        s if s % 86400 == 0 => format!("{} day(s)", s / 86400),
+        s if s % 3600 == 0 => format!("{} hour(s)", s / 3600),
+        s if s % 60 == 0 => format!("{} minute(s)", s / 60),
+        s => format!("{s} second(s)"),
+    }
+}
+
+/// `256mb`, `1gb`, `64kb`, or bytes.
+fn parse_bytes(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_ascii_lowercase();
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = n.parse().map_err(|_| format!("'{s}' is not a size: write it as 256mb or 1gb"))?;
+    let mult = match unit {
+        "" | "b" => 1,
+        "kb" | "k" => 1 << 10,
+        "mb" | "m" => 1 << 20,
+        "gb" | "g" => 1 << 30,
+        _ => return Err(format!("'{s}' is not a size: write it as 256mb or 1gb")),
+    };
+    n.checked_mul(mult).filter(|v| *v >= 1 << 20).ok_or_else(|| "the journal needs at least 1mb".to_string())
 }
 
 fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), String> {
