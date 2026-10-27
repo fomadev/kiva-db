@@ -797,7 +797,9 @@ impl Session {
         ];
         let audited = AUDITED.contains(&cmd.as_str())
             || (cmd == "config" && tokens.get(1).is_some_and(|t| t.is_kw("set")))
-            || (cmd == "workspace" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
+            || (cmd == "workspace"
+                && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("move")))
+            || (cmd == "project" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
             || (cmd == "check" && tokens.get(1).is_some_and(|t| t.is_kw("repair")))
             || (cmd == "script" && tokens.get(1).is_some_and(|t| t.is_kw("load") || t.is_kw("delete")));
         if audited {
@@ -1945,13 +1947,19 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "script" if sub("load") || sub("delete") => Need::Admin,
         "semantic" if sub("store") || sub("clear") => Need::Write,
         "memory" if sub("pin") || sub("unpin") => Need::Admin,
-        // Compacting only rewrites one's own file: allowed at home.
+        // Compacting only rewrites the workspace's file: allowed to the project's managers.
         "compact" => Need::Owner,
+        // Changing one's own password needs no workspace; the rest is checked inside.
+        "whoami" | "modify" => Need::Login,
+        "project" if sub("create") || sub("remove") => Need::Admin,
+        "project" => Need::Login,
+        // Creating is checked against the project: its managers may.
+        "workspace" if sub("remove") || sub("move") => Need::Admin,
+        "workspace" if sub("create") || sub("list") || sub("current") || sub("switch") || sub("use") => Need::Login,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
         | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "autocompact" if !sub("status") => Need::Admin,
-        "workspace" if sub("create") || sub("remove") => Need::Admin,
         _ => Need::Read,
     }
 }

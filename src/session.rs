@@ -42,10 +42,12 @@ pub enum Need {
     None,
     Read,
     Write,
-    /// An administrator anywhere, or a user who can write, in their own
-    /// personal workspace (maintenance of one's own data).
+    /// An administrator anywhere, or a user who can write in every
+    /// workspace of the current one's project (maintenance of its data).
     Owner,
     Admin,
+    /// Logged in, in a workspace or not (`workspace list`, `whoami`).
+    Login,
 }
 
 /// What a read returns besides the value itself.
@@ -62,7 +64,9 @@ pub struct Session {
     pub user: Option<UserCtx>,
     pub ws: String,
     pub engine: Arc<Engine>,
-    pub ws_priv: Priv,
+    /// Access to the current workspace; `None` when the session is in none
+    /// (`ws` is then empty, and `engine` the empty `nowhere` store).
+    pub ws_priv: Option<Priv>,
     pub txn: Option<Txn>,
     /// True for the local shell; remote sessions cannot log in with an empty password.
     pub local: bool,
@@ -84,7 +88,7 @@ impl Session {
             user: None,
             ws: "default".into(),
             engine,
-            ws_priv: Priv::Read,
+            ws_priv: Some(Priv::Read),
             txn: None,
             local,
             events,
@@ -107,7 +111,7 @@ impl Session {
 
     fn become_root(&mut self) {
         self.user = Some(UserCtx { name: auth::DEFAULT_ADMIN.into(), role: Role::Admin });
-        self.ws_priv = Priv::Write;
+        self.ws_priv = Some(Priv::Write);
     }
 
     pub fn user_name(&self) -> &str {
@@ -118,8 +122,22 @@ impl Session {
         self.user.as_ref().map(|u| u.role)
     }
 
-    /// Verifies credentials and enters the user's home workspace.
+    /// Verifies credentials and enters the workspace the user arrives in:
+    /// their default one, or the only one they can reach, or none. A name
+    /// `app@travel.places` logs `app` in, straight into `travel.places`: clients
+    /// send it again at every reconnection, in a URL like any user name.
     pub fn login(&mut self, name: &str, password: &str) -> Result<User> {
+        let Some((user, workspace)) = name.split_once('@') else { return self.login_user(name, password) };
+        let u = self.login_user(user, password)?;
+        if let Err(e) = self.switch_workspace(workspace) {
+            self.leave();
+            self.user = None;
+            return Err(e);
+        }
+        Ok(u)
+    }
+
+    fn login_user(&mut self, name: &str, password: &str) -> Result<User> {
         let denied = |inst: &Instance, why: &str| {
             inst.metrics.failed_logins.fetch_add(1, Ordering::Relaxed);
             inst.audit.log(name, &format!("login ({why})"), false);
@@ -141,24 +159,40 @@ impl Session {
             self.rollback();
         }
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
-        let home = user.home_workspace();
-        self.inst.ensure_workspace(&home)?;
-        self.enter(&home, Priv::Write)?;
+        match user.arrival(&self.inst.workspace_names()) {
+            Some(w) => {
+                let level = user.access(&w).unwrap_or(Priv::Read);
+                self.enter(&w, level)?;
+            }
+            None => self.leave(),
+        }
         self.inst.audit.log(name, "login", true);
         Ok(user)
     }
 
     fn enter(&mut self, workspace: &str, level: Priv) -> Result<()> {
         let engine = self.inst.engine(workspace)?;
-        // Subscriptions are per workspace: they do not follow the session.
+        self.drop_subscriptions();
+        self.engine = engine;
+        self.ws = workspace.to_string();
+        self.ws_priv = Some(level);
+        Ok(())
+    }
+
+    /// Leaves the current workspace for none.
+    pub fn leave(&mut self) {
+        self.drop_subscriptions();
+        self.engine = self.inst.nowhere.clone();
+        self.ws.clear();
+        self.ws_priv = None;
+    }
+
+    // Subscriptions are per workspace: they do not follow the session.
+    fn drop_subscriptions(&mut self) {
         if !self.subs.is_empty() {
             self.inst.pubsub.unsubscribe(self.id, None);
             self.subs.clear();
         }
-        self.engine = engine;
-        self.ws = workspace.to_string();
-        self.ws_priv = level;
-        Ok(())
     }
 
     pub fn switch_workspace(&mut self, workspace: &str) -> Result<()> {
@@ -187,24 +221,35 @@ impl Session {
         let Some(u) = &self.user else {
             return Err(KivaError::Denied("authentication required. Use: auth <user> <password>".into()));
         };
+        if matches!(need, Need::Read | Need::Write | Need::Owner) && self.ws_priv.is_none() {
+            return Err(KivaError::Denied(
+                "you are in no workspace: 'workspace list' shows the ones you can use, 'workspace switch <name>' \
+                 enters one"
+                    .into(),
+            ));
+        }
         match need {
             Need::Admin if u.role != Role::Admin => {
                 Err(KivaError::Denied("this command requires the admin role".into()))
             }
             Need::Owner if u.role != Role::Admin => {
-                let home = crate::auth::personal_workspace(&u.name);
                 if u.role == Role::Viewer {
-                    Err(KivaError::Denied("the viewer role is read-only".into()))
-                } else if self.ws != home {
-                    Err(KivaError::Denied(format!(
-                        "this command requires the admin role, except in your personal workspace '{home}'"
-                    )))
-                } else {
-                    Ok(())
+                    return Err(KivaError::Denied("the viewer role is read-only".into()));
                 }
+                let manages = auth::get_user(&self.inst.system, &u.name)?.is_some_and(|u| u.manages(&self.ws));
+                if manages {
+                    return Ok(());
+                }
+                Err(KivaError::Denied(match auth::project_of(&self.ws) {
+                    Some(p) => format!(
+                        "this command requires the admin role, or write access to every workspace of project '{p}' \
+                         (grant write on {p}.*)"
+                    ),
+                    None => "this command requires the admin role".to_string(),
+                }))
             }
             Need::Write if u.role == Role::Viewer => Err(KivaError::Denied("the viewer role is read-only".into())),
-            Need::Write if self.ws_priv < Priv::Write => {
+            Need::Write if self.ws_priv < Some(Priv::Write) => {
                 Err(KivaError::Denied(format!("you only have read access to workspace '{}'", self.ws)))
             }
             _ => Ok(()),

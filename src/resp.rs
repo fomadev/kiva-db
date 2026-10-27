@@ -757,6 +757,12 @@ impl Conn {
             }
             "SELECT" => {
                 arity(args, 2)?;
+                // `SELECT travel.places` names a workspace; a number is a Redis database.
+                let name = text(&args[1])?;
+                if name.parse::<i64>().is_err() {
+                    self.select_workspace(&name)?;
+                    return Ok(Reply::ok());
+                }
                 let n = int(&args[1])?;
                 if !(0..DATABASES).contains(&n) {
                     return Err(Reply::err("DB index is out of range"));
@@ -1489,13 +1495,19 @@ impl Conn {
         Ok(Reply::Map(pairs.into_iter().map(|(k, v)| (Reply::bulk(k), v)).collect()))
     }
 
-    /// `SELECT n`: database 0 is the workspace the user arrived in, database n
+    /// `SELECT n`: database 0 is the workspace the user arrived in (their default
+    /// one), database n
     /// the workspace `db<n>`, created on first use when the user is an administrator.
     fn select(&mut self, n: i64) -> std::result::Result<(), Reply> {
         let arrived = self.sess.ws.clone();
         let home = self.home.get_or_insert(arrived).clone();
         let target = if n == 0 { home } else { format!("db{n}") };
         if target == self.sess.ws {
+            return Ok(());
+        }
+        // A user who arrived in no workspace is back in none.
+        if target.is_empty() {
+            self.sess.leave();
             return Ok(());
         }
         let (user, admin) = match &self.sess.user {
@@ -1508,6 +1520,26 @@ impl Conn {
         self.sess.switch_workspace(&target).map_err(|e| match e {
             KivaError::Denied(_) | KivaError::NotFound(_) => Reply::Error(format!(
                 "NOPERM no access to database {n} (KivaDB workspace '{target}'). An administrator can create it and give access with: workspace create {target}, then grant write on workspace \"{target}\" to \"{user}\""
+            )),
+            other => other.into(),
+        })
+    }
+
+    /// `SELECT <workspace>`: a workspace by its name, such as `travel.places`.
+    /// Clients that resend `SELECT` on reconnection keep it (ioredis with
+    /// `db: "travel.places"`, node-redis with `database: "travel.places"`).
+    fn select_workspace(&mut self, name: &str) -> std::result::Result<(), Reply> {
+        let Some(user) = self.sess.user.as_ref().map(|u| u.name.clone()) else {
+            return Err(Reply::Error("NOAUTH Authentication required.".into()));
+        };
+        if name == self.sess.ws && self.sess.ws_priv.is_some() {
+            return Ok(());
+        }
+        self.home.get_or_insert_with(|| self.sess.ws.clone());
+        self.sess.switch_workspace(name).map_err(|e| match e {
+            KivaError::Denied(_) | KivaError::NotFound(_) => Reply::Error(format!(
+                "NOPERM no access to workspace '{name}' for '{user}', or it does not exist. An administrator gives \
+                 it with: grant write on {name} to \"{user}\""
             )),
             other => other.into(),
         })
@@ -1765,8 +1797,14 @@ impl Conn {
     }
 
     /// The workspace whose channels this connection uses: its database 0.
+    /// A user who arrived in no workspace has channels of their own.
     fn scope(&self) -> String {
-        self.home.clone().unwrap_or_else(|| self.sess.ws.clone())
+        let ws = self.home.clone().unwrap_or_else(|| self.sess.ws.clone());
+        if ws.is_empty() {
+            format!("@{}", self.sess.user_name())
+        } else {
+            ws
+        }
     }
 
     fn info(&self) -> Vec<u8> {

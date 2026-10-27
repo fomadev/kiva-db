@@ -2,6 +2,25 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## Unreleased (2.0.0)
+
+Accounts reach only what they are granted, and projects group the workspaces of one application under its name (`travel.places`, `school.places`).
+
+### Upgrading
+
+* **Incompatible:** a new account no longer gets a personal workspace `u_<name>`. It reaches no workspace until an administrator grants it some, and lands in none at login unless it has a default workspace or can reach only one. Scripts that create a user and then write with it must give it access (`create user ... grant write on <workspace>`).
+* Existing accounts keep working: on its first start, 2.0 turns each personal workspace `u_<name>` into a write grant and makes it the account's default workspace, so applications connected with those accounts land on their data as before. Accounts saved by 2.0 carry the new model; an earlier version reads them, but gives back to each user a `u_<name>` workspace reached without a grant, and ignores the grants on scopes such as `travel.*`. Make a backup before upgrading if you may need to go back.
+* `compact` outside the admin role now needs write access to every workspace of the project (`grant write on travel.*`), instead of the personal workspace.
+* The `users` structured request answers `default_workspace` instead of `home`; `whoami` answers `workspace` and `access` as `null` for a session in no workspace.
+
+### Added
+
+* Projects: `project create travel`, then `workspace create travel.places`. Two projects may each have a workspace of the same name. `project list`, `workspace list travel`, and `project remove` for an empty project ([14.6](DOCUMENTATION.md#146-projects)).
+* Grants on scopes, several at once: `grant write on travel.*, school.places to "app"`, `grant read on *.places`, `grant write on *.*`. A grant on `travel.*` covers the workspaces created in `travel` later. An editor with write on `travel.*` manages the project: creates its workspaces and compacts them ([16.4](DOCUMENTATION.md#164-workspaces-and-grants)).
+* `create user "app" identified by "..." grant write on travel.* default workspace travel.places`: the account and its access in one command. `modify user "app" default workspace travel.places` chooses where it lands at login ([16.3](DOCUMENTATION.md#163-managing-accounts), [16.5](DOCUMENTATION.md#165-logging-in)).
+* Log in straight into a workspace as `<user>@<workspace>`, in the shell, over HTTP and from Redis clients (`redis://app%40travel.places:secret@host:6379`), which send it again at every reconnection. `SELECT travel.places` opens a workspace by its name ([23.4](DOCUMENTATION.md#234-logins-databases-roles)).
+* `workspace move places_travel to travel.places` renames a workspace or moves it into a project; its files stay where they are, and its grants follow it ([14.7](DOCUMENTATION.md#147-renaming-or-moving-a-workspace)).
+
 ## 1.7.1 - 2026-10-27
 
 A fix release: command files saved on Windows run as they are.

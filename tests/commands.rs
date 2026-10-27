@@ -641,14 +641,29 @@ fn users_roles_and_workspaces() {
     // Root still has an empty password: refused over the network, allowed locally.
     assert!(fails(&mut s, "auth kiva").contains("only log in from the local shell"));
     assert_eq!(ok(&mut s, "auth fordi s3cret"), "Welcome fordi (editor)");
-    assert_eq!(ok(&mut s, "whoami"), "fordi (editor) @ workspace 'u_fordi'");
+    // A new account reaches nothing until it is given access.
+    assert_eq!(ok(&mut s, "whoami"), "fordi (editor), in no workspace");
+    assert!(fails(&mut s, "get shared").contains("you are in no workspace"));
+    assert!(fails(&mut s, "set mine 1").contains("you are in no workspace"));
+    assert_eq!(ok(&mut s, "workspace list"), "");
+    assert!(fails(&mut s, "workspace switch default").contains("no access"));
 
-    // Own workspace: isolated from the default one.
+    // A project groups workspaces; write on all of them makes fordi its manager.
+    ok(&mut admin, "project create travel");
+    ok(&mut admin, "workspace create travel.places");
+    ok(&mut admin, "workspace create travel.cache");
+    ok(&mut admin, r#"grant write on travel.* to "fordi""#);
+    let list = ok(&mut s, "workspace list");
+    assert!(list.contains("travel.places") && list.contains("travel.cache") && !list.contains("default"), "{list}");
+    ok(&mut s, "workspace switch travel.places");
     assert_eq!(ok(&mut s, "get shared"), "shared: (nil)");
     ok(&mut s, r#"set mine "private""#);
-    assert!(fails(&mut s, "workspace switch default").contains("no access"));
-    // Maintenance of one's own workspace is allowed; of the server, not.
+    // The project's maintenance is allowed, and new workspaces in it; the server's, not.
     assert!(ok(&mut s, "compact").contains("compacted successfully"));
+    ok(&mut s, "workspace create travel.logs");
+    assert!(fails(&mut s, "workspace create logs").contains("outside a project requires the admin role"));
+    assert!(fails(&mut s, "workspace create school.logs").contains("project 'school' does not exist"));
+    assert!(fails(&mut s, "project create school").contains("requires the admin role"));
     assert!(fails(&mut s, "del all keys").contains("requires the admin role"));
     assert!(fails(&mut s, r#"create user "x" identified by "y""#).contains("requires the admin role"));
     assert!(fails(&mut s, "config list").contains("requires the admin role"));
@@ -660,23 +675,27 @@ fn users_roles_and_workspaces() {
     assert_eq!(ok(&mut s, "get shared"), "shared: team data [string]");
     assert!(fails(&mut s, "set nope 1").contains("only have read access"));
     let list = ok(&mut s, "workspace list");
-    assert!(list.contains("default") && list.contains("u_fordi") && !list.contains("u_guest"));
+    assert!(list.contains("default") && list.contains("travel.logs"));
     ok(&mut admin, r#"grant write on all to "fordi""#);
     ok(&mut s, "workspace switch default");
     ok(&mut s, "set yes 1");
-    // Writing somewhere does not make it one's own: compacting it stays an admin task.
-    assert!(fails(&mut s, "compact").contains("except in your personal workspace 'u_fordi'"));
-    ok(&mut admin, r#"revoke write on all from "fordi""#);
+    // Writing somewhere outside a project does not make it one's own: compacting it stays an admin task.
+    assert!(fails(&mut s, "compact").contains("requires the admin role"));
+    ok(&mut admin, r#"revoke write on *.* from "fordi""#);
     ok(&mut s, "workspace switch default");
     assert!(fails(&mut s, "set again 1").contains("only have read access"));
 
     // Viewers can read but never write.
     let mut g = Session::new(inst.clone(), false, None);
+    ok(&mut admin, r#"grant read on travel.places to "guest""#);
+    // The only workspace guest can reach is the one a login enters.
     ok(&mut g, "auth guest g");
+    assert_eq!(ok(&mut g, "whoami"), "guest (viewer) @ workspace 'travel.places'");
     assert!(fails(&mut g, "set k 1").contains("viewer role is read-only"));
     assert!(fails(&mut g, "eval 'return 1'").contains("viewer role is read-only"));
     assert!(fails(&mut g, "compact").contains("viewer role is read-only"));
     ok(&mut admin, r#"modify user "guest" role "editor""#);
+    ok(&mut admin, r#"grant write on travel.places to "guest""#);
     ok(&mut g, "auth guest g");
     ok(&mut g, "set k 1");
     ok(&mut admin, r#"revoke write from "guest""#);
@@ -706,6 +725,133 @@ fn users_roles_and_workspaces() {
     assert!(ok(&mut admin, "audit failed-logins").contains("login (wrong password)"));
     assert!(ok(&mut admin, r#"audit since "2020-01-01""#).lines().count() > 5);
     assert_eq!(ok(&mut admin, r#"audit since "2999-01-01""#), "No audit entries.");
+}
+
+#[test]
+fn projects_group_workspaces_and_grants_name_them() {
+    let dir = TempDir::new("projects");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "project create travel");
+    ok(&mut admin, "project create school");
+    assert!(fails(&mut admin, "project create travel").contains("already exists"));
+    assert!(fails(&mut admin, "project create b.a").contains("project names may only contain"));
+    assert!(fails(&mut admin, "workspace create shop.places").contains("project 'shop' does not exist"));
+    assert!(fails(&mut admin, "workspace create a.b.c").contains("workspace names may only contain"));
+    for w in ["travel.places", "travel.cache", "school.places"] {
+        ok(&mut admin, &format!("workspace create {w}"));
+    }
+
+    // The same name in two projects: two workspaces, nothing shared.
+    ok(&mut admin, "workspace switch travel.places");
+    ok(&mut admin, r#"set place:1 {"name": "Goma"}"#);
+    ok(&mut admin, "workspace switch school.places");
+    assert_eq!(ok(&mut admin, "get place:1"), "place:1: (nil)");
+    let travel = ok(&mut admin, "workspace list travel");
+    assert!(
+        travel.contains("travel.places") && travel.contains("travel.cache") && !travel.contains("school.places"),
+        "{travel}"
+    );
+
+    // One command creates the account and gives what it may reach.
+    assert_eq!(
+        ok(
+            &mut admin,
+            r#"create user "app" identified by "pw" grant write on travel.*, school.places grant read on default default workspace travel.places"#
+        ),
+        "User 'app' created with role [editor]: read default, write school.places, write travel.*."
+    );
+    assert!(
+        ok(&mut admin, "users").contains("default=read, school.places=write, travel.*=write (default: travel.places)")
+    );
+    assert!(fails(&mut admin, r#"create user "x" identified by "y" grant write on shop.*"#)
+        .contains("project 'shop' does not exist"));
+    assert!(fails(&mut admin, r#"create user "x" identified by "y" grant write on travel.nowhere"#)
+        .contains("does not exist"));
+    assert!(fails(&mut admin, r#"create user "x" identified by "y" grant write on a.b.c"#).contains("is not a scope"));
+    assert!(fails(&mut admin, r#"grant write on travel.* school.* to "app""#).contains("Usage"));
+    ok(&mut admin, "config set auth_required true");
+
+    let mut app = Session::new(inst.clone(), false, None);
+    ok(&mut app, "auth app pw");
+    assert_eq!(ok(&mut app, "whoami"), "app (editor) @ workspace 'travel.places'");
+    assert_eq!(ok(&mut app, "get place:1"), r#"place:1: {"name":"Goma"} [object]"#);
+    ok(&mut app, "workspace switch school.places");
+    ok(&mut app, "set paid 1");
+    // user@workspace logs in straight into that workspace, as Redis URLs can say.
+    let mut direct = Session::new(inst.clone(), false, None);
+    ok(&mut direct, "auth app@school.places pw");
+    assert_eq!(ok(&mut direct, "get paid"), "paid: 1 [number]");
+    let mut lost = Session::new(inst.clone(), false, None);
+    assert!(fails(&mut lost, "auth app@travel.nowhere pw").contains("does not exist"));
+    assert!(fails(&mut lost, "whoami").contains("authentication required"));
+    assert!(ok(&mut app, "project list").contains("travel               2 workspace(s): cache, places"));
+    // A grant on a whole project covers its workspaces created later.
+    ok(&mut admin, "workspace create travel.logs");
+    ok(&mut app, "workspace switch travel.logs");
+    ok(&mut app, "set line 1");
+    // Grants on everything named places, in every project.
+    ok(&mut admin, r#"create user "reader" identified by "pw" role viewer grant read on *.places"#);
+    let mut r = Session::new(inst.clone(), false, None);
+    ok(&mut r, "auth reader pw");
+    assert!(ok(&mut r, "whoami").contains("in no workspace"));
+    let list = ok(&mut r, "workspace list");
+    assert!(list.contains("travel.places") && list.contains("school.places") && !list.contains("cache"), "{list}");
+
+    // A workspace moves into a project; its data and grants follow it.
+    ok(&mut admin, "workspace create old_places");
+    ok(&mut admin, "workspace switch old_places");
+    ok(&mut admin, "set kept 1");
+    ok(&mut admin, r#"grant read on old_places to "reader""#);
+    assert!(fails(&mut admin, "workspace move old_places to travel.archive").contains("the workspace you are in"));
+    ok(&mut admin, "workspace switch default");
+    ok(&mut r, "workspace switch old_places");
+    assert!(fails(&mut admin, "workspace move old_places to travel.archive").contains("is in use"));
+    ok(&mut r, "workspace switch travel.places");
+    assert!(fails(&mut admin, "workspace move old_places to shop.archive").contains("project 'shop' does not exist"));
+    assert!(fails(&mut admin, "workspace move old_places to travel.places").contains("already exists"));
+    ok(&mut admin, "workspace move old_places to travel.archive");
+    ok(&mut r, "workspace switch travel.archive");
+    assert_eq!(ok(&mut r, "get kept"), "kept: 1 [number]");
+    assert!(fails(&mut r, "workspace switch old_places").contains("does not exist"));
+    assert!(ok(&mut admin, "users").contains("*.places=read, travel.archive=read"));
+
+    // A project is removed once it is empty.
+    assert!(fails(&mut admin, "project remove school").contains("still holds school.places"));
+    ok(&mut admin, "workspace remove school.places");
+    ok(&mut admin, "project remove school");
+    assert!(!ok(&mut admin, "project list").contains("school"));
+    let audit = ok(&mut admin, "audit last 100");
+    assert!(audit.contains("project create travel") && audit.contains("workspace move old_places to travel.archive"));
+}
+
+#[test]
+fn accounts_from_before_2_0_keep_their_personal_workspace() {
+    let dir = TempDir::new("model_migration");
+    {
+        let inst = instance(&dir);
+        let mut admin = Session::new(inst.clone(), true, None);
+        ok(&mut admin, r#"create user "old" identified by "pw""#);
+        // As 1.x left it: a workspace u_old, reached without a grant, and no model in the account.
+        inst.create_workspace("u_old", None).unwrap();
+        ok(&mut admin, "workspace switch u_old");
+        ok(&mut admin, "set mine 1");
+        let (value, _) = inst.system.get("user:old").unwrap().unwrap();
+        let kivadb::value::Value::Doc(mut doc) = value else { panic!("an account is a document") };
+        doc.as_object_mut().unwrap().remove("model");
+        doc.as_object_mut().unwrap().remove("default_workspace");
+        inst.system.put("user:old", &kivadb::value::Value::Doc(doc), 0, false).unwrap();
+        drop(admin);
+        inst.shutdown();
+    }
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), false, None);
+    ok(&mut s, "auth old pw");
+    assert_eq!(ok(&mut s, "whoami"), "old (editor) @ workspace 'u_old'");
+    assert_eq!(ok(&mut s, "get mine"), "mine: 1 [number]");
+    ok(&mut s, "set more 2");
+    let mut admin = Session::new(inst, true, None);
+    assert!(ok(&mut admin, "users").contains("u_old=write (default: u_old)"));
 }
 
 #[test]

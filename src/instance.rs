@@ -198,6 +198,9 @@ pub struct Instance {
     pub config: RwLock<Config>,
     /// Hidden database holding users, stored scripts and triggers.
     pub system: Arc<Engine>,
+    /// An empty store, the engine of a session that is in no workspace:
+    /// every command on data is refused before it, so it stays empty.
+    pub nowhere: Arc<Engine>,
     /// Encryption at rest, for every workspace and the system database.
     pub keys: Option<Arc<crate::crypt::Keys>>,
     engines: Mutex<HashMap<String, Arc<Engine>>>,
@@ -251,12 +254,18 @@ impl Instance {
             },
         )?;
         auth::ensure_admin(&system)?;
+        auth::migrate_personal_workspaces(&system, |w| config.workspace_dir(w).is_some())?;
+        let nowhere = Engine::open(
+            home.join("system").join("nowhere.kiva"),
+            EngineOptions { keys: keys.clone(), require_encryption, ..Default::default() },
+        )?;
         let threads = config.get_u64("server", "threads") as usize;
 
         let inst = Arc::new_cyclic(|weak| Instance {
             home: home.to_path_buf(),
             config: RwLock::new(config),
             system,
+            nowhere,
             keys,
             engines: Mutex::new(HashMap::new()),
             pubsub: PubSub::default(),
@@ -385,13 +394,16 @@ impl Instance {
         out
     }
 
+    /// Names of the workspaces, `default` first.
+    pub fn workspace_names(&self) -> Vec<String> {
+        self.workspaces().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// Registers a workspace. A name such as `travel.places` puts it in the
+    /// project `travel`; the commands check that the project exists, not this
+    /// (a replica registers the master's workspaces before their projects).
     pub fn create_workspace(&self, name: &str, dir: Option<&str>) -> Result<PathBuf> {
-        let valid = !name.is_empty()
-            && name.len() <= 64
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
-        if !valid {
-            return Err(KivaError::Invalid("workspace names may only contain letters, digits, '_' and '-'".into()));
-        }
+        check_workspace_name(name)?;
         if self.cfg().workspace_dir(name).is_some() {
             return Err(KivaError::Exists(format!("workspace '{name}' already exists")));
         }
@@ -438,7 +450,91 @@ impl Instance {
             .clone()
     }
 
-    /// Makes sure a user's personal workspace is registered.
+    /// Gives a workspace another name, such as `places_travel` to `travel.places`
+    /// (into a project). Its files stay where they are, and the grants that
+    /// named it follow it. Refused while a session or a script is in it.
+    pub fn rename_workspace(&self, from: &str, to: &str) -> Result<()> {
+        if from == "default" || to == "default" {
+            return Err(KivaError::Invalid("the default workspace keeps its name".into()));
+        }
+        check_workspace_name(to)?;
+        let dir = self
+            .cfg()
+            .workspace_dir(from)
+            .ok_or_else(|| KivaError::NotFound(format!("workspace '{from}' does not exist")))?;
+        if self.cfg().workspace_dir(to).is_some() {
+            return Err(KivaError::Exists(format!("workspace '{to}' already exists")));
+        }
+        {
+            let mut map = self.engines.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(engine) = map.get(from) {
+                // The map holds one reference; any other is a session in it.
+                if Arc::strong_count(engine) > 1 {
+                    return Err(KivaError::Invalid(format!(
+                        "workspace '{from}' is in use: try again when the sessions in it have left"
+                    )));
+                }
+            }
+            // Closed now: its listeners report changes under the old name.
+            map.remove(from);
+            let mut cfg = self.cfg_mut();
+            cfg.set("workspaces", to, &dir.display().to_string())?;
+            cfg.remove("workspaces", from)?;
+        }
+        self.semantic.reset(from);
+        for mut user in auth::list_users(&self.system)? {
+            if let Some(p) = user.grants.remove(from) {
+                user.grants.insert(to.to_string(), p);
+                if user.default_workspace.as_deref() == Some(from) {
+                    user.default_workspace = Some(to.to_string());
+                }
+                auth::save_user(&self.system, &user)?;
+            } else if user.default_workspace.as_deref() == Some(from) {
+                user.default_workspace = Some(to.to_string());
+                auth::save_user(&self.system, &user)?;
+            }
+        }
+        // Replicas copy the workspaces again under their new names.
+        self.repl.drop_replicas();
+        Ok(())
+    }
+
+    /// The projects, in alphabetical order. They are stored in the system
+    /// database, so replicas know them too.
+    pub fn projects(&self) -> Vec<String> {
+        self.system.keys_matching("project:*", 0).into_iter().map(|(k, _)| k["project:".len()..].to_string()).collect()
+    }
+
+    pub fn project_exists(&self, name: &str) -> bool {
+        self.system.get(&format!("project:{name}")).ok().flatten().is_some()
+    }
+
+    pub fn create_project(&self, name: &str) -> Result<()> {
+        if !auth::valid_name_part(name) {
+            return Err(KivaError::Invalid("project names may only contain letters, digits, '_' and '-'".into()));
+        }
+        if self.project_exists(name) {
+            return Err(KivaError::Exists(format!("project '{name}' already exists")));
+        }
+        let doc = serde_json::json!({ "created": now_secs() });
+        self.system.put(&format!("project:{name}"), &Value::Doc(doc), 0, false)?;
+        Ok(())
+    }
+
+    /// Removes an empty project. Returns whether it existed.
+    pub fn remove_project(&self, name: &str) -> Result<bool> {
+        let inside: Vec<String> =
+            self.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name)).collect();
+        if !inside.is_empty() {
+            return Err(KivaError::Invalid(format!(
+                "project '{name}' still holds {}: move or remove them first",
+                inside.join(", ")
+            )));
+        }
+        self.system.delete(&format!("project:{name}"))
+    }
+
+    /// Makes sure a workspace is registered.
     pub fn ensure_workspace(&self, name: &str) -> Result<()> {
         if self.cfg().workspace_dir(name).is_none() {
             self.create_workspace(name, None)?;
@@ -557,4 +653,16 @@ impl Instance {
         let _ = fs::remove_file(self.home.join("instance.port"));
         let _ = fs::remove_file(self.home.join("instance.pid"));
     }
+}
+
+/// Refuses a name that is not `<workspace>` or `<project>.<workspace>`.
+pub fn check_workspace_name(name: &str) -> Result<()> {
+    if auth::valid_workspace_name(name) {
+        return Ok(());
+    }
+    Err(KivaError::Invalid(
+        "workspace names may only contain letters, digits, '_' and '-', with one '.' after a project name \
+         (travel.places)"
+            .into(),
+    ))
 }

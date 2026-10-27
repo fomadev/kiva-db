@@ -78,7 +78,8 @@ jobs:
         run: |
           BIN="$GITHUB_WORKSPACE/target/debug/kivadb"
           DATA="$RUNNER_TEMP/kivadb-redis"
-          "$BIN" --home "$DATA" -e 'modify user "kiva" password "ci-pw"' -e 'config set auth_required true'
+          "$BIN" --home "$DATA" -e 'modify user "kiva" password "ci-pw"' -e 'config set auth_required true' \
+            -e 'project create shop' -e 'workspace create shop.places'
           "$BIN" --home "$DATA" start --port 2990 --no-http --resp-port 6390
           cd tests/redis-clients
           npm install --no-audit --no-fund

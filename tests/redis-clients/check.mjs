@@ -301,6 +301,33 @@ await step("ioredis: XREAD BLOCK waits for the next entry", async () => {
   reader.disconnect();
 });
 
+// --- A workspace by its name (project shop, created before the check) -------
+const named = { host: "127.0.0.1", port, username: "kiva", password: process.argv[3] };
+await step("ioredis: user kiva@shop.places opens that workspace, again after a reconnection", async () => {
+  const shop = new Redis(`redis://kiva%40shop.places:${process.argv[3]}@127.0.0.1:${port}`);
+  await shop.set("place:1", "Goma");
+  assert.equal(await io.get("place:1"), null);
+  // A new connection sends SELECT again.
+  shop.disconnect(true);
+  await new Promise((r) => shop.once("ready", r));
+  assert.equal(await shop.get("place:1"), "Goma");
+  shop.disconnect();
+});
+await step("node-redis: database \"shop.places\" opens that workspace", async () => {
+  const shop = createClient({ socket: { host: "127.0.0.1", port }, username: "kiva", password: process.argv[3], database: "shop.places" });
+  await shop.connect();
+  assert.equal(await shop.get("place:1"), "Goma");
+  await shop.quit();
+});
+await step("ioredis: SELECT shop.places, and an unknown workspace refused with NOPERM", async () => {
+  const other = new Redis({ ...named, lazyConnect: true });
+  await other.connect();
+  assert.equal(await other.select("shop.places"), "OK");
+  assert.equal(await other.get("place:1"), "Goma");
+  await assert.rejects(other.select("shop.nowhere"), /NOPERM/);
+  other.disconnect();
+});
+
 await pay.quit();
 io.disconnect();
 console.log(`\n${passed} checks passed with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.`);
