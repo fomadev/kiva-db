@@ -129,10 +129,35 @@ jobs:
           name: kivadb-${{ matrix.os-name }}-${{ matrix.arch }}
           path: ${{ env.ASSET }}
 
+  notes:
+    name: Release notes
+    # From the changelog, as soon as the tag is pushed: a version missing
+    # from CHANGELOG.md stops the release before anything is published.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code, with the tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Write the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node .github/release-notes.mjs "${{ github.ref_name }}" > release-notes.md
+          cat release-notes.md
+
+      - name: Keep them for the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
   release:
     name: GitHub release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, notes]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -140,8 +165,14 @@ jobs:
       - name: Download the executables
         uses: actions/download-artifact@v4
         with:
+          pattern: kivadb-*
           path: dist
           merge-multiple: true
+
+      - name: Download the notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
 
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
@@ -151,12 +182,12 @@ jobs:
         with:
           name: KivaDB ${{ github.ref_name }}
           files: dist/*
-          generate_release_notes: true
+          body_path: release-notes.md
 
   docker:
     name: Docker Hub image
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, notes]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
