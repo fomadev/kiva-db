@@ -888,6 +888,9 @@ type Listener = Box<dyn Fn(&Op) + Send + Sync>;
 type PutOff = (Arc<Engine>, (u64, u64));
 
 thread_local! {
+    /// Sections of tuning that ran while this thread last waited for an
+    /// engine's lock (see [`Engine::sections_waited`]).
+    static SECTIONS_WAITED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// The durable writes of this thread whose disk sync is put off, while
     /// [`put_off_syncs`] runs.
     static PUT_OFF: RefCell<Option<Vec<PutOff>>> = const { RefCell::new(None) };
@@ -976,8 +979,12 @@ pub struct Engine {
     disk_syncs: AtomicU64,
     /// An HNSW index is being tuned again in the background (`auto`).
     tuning: AtomicBool,
-    /// Threads waiting for `inner` (see [`Engine::let_waiters_in`]).
+    /// Threads waiting for `inner`, and how many of the waiters got it so far
+    /// (see [`Engine::let_waiters_in`]).
     lock_waiters: AtomicU64,
+    lock_granted: AtomicU64,
+    /// Sections of tuning run under the lock, one search each.
+    tune_sections: AtomicU64,
     _lock: File,
 }
 
@@ -1947,6 +1954,8 @@ impl Engine {
             disk_syncs: AtomicU64::new(0),
             tuning: AtomicBool::new(false),
             lock_waiters: AtomicU64::new(0),
+            lock_granted: AtomicU64::new(0),
+            tune_sections: AtomicU64::new(0),
             _lock: lock_file,
         });
         if opts.background {
@@ -1959,12 +1968,18 @@ impl Engine {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         match self.inner.try_lock() {
-            Ok(inner) => inner,
+            Ok(inner) => {
+                SECTIONS_WAITED.with(|w| w.set(0));
+                inner
+            }
             Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {
+                let sections = self.tune_sections.load(Ordering::Acquire);
                 self.lock_waiters.fetch_add(1, Ordering::AcqRel);
                 let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                self.lock_granted.fetch_add(1, Ordering::AcqRel);
                 self.lock_waiters.fetch_sub(1, Ordering::AcqRel);
+                SECTIONS_WAITED.with(|w| w.set(self.tune_sections.load(Ordering::Acquire) - sections));
                 inner
             }
         }
@@ -1973,12 +1988,32 @@ impl Engine {
     /// For a long task that takes the lock again and again (tuning): lets
     /// the threads waiting for it go first. The lock is not fair, and the
     /// thread that just released it would otherwise often take it back
-    /// before them, for seconds.
+    /// before them, for seconds. Waits until as many waiters as there are now
+    /// have had it: the lock is free meanwhile, so each of them gets it, and
+    /// those who arrive later do not hold the task back.
     fn let_waiters_in(&self) {
-        let until = Instant::now() + Duration::from_millis(20);
-        while self.lock_waiters.load(Ordering::Acquire) > 0 && Instant::now() < until {
+        let waiting = self.lock_waiters.load(Ordering::Acquire);
+        if waiting == 0 {
+            return;
+        }
+        let target = self.lock_granted.load(Ordering::Acquire) + waiting;
+        while self.lock_granted.load(Ordering::Acquire) < target {
             std::thread::yield_now();
         }
+    }
+
+    /// Sections of tuning run so far, each one search under the lock.
+    pub fn tune_sections(&self) -> u64 {
+        self.tune_sections.load(Ordering::Acquire)
+    }
+
+    /// How many sections of tuning began while this thread last waited for
+    /// the lock of an engine: what a write waits for, counted whatever the
+    /// load of the machine. The section running when it began waiting is not
+    /// counted; one more is when it arrives just as the tuner lets the
+    /// waiters in.
+    pub fn sections_waited() -> u64 {
+        SECTIONS_WAITED.with(|w| w.get())
     }
 
     pub fn path(&self) -> &Path {
@@ -3621,6 +3656,7 @@ impl Engine {
         for (own, q) in &queries {
             self.let_waiters_in();
             let inner = self.lock();
+            self.tune_sections.fetch_add(1, Ordering::AcqRel);
             let index = &inner.vecs[Self::tunable(&inner, pattern, field)?];
             let started = Instant::now();
             let scored = index.scores(&index.pattern, q, |key| Some(key) != own.as_deref());
@@ -3635,6 +3671,7 @@ impl Engine {
             for ((own, q), truth) in queries.iter().zip(&truth) {
                 self.let_waiters_in();
                 let inner = self.lock();
+                self.tune_sections.fetch_add(1, Ordering::AcqRel);
                 let g = inner.vecs[Self::tunable(&inner, pattern, field)?].graph().expect("graph index");
                 let started = Instant::now();
                 let found = g.search_hiding(&q.vector, k, ef, |_| true, own.as_deref());
