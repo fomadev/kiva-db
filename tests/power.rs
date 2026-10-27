@@ -1110,11 +1110,25 @@ fn redis_numbered_databases_are_workspaces() {
     ok(&mut admin, r#"grant write on workspace "db2" to "pay""#);
     assert_eq!(p.cmd(&["SELECT", "2"]), ok_reply());
     assert_eq!(p.cmd(&["GET", "where"]), b("two"));
-    // Database 0 is the user's own workspace.
+    // Database 0 is where the user arrived: no workspace for an account that had no grant then.
     assert_eq!(p.cmd(&["SELECT", "0"]), ok_reply());
-    assert_eq!(p.cmd(&["GET", "where"]), R::B(None));
+    assert!(matches!(p.cmd(&["GET", "where"]), R::E(e) if e.contains("no workspace")));
+
+    // A workspace by its name, in a project.
+    ok(&mut admin, "project create school");
+    ok(&mut admin, "workspace create school.places");
+    assert!(
+        matches!(p.cmd(&["SELECT", "school.places"]), R::E(e) if e.starts_with("NOPERM") && e.contains("grant write on school.places"))
+    );
+    ok(&mut admin, r#"grant write on school.* to "pay""#);
+    assert_eq!(p.cmd(&["SELECT", "school.places"]), ok_reply());
     p.cmd(&["SET", "mine", "1"]);
-    assert_eq!(ok(&mut admin, "workspace switch u_pay"), "Switched to workspace 'u_pay' (1 keys).");
+    assert_eq!(ok(&mut admin, "workspace switch school.places"), "Switched to workspace 'school.places' (1 keys).");
+    // With a default workspace, a new connection lands in it.
+    ok(&mut admin, r#"modify user "pay" default workspace school.places"#);
+    let mut q = Redis::connect(port);
+    assert_eq!(q.cmd(&["AUTH", "pay", "paypw"]), ok_reply());
+    assert_eq!(q.cmd(&["GET", "mine"]), b("1"));
 }
 
 #[test]
@@ -1214,7 +1228,7 @@ fn redis_scripts_obey_roles() {
     let dir = TempDir::new("resp_eval_roles");
     let inst = instance(&dir);
     let mut admin = Session::new(inst.clone(), true, None);
-    ok(&mut admin, r#"create user "eve" identified by "evepw" role viewer"#);
+    ok(&mut admin, r#"create user "eve" identified by "evepw" role viewer grant read on default"#);
     let port = resp::start_resp(&inst, "127.0.0.1", 0).unwrap();
     let mut v = Redis::connect(port);
     assert_eq!(v.cmd(&["AUTH", "eve", "evepw"]), ok_reply());

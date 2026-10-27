@@ -25,9 +25,14 @@ impl Session {
             "auth" | "login" => self.cmd_auth(a, out),
             "whoami" => {
                 let role = self.role().map(|r| r.name()).unwrap_or("-");
-                out.say(format!("{} ({role}) @ workspace '{}'", self.user_name(), self.ws));
+                if self.ws_priv.is_none() {
+                    out.say(format!("{} ({role}), in no workspace", self.user_name()));
+                } else {
+                    out.say(format!("{} ({role}) @ workspace '{}'", self.user_name(), self.ws));
+                }
                 Ok(())
             }
+            "project" => self.cmd_project(a, out),
             "users" => self.cmd_users(out),
             "create" => self.cmd_create(a, out),
             "tune" => self.cmd_tune(a, out),
@@ -200,16 +205,24 @@ impl Session {
     }
 
     fn cmd_users(&mut self, out: &mut Out) -> R {
-        out.say(format!(" {:<20} | {:<7} | {:<19} | WORKSPACE GRANTS", "USER", "ROLE", "CREATED"));
+        out.say(format!(" {:<20} | {:<7} | {:<19} | GRANTS", "USER", "ROLE", "CREATED"));
         out.say("-".repeat(78));
         for u in auth::list_users(&self.inst.system)? {
-            let grants = if u.role == Role::Admin {
+            let mut grants = if u.role == Role::Admin {
                 "all (admin)".to_string()
+            } else if u.grants.is_empty() {
+                "none".to_string()
             } else {
-                let mut g = vec![format!("{}=write", u.home_workspace())];
-                g.extend(u.grants.iter().map(|(w, p)| format!("{}={}", if w == "*" { "all" } else { w }, p.name())));
+                let g: Vec<String> = u
+                    .grants
+                    .iter()
+                    .map(|(w, p)| format!("{}={}", if w == "*" { "*.*" } else { w }, p.name()))
+                    .collect();
                 g.join(", ")
             };
+            if let Some(w) = &u.default_workspace {
+                grants.push_str(&format!(" (default: {w})"));
+            }
             out.say(format!(" {:<20} | {:<7} | {:<19} | {grants}", u.name, u.role.name(), fmt_time(u.created)));
         }
         Ok(())
@@ -218,21 +231,61 @@ impl Session {
     fn cmd_create(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
         if c.eat("user") {
-            const USAGE: &str = "create user \"<name>\" identified by \"<password>\" [role admin|editor|viewer]";
+            const USAGE: &str = "create user \"<name>\" identified by \"<password>\" [role admin|editor|viewer] \
+                                 [grant read|write on <scope>[, <scope>...]] [default workspace <name>]";
             let name = word(c.next(), "a user name")?;
             if !(c.eat("identified") && c.eat("by")) {
                 return Err(format!("Usage: {USAGE}"));
             }
             let password = word(c.next(), "a password")?;
-            let role = if c.eat("role") {
-                Role::from_name(&word(c.next(), "a role")?).ok_or("role must be admin, editor or viewer")?
+            let mut role = Role::Editor;
+            let mut grants: Vec<(Vec<String>, Priv)> = Vec::new();
+            let mut default_ws = None;
+            while c.peek().is_some() {
+                if c.eat("role") {
+                    role = Role::from_name(&word(c.next(), "a role")?).ok_or("role must be admin, editor or viewer")?;
+                } else if c.eat("grant") {
+                    let p = match word(c.next(), "read or write")?.to_ascii_lowercase().as_str() {
+                        "read" => Priv::Read,
+                        "write" => Priv::Write,
+                        _ => return Err(format!("a grant is read or write.\nUsage: {USAGE}")),
+                    };
+                    if !c.eat("on") {
+                        return Err(format!("Usage: {USAGE}"));
+                    }
+                    grants.push((self.parse_scopes(&mut c, true)?, p));
+                } else if c.eat("default") {
+                    if !c.eat("workspace") {
+                        return Err(format!("Usage: {USAGE}"));
+                    }
+                    default_ws = Some(self.existing_workspace(c.next())?);
+                } else {
+                    c.finish(USAGE)?;
+                }
+            }
+            let mut user = auth::create_user(&self.inst.system, &name, &password, role)?;
+            for (scopes, p) in &grants {
+                for s in scopes {
+                    user.grants.insert(s.clone(), *p);
+                }
+            }
+            user.default_workspace = default_ws;
+            if !grants.is_empty() || user.default_workspace.is_some() {
+                auth::save_user(&self.inst.system, &user)?;
+            }
+            let reach = if role == Role::Admin {
+                "every workspace".to_string()
+            } else if user.grants.is_empty() {
+                "no workspace yet (give it some with grant)".to_string()
             } else {
-                Role::Editor
+                let g: Vec<String> = user
+                    .grants
+                    .iter()
+                    .map(|(s, p)| format!("{} {}", p.name(), if s == "*" { "*.*" } else { s }))
+                    .collect();
+                g.join(", ")
             };
-            c.finish(USAGE)?;
-            let user = auth::create_user(&self.inst.system, &name, &password, role)?;
-            self.inst.ensure_workspace(&user.home_workspace())?;
-            out.say(format!("User '{name}' created with role [{}].", role.name()));
+            out.say(format!("User '{name}' created with role [{}]: {reach}.", role.name()));
             Ok(())
         } else if c.eat("vector") {
             const USAGE: &str =
@@ -542,46 +595,76 @@ impl Session {
         }
     }
 
-    /// `grant <priv> on all|workspace "<w>" to "<user>"` and the matching `revoke ... from`.
+    /// After `on`: one or more scopes separated by commas (`travel.*,
+    /// school.places`), or the older forms `all` and `workspace "<w>"`. Each
+    /// workspace named must exist, and each project named too.
+    fn parse_scopes(&self, c: &mut Cur, must_exist: bool) -> Result<Vec<String>, String> {
+        let mut scopes = Vec::new();
+        loop {
+            let scope = if c.eat("workspace") {
+                auth::normalize_scope(&word(c.next(), "a workspace name")?)?
+            } else if c.eat("project") {
+                let p = word(c.next(), "a project name")?;
+                auth::normalize_scope(&format!("{p}.*"))?
+            } else {
+                auth::normalize_scope(&word(c.next(), "a scope (travel.places, travel.*, *.*)")?)?
+            };
+            // A revoke may name what no longer exists.
+            if must_exist {
+                if !scope.contains('*') && self.inst.cfg().workspace_dir(&scope).is_none() {
+                    return Err(format!("workspace '{scope}' does not exist."));
+                }
+                if let Some(p) = auth::project_of(&scope).filter(|p| *p != "*") {
+                    if !self.inst.project_exists(p) {
+                        return Err(format!("project '{p}' does not exist (create it with: project create {p})."));
+                    }
+                }
+            }
+            scopes.push(scope);
+            if !c.peek().is_some_and(|t| t.kind == crate::lexer::Kind::Comma) {
+                return Ok(scopes);
+            }
+            c.next();
+        }
+    }
+
+    /// The name of a registered workspace, or an error naming it.
+    fn existing_workspace(&self, t: Option<&Token>) -> Result<String, String> {
+        let w = word(t, "a workspace name")?;
+        if self.inst.cfg().workspace_dir(&w).is_none() {
+            return Err(format!("workspace '{w}' does not exist."));
+        }
+        Ok(w)
+    }
+
+    /// `grant <priv> on <scope>[, <scope>...] to "<user>"` and the matching `revoke ... from`.
     fn cmd_grant(&mut self, a: &[Token], out: &mut Out, grant: bool) -> R {
         let usage = if grant {
-            "grant read|write|admin on all|workspace \"<w>\" to \"<user>\""
+            "grant read|write|admin on <scope>[, <scope>...] to \"<user>\"  (scopes: travel.places, travel.*, *.places, *.*)"
         } else {
-            "revoke read|write|admin [on all|workspace \"<w>\"] from \"<user>\""
+            "revoke read|write|admin [on <scope>[, <scope>...]] from \"<user>\""
         };
         let mut c = Cur::new(a);
         c.eat("privileges");
         let privilege = word(c.next(), "a privilege").map_err(|e| format!("{e}\nUsage: {usage}"))?.to_ascii_lowercase();
-        // None = no scope given, Some("*") = all workspaces.
-        let mut scope: Option<String> = None;
-        if c.eat("on") {
-            if c.eat("all") {
-                scope = Some("*".into());
-            } else if c.eat("workspace") {
-                let w = word(c.next(), "a workspace name")?;
-                if self.inst.cfg().workspace_dir(&w).is_none() {
-                    return Err(format!("workspace '{w}' does not exist."));
-                }
-                scope = Some(w);
-            } else {
-                return Err(format!("Usage: {usage}"));
-            }
-        }
+        // None = no scope given.
+        let scopes = if c.eat("on") { Some(self.parse_scopes(&mut c, grant)?) } else { None };
         if !c.eat(if grant { "to" } else { "from" }) {
             return Err(format!("Usage: {usage}"));
         }
         let name = word(c.next(), "a user name")?;
         c.finish(usage)?;
-        if grant && scope.is_none() {
+        if grant && scopes.is_none() && privilege != "admin" {
             return Err(format!("a grant needs a scope.\nUsage: {usage}"));
         }
         let mut user = auth::get_user(&self.inst.system, &name)?.ok_or(format!("user '{name}' does not exist."))?;
         if name == auth::DEFAULT_ADMIN {
             return Err("the privileges of the built-in kiva account cannot be changed.".into());
         }
-        let where_ = match scope.as_deref() {
-            Some("*") | None => "all workspaces".to_string(),
-            Some(w) => format!("workspace '{w}'"),
+        let where_ = match scopes.as_deref() {
+            None => "all workspaces".to_string(),
+            Some(s) if s == ["*"] => "all workspaces".to_string(),
+            Some(s) => s.join(", "),
         };
         match (privilege.as_str(), grant) {
             ("admin", true) => {
@@ -596,7 +679,9 @@ impl Session {
             }
             ("read" | "write", true) => {
                 let p = if privilege == "write" { Priv::Write } else { Priv::Read };
-                user.grants.insert(scope.clone().unwrap(), p);
+                for s in scopes.iter().flatten() {
+                    user.grants.insert(s.clone(), p);
+                }
                 // Write access is meaningless for a read-only role.
                 if p == Priv::Write && user.role == Role::Viewer {
                     user.role = Role::Editor;
@@ -604,10 +689,12 @@ impl Session {
                 out.say(format!("Granted: {privilege} on {where_} to '{name}'."));
             }
             ("write", false) => {
-                match &scope {
-                    Some(s) => {
-                        if let Some(p) = user.grants.get_mut(s) {
-                            *p = Priv::Read;
+                match &scopes {
+                    Some(scopes) => {
+                        for s in scopes {
+                            if let Some(p) = user.grants.get_mut(s) {
+                                *p = Priv::Read;
+                            }
                         }
                     }
                     None => {
@@ -621,9 +708,11 @@ impl Session {
                 out.say(format!("Revoked: write on {where_} from '{name}'."));
             }
             ("read", false) => {
-                match &scope {
-                    Some(s) => {
-                        user.grants.remove(s);
+                match &scopes {
+                    Some(scopes) => {
+                        for s in scopes {
+                            user.grants.remove(s);
+                        }
                     }
                     None => user.grants.clear(),
                 }
@@ -636,7 +725,9 @@ impl Session {
     }
 
     fn cmd_modify(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: modify user \"<name>\" password \"<new>\" | modify user \"<name>\" role \"<role>\"";
+        const USAGE: &str =
+            "Usage: modify user \"<name>\" password \"<new>\" | modify user \"<name>\" role \"<role>\" | \
+                             modify user \"<name>\" default workspace <name>|none";
         let mut c = Cur::new(a);
         if !c.eat("user") {
             return Err(USAGE.into());
@@ -665,8 +756,25 @@ impl Session {
             }
             user.role = role;
             auth::save_user(&self.inst.system, &user)?;
-            self.inst.ensure_workspace(&user.home_workspace())?;
             out.say(format!("Role of '{name}' set to [{}].", role.name()));
+        } else if c.eat("default") {
+            if !c.eat("workspace") {
+                return Err(USAGE.into());
+            }
+            self.check(Need::Admin)?;
+            let w = if c.peek().is_some_and(|t| t.is_kw("none")) {
+                c.next();
+                None
+            } else {
+                Some(self.existing_workspace(c.next())?)
+            };
+            c.finish(USAGE)?;
+            out.say(match &w {
+                Some(w) => format!("Default workspace of '{name}' set to '{w}'."),
+                None => format!("'{name}' has no default workspace any more."),
+            });
+            user.default_workspace = w;
+            auth::save_user(&self.inst.system, &user)?;
         } else {
             return Err(USAGE.into());
         }
@@ -762,14 +870,20 @@ impl Session {
     }
 
     fn cmd_workspace(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: workspace list | current | switch <name> | create <name> [path] | remove <name>";
+        const USAGE: &str = "Usage: workspace list [<project>] | current | switch <name> | create <name> [path] | \
+                             move <name> to <new name> | remove <name>";
         let mut c = Cur::new(a);
         if c.eat("list") {
+            let project = c.next().map(|t| t.text.clone());
+            c.finish(USAGE)?;
             let me = match (&self.user, self.role()) {
                 (Some(u), Some(r)) if r != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
                 _ => None,
             };
             for (name, path) in self.inst.workspaces() {
+                if project.is_some() && auth::project_of(&name) != project.as_deref() {
+                    continue;
+                }
                 let access = match &me {
                     Some(u) => match u.access(&name) {
                         Some(p) => p.name(),
@@ -782,7 +896,11 @@ impl Session {
             }
             Ok(())
         } else if c.eat("current") {
-            out.say(format!("{} ({})", self.ws, self.engine.path().display()));
+            if self.ws_priv.is_none() {
+                out.say("(no workspace)");
+            } else {
+                out.say(format!("{} ({})", self.ws, self.engine.path().display()));
+            }
             Ok(())
         } else if c.eat("switch") || c.eat("use") {
             let name = word(c.next(), "a workspace name")?;
@@ -794,8 +912,52 @@ impl Session {
             let name = word(c.next(), "a workspace name")?;
             let path = c.next().map(|t| t.text.clone());
             c.finish(USAGE)?;
+            let me = match &self.user {
+                Some(u) if u.role != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
+                _ => None,
+            };
+            crate::instance::check_workspace_name(&name)?;
+            if let Some(p) = auth::project_of(&name) {
+                if !self.inst.project_exists(p) {
+                    return Err(format!("project '{p}' does not exist (create it with: project create {p})."));
+                }
+            }
+            // Outside administrators, the project's managers create its workspaces, in its folder.
+            if let Some(u) = &me {
+                if !u.manages(&name) {
+                    return Err(match auth::project_of(&name) {
+                        Some(p) => format!(
+                            "creating a workspace in project '{p}' requires the admin role, or write access to \
+                             every workspace of it (grant write on {p}.*)"
+                        ),
+                        None => "creating a workspace outside a project requires the admin role".into(),
+                    });
+                }
+                if path.is_some() {
+                    return Err("only an administrator chooses the folder of a workspace".into());
+                }
+            }
             let dir = self.inst.create_workspace(&name, path.as_deref())?;
             out.say(format!("Workspace '{name}' created at {}.", dir.display()));
+            Ok(())
+        } else if c.eat("move") {
+            const MOVE: &str = "workspace move <name> to <new name>";
+            let from = word(c.next(), "a workspace name")?;
+            if !c.eat("to") {
+                return Err(format!("Usage: {MOVE}"));
+            }
+            let to = word(c.next(), "the new name")?;
+            c.finish(MOVE)?;
+            if from == self.ws {
+                return Err("you cannot move the workspace you are in.".into());
+            }
+            if let Some(p) = auth::project_of(&to) {
+                if !self.inst.project_exists(p) {
+                    return Err(format!("project '{p}' does not exist (create it with: project create {p})."));
+                }
+            }
+            self.inst.rename_workspace(&from, &to)?;
+            out.say(format!("Workspace '{from}' is now '{to}'. Its files did not move, and its grants followed it."));
             Ok(())
         } else if c.eat("remove") {
             let name = word(c.next(), "a workspace name")?;
@@ -810,6 +972,53 @@ impl Session {
                 return Err(format!("workspace '{name}' does not exist."));
             }
             out.say(format!("Workspace '{name}' unregistered. Its data files were left on disk."));
+            Ok(())
+        } else {
+            Err(USAGE.into())
+        }
+    }
+
+    /// `project list | create <name> | remove <name>`: projects group
+    /// workspaces (`travel.places`, `travel.cache`) under one name.
+    fn cmd_project(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "Usage: project list | create <name> | remove <name>";
+        let mut c = Cur::new(a);
+        if c.eat("list") || c.peek().is_none() {
+            c.finish(USAGE)?;
+            let me = match &self.user {
+                Some(u) if u.role != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
+                _ => None,
+            };
+            let names = self.inst.workspace_names();
+            for p in self.inst.projects() {
+                let inside: Vec<&String> = names
+                    .iter()
+                    .filter(|w| auth::project_of(w) == Some(p.as_str()))
+                    .filter(|w| me.as_ref().is_none_or(|u| u.access(w).is_some()))
+                    .collect();
+                // A user sees the projects where they can reach something.
+                if me.as_ref().is_some_and(|u| inside.is_empty() && !u.manages_project(&p)) {
+                    continue;
+                }
+                let list: Vec<&str> = inside.iter().map(|w| &w[p.len() + 1..]).collect();
+                out.say(format!(" {p:<20} {} workspace(s): {}", list.len(), list.join(", ")));
+            }
+            Ok(())
+        } else if c.eat("create") {
+            let name = word(c.next(), "a project name")?;
+            c.finish(USAGE)?;
+            self.inst.create_project(&name)?;
+            out.say(format!(
+                "Project '{name}' created. Its workspaces are named {name}.<name>: workspace create {name}.places"
+            ));
+            Ok(())
+        } else if c.eat("remove") {
+            let name = word(c.next(), "a project name")?;
+            c.finish(USAGE)?;
+            if !self.inst.remove_project(&name)? {
+                return Err(format!("project '{name}' does not exist."));
+            }
+            out.say(format!("Project '{name}' removed."));
             Ok(())
         } else {
             Err(USAGE.into())

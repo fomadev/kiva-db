@@ -136,14 +136,14 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
     let op = str_field(req, "op")?;
     match op {
         "whoami" => {
-            sess.check(Need::Read)?;
+            sess.check(Need::Login)?;
             let role = sess.role().unwrap_or(Role::Viewer);
             Ok(json!({
                 "version": VERSION,
                 "user": sess.user_name(),
                 "role": role.name(),
-                "workspace": sess.ws,
-                "access": sess.ws_priv.name(),
+                "workspace": if sess.ws_priv.is_some() { json!(sess.ws) } else { Json::Null },
+                "access": sess.ws_priv.map(|p| p.name()),
                 "can_write": sess.writable().is_ok(),
                 "auth_required": sess.inst.auth_required(),
                 "replica": sess.inst.repl.is_replica(),
@@ -407,7 +407,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                         "name": u.name,
                         "role": u.role.name(),
                         "created": u.created,
-                        "home": u.home_workspace(),
+                        "default_workspace": u.default_workspace,
                         "grants": grants,
                         "empty_password": u.has_empty_password(),
                         "builtin": u.name == auth::DEFAULT_ADMIN,
@@ -417,7 +417,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             Ok(json!({ "users": users }))
         }
         "workspaces" => {
-            sess.check(Need::Read)?;
+            sess.check(Need::Login)?;
             let me = match sess.role() {
                 Some(Role::Admin) | None => None,
                 Some(_) => auth::get_user(&sess.inst.system, sess.user_name())?,
@@ -431,7 +431,8 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                     },
                     None => "write",
                 };
-                list.push(json!({ "name": name, "path": path, "access": access, "current": name == sess.ws }));
+                let project = auth::project_of(&name).map(str::to_string);
+                list.push(json!({ "name": name, "project": project, "path": path, "access": access, "current": name == sess.ws }));
             }
             Ok(json!({ "workspaces": list }))
         }

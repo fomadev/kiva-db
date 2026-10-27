@@ -2184,10 +2184,51 @@ KivaDB forgets the workspace but does not delete its files; remove the folder yo
 
 ### 14.5 Things to know
 
-* Workspace names may contain letters, digits, `_` and `-`.
-* Creating and removing workspaces requires the admin role.
-* Each non-admin user also has a personal workspace ([section 16.4](#164-workspaces-and-grants)).
+* Workspace names may contain letters, digits, `_` and `-`, and one `.` after the name of a project (`travel.places`, [14.6](#146-projects)).
+* Creating and removing workspaces requires the admin role. In a project, the users who can write in all of it may create its workspaces too ([16.4](#164-workspaces-and-grants)).
+* A user reaches only the workspaces they were granted ([16.4](#164-workspaces-and-grants)); a new account reaches none.
 * Stored scripts, triggers and users are shared by all workspaces. Indexes belong to one workspace.
+
+### 14.6 Projects
+
+When one server holds several applications, their workspaces pile up: `places_travel`, `places_school`, `cache_travel`... A **project** groups the workspaces of one application under its name. A workspace in a project is written `<project>.<workspace>`, and two projects may each have a workspace of the same name: `travel.places` and `school.places` are two workspaces, with nothing in common.
+
+```text
+kiva> project create travel
+Project 'travel' created. Its workspaces are named travel.<name>: workspace create travel.places
+kiva> workspace create travel.places
+Workspace 'travel.places' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.places.
+kiva> workspace create travel.cache
+Workspace 'travel.cache' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.cache.
+kiva> project create school
+kiva> workspace create school.places
+kiva> project list
+ school               1 workspace(s): places
+ travel               2 workspace(s): cache, places
+kiva> workspace list travel
+   travel.cache         write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.cache
+   travel.places        write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.places
+```
+
+* A workspace is used like any other: `workspace switch travel.places`, `kivadb -w travel.places`, `?workspace=travel.places` over HTTP, `SELECT travel.places` or the login `app@travel.places` for Redis clients ([23.4](#234-logins-databases-roles)).
+* Projects are optional: `default` and the workspaces created without a project stay as they are.
+* A grant can name a whole project: `grant write on travel.* to "app"` covers `travel.places`, `travel.cache` and the workspaces created in `travel` later ([16.4](#164-workspaces-and-grants)).
+* `project create` and `project remove <name>` need the admin role. A project is removed only once it holds no workspace: move or remove them first. `project list` shows a user the projects where they can reach something.
+* Project names may contain letters, digits, `_` and `-`. Projects are kept in the system database, so replicas know them too.
+
+### 14.7 Renaming or moving a workspace
+
+`workspace move` gives a workspace another name, which also moves it into a project, out of one, or from one to another:
+
+```text
+kiva> workspace move places_travel to travel.places
+Workspace 'places_travel' is now 'travel.places'. Its files did not move, and its grants followed it.
+```
+
+* The data stays in the same folder; only the name changes. The grants on that workspace, and the users whose default workspace it was, follow it. A grant on a whole project (`travel.*`) applies to what the project holds, so moving a workspace out of `travel` takes it out of that grant.
+* It needs the admin role, and is refused while a session is in the workspace (`workspace 'places_travel' is in use`), as for the one you are in: run it when the applications are stopped, then give them the new name.
+* Applications that named the old workspace (`?workspace=`, `SELECT`, `kivadb -w`) must use the new name.
+* Replicas are disconnected and copy the master again, under the new names.
 
 ---
 
@@ -2363,24 +2404,34 @@ Every user has one role:
 | `editor` | Read and write data, transactions, run scripts |
 | `viewer` | Read only: `get`, `has`, `typeof`, `print`, listings, queries |
 
-Administration commands (`compress`, `config`, `create`, `drop`, `grant`, `revoke`, `users`, `audit`, `replica`, `del all keys`, `shutdown`, ...) need `admin`. One exception: an `editor` may run `compact` in their own personal workspace ([16.4](#164-workspaces-and-grants)).
+Administration commands (`compress`, `config`, `create`, `drop`, `grant`, `revoke`, `users`, `audit`, `replica`, `del all keys`, `shutdown`, `project create`, ...) need `admin`. One exception: an `editor` who can write in every workspace of a project manages it: they may run `compact` in its workspaces and create new ones in it ([16.4](#164-workspaces-and-grants)).
 
 ### 16.3 Managing accounts
 
+A new account reaches **no workspace**: it can log in, but sees nothing until it is given access. Give it in the same command, or later with `grant` ([16.4](#164-workspaces-and-grants)):
+
 ```text
 kiva> create user "fordi" identified by "mon_pass"
-User 'fordi' created with role [editor].
-kiva> create user "guest" identified by "guest_pass" role viewer
-User 'guest' created with role [viewer].
+User 'fordi' created with role [editor]: no workspace yet (give it some with grant).
+kiva> create user "app" identified by "app_pass" grant write on travel.* default workspace travel.places
+User 'app' created with role [editor]: write travel.*.
+kiva> create user "guest" identified by "guest_pass" role viewer grant read on travel.places, school.places
+User 'guest' created with role [viewer]: read school.places, read travel.places.
 kiva> users
- USER                 | ROLE    | CREATED             | WORKSPACE GRANTS
+ USER                 | ROLE    | CREATED             | GRANTS
 ------------------------------------------------------------------------------
- fordi                | editor  | 2026-10-12 09:44:55 | u_fordi=write
- guest                | viewer  | 2026-10-12 09:44:55 | u_guest=write
+ app                  | editor  | 2026-10-12 09:44:55 | travel.*=write (default: travel.places)
+ fordi                | editor  | 2026-10-12 09:44:55 | none
+ guest                | viewer  | 2026-10-12 09:44:55 | school.places=read, travel.places=read
  kiva                 | admin   | 2026-10-12 09:44:53 | all (admin)
 ```
 
-A new user is an `editor` unless you say otherwise. User names may contain letters, digits, `_`, `-` and `.`.
+```text
+create user "<name>" identified by "<password>" [role admin|editor|viewer]
+    [grant read|write on <scope>[, <scope>...]]...  [default workspace <name>]
+```
+
+A new user is an `editor` unless you say otherwise. `grant` may come several times (`grant write on travel.* grant read on default`). `default workspace` is where the user lands at login ([16.5](#165-logging-in)). User names may contain letters, digits, `_`, `-` and `.`.
 
 Changing an account:
 
@@ -2389,6 +2440,10 @@ kiva> modify user "fordi" password "new_pass"
 Password updated for 'fordi'.
 kiva> modify user "guest" role "editor"
 Role of 'guest' set to [editor].
+kiva> modify user "fordi" default workspace travel.places
+Default workspace of 'fordi' set to 'travel.places'.
+kiva> modify user "fordi" default workspace none
+'fordi' has no default workspace any more.
 kiva> drop user "guest"
 User 'guest' dropped.
 ```
@@ -2398,31 +2453,47 @@ Anyone may change their own password; only an admin may change someone else's pa
 ### 16.4 Workspaces and grants
 
 * An **admin** can use every workspace.
-* Every other user has a **personal workspace**, named `u_<user name>`, created automatically. That is where they arrive after logging in, and nobody else (except admins) can enter it. It exists so that a new user has somewhere to work before being granted anything, and so that each person's data stays apart from the others'. In it, an `editor` may also reclaim disk space with `compact`; elsewhere, even with *write* access, compacting stays an administrator's task, because it rewrites a whole shared file.
-* To let a user into another workspace, an admin **grants** access:
+* Every other user reaches only what an admin **grants** them. A grant gives *read* or *write* access to a **scope**:
+
+| Scope | Covers |
+| :--- | :--- |
+| `travel.places` | That workspace of project `travel` |
+| `analytics`, `default` | That workspace, outside any project |
+| `travel.*` | Every workspace of project `travel`, also those created later |
+| `*.places` | The workspace `places` of every project |
+| `*.*` (or `*`, or `all`) | Every workspace |
+
+Several scopes go in one grant, separated by commas:
 
 ```text
-kiva> grant read on workspace "shop" to "guest"
-Granted: read on workspace 'shop' to 'guest'.
-kiva> grant write on all to "fordi"
-Granted: write on all workspaces to 'fordi'.
+kiva> grant write on travel.*, school.places to "fordi"
+Granted: write on travel.*, school.places to 'fordi'.
+kiva> grant read on *.places to "guest"
+Granted: read on *.places to 'guest'.
+kiva> grant write on *.* to "ops"
+Granted: write on all workspaces to 'ops'.
 ```
 
 | Command | Effect |
 | :--- | :--- |
-| `grant read on workspace "<w>" to "<u>"` | The user may read that workspace |
-| `grant write on workspace "<w>" to "<u>"` | The user may read and write it |
-| `grant read\|write on all to "<u>"` | Same, for every workspace |
-| `grant admin on all to "<u>"` | The user becomes an admin |
-| `revoke write on workspace "<w>" from "<u>"` | Write access becomes read access |
-| `revoke read on workspace "<w>" from "<u>"` | Access is removed |
+| `grant read on <scopes> to "<u>"` | The user may read those workspaces |
+| `grant write on <scopes> to "<u>"` | The user may read and write them |
+| `grant admin to "<u>"` | The user becomes an admin |
+| `revoke write on <scopes> from "<u>"` | Write access there becomes read access |
+| `revoke read on <scopes> from "<u>"` | Those grants are removed |
 | `revoke write from "<u>"` | The user can no longer write anywhere (becomes a viewer) |
 | `revoke read from "<u>"` | Every grant is removed |
 | `revoke admin from "<u>"` | The user becomes an editor |
 
-What a user can actually do in a workspace is the lower of their role and their access to it: an `editor` with *read* access can only read there; a `viewer` with *write* access still cannot write. Granting *write* to a viewer turns them into an editor.
+The older forms still work: `on workspace "shop"` for one workspace, `on all` for every one, and `on project travel` means `travel.*`. A grant names a workspace or a project that exists; a revoke may name one that is gone. A revoke removes the grant on exactly that scope: `revoke read on travel.places` does not cut into a grant on `travel.*`.
 
-A user enters a workspace they were granted with `workspace switch <name>`. Changes to grants apply the next time the user switches workspace or logs in.
+What a user can actually do in a workspace is the highest access their grants give there, bounded by their role: an `editor` with *read* access can only read there; a `viewer` with *write* access still cannot write. Granting *write* to a viewer turns them into an editor.
+
+**Managing a project.** An `editor` with *write* on `travel.*` (or on `*.*`) manages project `travel`: they may create workspaces in it (`workspace create travel.logs`, in KivaDB's own folder) and run `compact` in its workspaces. Everything else that changes the server (creating projects, users, indexes, removing or moving workspaces) stays with admins. Outside a project, `compact` needs an admin, because it rewrites a whole shared file.
+
+A user enters a workspace they were granted with `workspace switch <name>`; `workspace list` and `project list` show only what they can reach. Changes to grants apply the next time the user switches workspace or logs in.
+
+**Accounts created before 2.0** had a personal workspace `u_<name>`, reached without any grant. On its first start, KivaDB 2.0 turns it into an ordinary grant (*write* on `u_<name>`) and makes it the account's default workspace: applications connected with those accounts keep landing on their data. To give it a clearer name, move it into a project ([14.7](#147-renaming-or-moving-a-workspace)): the grant and the default follow it.
 
 ### 16.5 Logging in
 
@@ -2434,8 +2505,12 @@ Username [kiva]: fordi
 Password: ********
 Welcome fordi (editor)
 kiva> whoami
-fordi (editor) @ workspace 'u_fordi'
+fordi (editor) @ workspace 'travel.places'
 ```
+
+After logging in, a user lands in, in this order: their **default workspace** (`modify user ... default workspace`), if they can still reach it; `default` for an administrator; the **only** workspace they can reach, if there is just one. Otherwise they land in **no workspace**: `whoami` says `fordi (editor), in no workspace`, commands on data answer `you are in no workspace`, and `workspace list` then `workspace switch <name>` choose one.
+
+To land straight in a workspace, log in as `<user>@<workspace>`: `auth fordi@travel.cache mon_pass`, `kivadb -u fordi@travel.cache`, or the same user name over HTTP and Redis ([23.4](#234-logins-databases-roles)). The login fails if the user cannot reach that workspace.
 
 Pressing Enter at the user name prompt chooses `kiva`, the built-in administrator. On the command line: `kivadb -u fordi` asks for the password; `kivadb -u fordi -p mon_pass` gives it directly (convenient in scripts, but the password is then visible in your command history).
 
@@ -2742,7 +2817,7 @@ kiva> compact
 Database storage compacted successfully (1.12 KB -> 639 bytes, 11 records).
 ```
 
-Compaction does not stop the database: reads and writes continue while the bulk of the copy happens. `compact` needs the admin role, except in one's own personal workspace, where an `editor` may run it too.
+Compaction does not stop the database: reads and writes continue while the bulk of the copy happens. `compact` needs the admin role, or, in a workspace of a project, write access to every workspace of that project ([16.4](#164-workspaces-and-grants)).
 
 **Automatic compaction** does this for you in the background when fragmentation reaches a threshold (30 % by default) on a file of at least 64 KB:
 
@@ -3212,7 +3287,7 @@ The command language answers with text written for people. A program that needs 
 | `add` | `prefix` (`place:`), `value`, optional `type` (needed unless the value is an array or an object), optional `ttl` | `key`, `id` (the key after the prefix), `type` ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
-| `users` | - | `users`: name, role, grants, created, home workspace, whether the password is empty (admin only) |
+| `users` | - | `users`: name, role, grants, default workspace, created, whether the password is empty (admin only) |
 | `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below) | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
 | `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
 | `explain` | the same as `query` | `plan`: strategy, index, candidates, total keys; `suggestion`: the index to create, if any |
@@ -3372,11 +3447,14 @@ With `auth_required`, send the user name and password with HTTP Basic authentica
 curl -u fordi:mon_pass http://localhost:8080/v1/key/user:1
 ```
 
-Without valid credentials the answer is `401`. Requests are executed in the user's home workspace; add `?workspace=<name>` to work in another one you have access to:
+Without valid credentials the answer is `401`. Requests are executed in the workspace the user lands in ([16.5](#165-logging-in)); add `?workspace=<name>` to work in another one you have access to, or log in as `<user>@<workspace>`:
 
 ```bash
 curl -u fordi:mon_pass "http://localhost:8080/v1/key/product:1?workspace=shop"
+curl -u fordi@travel.places:mon_pass http://localhost:8080/v1/key/place:1
 ```
+
+A user who lands in no workspace and names none gets `403` with `you are in no workspace` on requests that read or write data.
 
 ### 21.7 CORS and rate limiting
 
@@ -3578,14 +3656,29 @@ A refused command inside `MULTI` is not queued, and the whole transaction is the
 Everything KivaDB enforces applies here too:
 
 * With authentication on, the client must log in. `AUTH <password>` logs in as `kiva` (Redis's "default" user); `AUTH <user> <password>` as any account. In a URL: `redis://kiva:password@host:6379`.
-* **Numbered databases are workspaces.** Database 0 is the user's own workspace: `default` for an administrator, `u_<name>` for anyone else. `SELECT 2` (or `/2` at the end of a URL) uses the workspace `db2`, and so on up to 15. An administrator's first `SELECT n` creates `db<n>`; another user needs it to exist and to be granted access, and the error message says how:
+* **A workspace by its name.** Log in as `<user>@<workspace>` to land in that workspace, or send `SELECT <workspace>`:
+
+  ```js
+  // ioredis: the @ of the user name is written %40 in a URL
+  const places = new Redis("redis://app%40travel.places:secret@localhost:6379");
+  const cache = new Redis("redis://app%40travel.cache:secret@localhost:6379");
+  ```
+
+  ```text
+  127.0.0.1:6379> SELECT travel.places
+  OK
+  ```
+
+  Clients send the login again at every reconnection, so a connection opened as `app@travel.places` stays in `travel.places` even after the network drops. A `SELECT` by name is sent again by node-redis (`createClient({ ..., database: "travel.places" })`), but not by ioredis or `redis-cli`, which only keep numbered databases: with ioredis, put the workspace in the user name. A workspace the user cannot reach is refused with `NOPERM`, and the error says which grant is missing.
+* **Database 0** is the workspace the user lands in: their default one (`modify user "app" default workspace travel.places`), `default` for an administrator, or the only workspace they can reach. A user who can reach several and has no default lands in none: every command on data then answers `you are in no workspace` until a `SELECT`.
+* **Numbered databases are workspaces too.** `SELECT 2` (or `/2` at the end of a URL) uses the workspace `db2`, and so on up to 15. An administrator's first `SELECT n` creates `db<n>`; another user needs it to exist and to be granted access, and the error message says how:
 
   ```text
   workspace create db2
   grant write on workspace "db2" to "pay"
   ```
 
-  Two applications can therefore keep the separation they had in Redis (one on database 0, one on database 2). A cleaner alternative is one KivaDB account per application, each in its own workspace and unable to read the other's data.
+  Two applications can therefore keep the separation they had in Redis (one on database 0, one on database 2). Names say more than numbers: a project per application, with a workspace per use (`travel.places`, `travel.cache`), is clearer ([14.6](#146-projects)).
 * A viewer cannot write (`NOPERM`), a replica refuses writes (`READONLY`), `FLUSHDB` needs the admin role. `FLUSHDB` and `FLUSHALL` empty the current workspace only.
 * `MULTI ... EXEC` runs as a KivaDB transaction: all or nothing, and `EXEC` answers nil if another session (through another protocol) changed the same keys meanwhile.
 
@@ -3610,7 +3703,7 @@ Libraries such as rate limiters send small Lua scripts that read and write sever
 KivaDB fits the uses where Redis serves as short-lived memory: pending sign-ups with a code that expires, "resend" locks, login and 2FA attempt counters, sessions, caches. The steps on a server where Redis already runs:
 
 1. **Install KivaDB and make it a service** ([29.3](#293-linux-systemd)), so that it starts with the machine. An application that depends on it for sign-ups must never find it stopped.
-2. **Secure it**: a password for `kiva` and authentication on ([16.6](#166-turning-authentication-on)). Create one account per application; give each the database it used (`grant`), or let each use its own workspace as database 0.
+2. **Secure it**: a password for `kiva` and authentication on ([16.6](#166-turning-authentication-on)). Create one account per application; give each the database it used (`grant`), or, better, a project with a workspace per use ([14.6](#146-projects)) and a default workspace as database 0.
 3. **Run it next to Redis first**: `kivadb -e "config set resp.port 6380"`, restart KivaDB, and point one application at `redis://<user>:<password>@127.0.0.1:6380` (add `/2` if it used database 2). Nothing else changes in its code.
 4. **Check** the application's flows: sign-up and code, resend, wrong passwords until the limit.
 5. **Switch the rest**, then stop Redis (`systemctl disable --now redis-server`) and, if you like, give port 6379 back to KivaDB.
@@ -3639,7 +3732,7 @@ An application that runs as several instances can tell all of them that somethin
 `PUBLISH` answers how many listeners received the message. `PSUBSCRIBE app:texts:*` listens to every channel matching a pattern (`*`, `?`, `[abc]`, `[a-z]`, `[^a]` and `\` to escape, as in Redis). `PUBSUB CHANNELS`, `PUBSUB NUMSUB` and `PUBSUB NUMPAT` show who listens. Client libraries work unchanged: ioredis (a connection used for `subscribe`), node-redis (`client.duplicate()` then `subscribe`); both are checked with every change of KivaDB.
 
 * **Messages are not stored.** As in Redis, a message reaches the connections listening at that moment; one that connects later never sees it, and nothing is written to disk. Keep the state itself in keys, and use messages to say "go and read it again".
-* **Channels belong to the user's database 0 workspace.** Two applications logged in as different users never hear each other's channels. `SELECT` does not change them, as in Redis: a publisher on `/2` reaches a listener on `/0` of the same user.
+* **Channels belong to the workspace of database 0**, the one the connection landed in. Applications in different workspaces never hear each other's channels; a user who landed in no workspace has channels of their own. `SELECT` does not change them, as in Redis: a publisher on `/2` reaches a listener on `/0` of the same user.
 * **A listening connection** in RESP2 accepts only `SUBSCRIBE`, `PSUBSCRIBE`, `UNSUBSCRIBE`, `PUNSUBSCRIBE`, `PING` and `QUIT`, like Redis; libraries use a separate connection for it. In RESP3 (`HELLO 3`), messages arrive as push frames between replies and every command stays allowed.
 * **Inside `MULTI` or a script**, published messages leave when it commits, and never when it fails.
 * **A listener that stops reading** is disconnected once 65,536 messages wait for it, so it cannot slow the publishers or fill the server's memory (Redis does the same with its output buffer limit).
@@ -5001,7 +5094,9 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `permission denied: authentication required. Use: auth <user> <password>` | Log in first |
 | `permission denied: invalid username or password` | Wrong credentials |
 | `permission denied: this command requires the admin role` | Ask an administrator |
-| `permission denied: this command requires the admin role, except in your personal workspace 'u_x'` | `compact` works in your own workspace only: `workspace switch u_x` first, or ask an administrator |
+| `permission denied: you are in no workspace` | The account landed in none: `workspace list`, then `workspace switch <name>`; or log in as `<user>@<workspace>` ([16.5](#165-logging-in)) |
+| `permission denied: this command requires the admin role, or write access to every workspace of project 'p'` | `compact` and `workspace create` in a project need write on `p.*`, or an administrator |
+| `NOPERM no access to workspace '...'` | The account has no grant there, or the workspace does not exist: `grant ... on <workspace> to "<user>"` |
 | `permission denied: the viewer role is read-only` | Your role cannot write |
 | `permission denied: you only have read access to workspace 'x'` | You were granted *read* only |
 | `permission denied: no access to workspace 'x'` | An admin must `grant` you access |
@@ -5119,7 +5214,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `stats` | Dashboard |
 | `memory` | Where the workspace's memory goes, and its bound |
 | `memory pin "<pattern>"` / `memory unpin "<pattern>"` | Keep the values of matching keys in memory (admin) |
-| `compact` | Reclaim disk space (admin, or an editor in their personal workspace) |
+| `compact` | Reclaim disk space (admin, or a manager of the workspace's project) |
 | `autocompact on\|off\|status\|threshold <N>` | Automatic compaction |
 | `check` / `check repair` | Verify / repair |
 | `hint info` | State of the index snapshot |
@@ -5133,10 +5228,13 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 
 | Command | Effect |
 | :--- | :--- |
-| `workspace list` / `workspace current` | Show workspaces |
+| `workspace list [<project>]` / `workspace current` | Show the workspaces you can reach |
 | `workspace switch <name>` | Change workspace |
-| `workspace create <name> [path]` | Create (admin) |
+| `workspace create <name> [path]` | Create (admin; in a project, also its managers, without a path) |
+| `workspace move <name> to <new name>` | Rename, or move into or out of a project (admin) |
 | `workspace remove <name>` | Unregister (admin) |
+| `project list` | Show the projects and their workspaces |
+| `project create <name>` / `project remove <name>` | Create / remove an empty project (admin) |
 | `config list` | All settings (admin) |
 | `config get <key>` / `config set <key> <value>` | Read / change a setting (admin) |
 
@@ -5145,14 +5243,16 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `whoami` | Who am I, where |
-| `auth <user> <password>` | Log in |
+| `auth <user>[@<workspace>] <password>` | Log in, optionally straight into a workspace |
 | `users` | List accounts (admin) |
-| `create user "<n>" identified by "<p>" [role <r>]` | Create an account (admin) |
+| `create user "<n>" identified by "<p>" [role <r>] [grant read\|write on <scopes>] [default workspace <w>]` | Create an account, with its access (admin) |
 | `modify user "<n>" password "<p>"` | Change a password |
 | `modify user "<n>" role "<r>"` | Change a role (admin) |
+| `modify user "<n>" default workspace <w>\|none` | Where the user lands at login (admin) |
 | `drop user "<n>"` | Delete an account (admin) |
-| `grant read\|write\|admin on all\|workspace "<w>" to "<n>"` | Give access (admin) |
-| `revoke read\|write\|admin [on all\|workspace "<w>"] from "<n>"` | Remove access (admin) |
+| `grant read\|write on <scope>[, <scope>...] to "<n>"` | Give access: `travel.places`, `travel.*`, `*.places`, `*.*` (admin) |
+| `grant admin to "<n>"` | Make an admin (admin) |
+| `revoke read\|write\|admin [on <scope>[, <scope>...]] from "<n>"` | Remove access (admin) |
 | `audit last <N>` / `audit since "<date>"` / `audit failed-logins` | Read the audit log (admin) |
 
 ### Scripting and events

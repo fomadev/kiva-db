@@ -5,6 +5,11 @@
 //! User accounts. They are stored in KivaDB's own engine (the hidden system
 //! database), one object per user under the key `user:<name>`. Passwords are
 //! never stored: only a random salt and a PBKDF2-HMAC-SHA256 hash.
+//!
+//! An account reaches nothing by itself: an administrator gives it access to
+//! workspaces with grants. A grant names a scope: one workspace (`analytics`,
+//! `travel.places`), every workspace of a project (`travel.*`), the workspaces of
+//! that name in every project (`*.places`), or everything (`*`).
 
 use crate::engine::Engine;
 use crate::error::{KivaError, Result};
@@ -15,6 +20,11 @@ use sha2::Sha256;
 use std::collections::BTreeMap;
 
 const ITERATIONS: u32 = 60_000;
+
+/// Version of the account model stored with each user. Accounts saved
+/// before 2.0 (no `model`) had a personal workspace `u_<name>` reached
+/// without a grant; [`migrate_personal_workspaces`] turns it into one.
+const MODEL: u64 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -62,8 +72,10 @@ impl Priv {
 pub struct User {
     pub name: String,
     pub role: Role,
-    /// Workspace name (or `*` for all) -> access level.
+    /// Scope (`*`, `travel.*`, `travel.places`...) -> access level.
     pub grants: BTreeMap<String, Priv>,
+    /// The workspace a session enters at login, when the user can reach it.
+    pub default_workspace: Option<String>,
     pub created: i64,
     salt: Vec<u8>,
     hash: Vec<u8>,
@@ -94,6 +106,7 @@ impl User {
             name: name.to_string(),
             role,
             grants: BTreeMap::new(),
+            default_workspace: None,
             created: now_secs(),
             salt,
             hash,
@@ -117,23 +130,50 @@ impl User {
         self.hash = hash_password(password, &self.salt, ITERATIONS);
     }
 
-    /// The user's personal workspace.
-    pub fn home_workspace(&self) -> String {
+    /// Access level this user has on `workspace`, if any: the highest of
+    /// the grants whose scope covers it.
+    pub fn access(&self, workspace: &str) -> Option<Priv> {
         if self.role == Role::Admin {
-            "default".to_string()
-        } else {
-            personal_workspace(&self.name)
+            return Some(Priv::Write);
+        }
+        self.grants.iter().filter(|(scope, _)| scope_covers(scope, workspace)).map(|(_, p)| *p).max()
+    }
+
+    /// Whether the user may run the maintenance of `workspace` and create
+    /// workspaces next to it: an administrator, or a user who can write in
+    /// every workspace of its project (`travel.*`, or `*`).
+    pub fn manages(&self, workspace: &str) -> bool {
+        self.role == Role::Admin || project_of(workspace).is_some_and(|p| self.manages_project(p))
+    }
+
+    /// Whether the user can write in every workspace of `project`.
+    pub fn manages_project(&self, project: &str) -> bool {
+        match self.role {
+            Role::Admin => true,
+            Role::Viewer => false,
+            Role::Editor => {
+                [format!("{project}.*"), "*".to_string()].iter().any(|s| self.grants.get(s) == Some(&Priv::Write))
+            }
         }
     }
 
-    /// Access level this user has on `workspace`, if any.
-    pub fn access(&self, workspace: &str) -> Option<Priv> {
-        if self.role == Role::Admin || workspace == self.home_workspace() {
-            return Some(Priv::Write);
+    /// The workspace a login enters, among the `existing` ones: the default
+    /// workspace when the user can reach it, `default` for an administrator,
+    /// otherwise the only workspace the user can reach, if there is just one.
+    pub fn arrival(&self, existing: &[String]) -> Option<String> {
+        if let Some(w) = &self.default_workspace {
+            if existing.contains(w) && self.access(w).is_some() {
+                return Some(w.clone());
+            }
         }
-        let specific = self.grants.get(workspace).copied();
-        let global = self.grants.get("*").copied();
-        specific.max(global)
+        if self.role == Role::Admin {
+            return Some("default".to_string());
+        }
+        let mut reachable = existing.iter().filter(|w| self.access(w).is_some());
+        match (reachable.next(), reachable.next()) {
+            (Some(only), None) => Some(only.clone()),
+            _ => None,
+        }
     }
 
     fn to_json(&self) -> Json {
@@ -145,7 +185,9 @@ impl User {
             "iterations": self.iterations,
             "role": self.role.name(),
             "grants": grants,
+            "default_workspace": self.default_workspace,
             "created": self.created,
+            "model": MODEL,
         })
     }
 
@@ -165,6 +207,7 @@ impl User {
             name: name.to_string(),
             role: Role::from_name(j["role"].as_str()?)?,
             grants,
+            default_workspace: j["default_workspace"].as_str().map(str::to_string),
             created: j["created"].as_i64().unwrap_or(0),
             salt: hex_decode(j["salt"].as_str()?)?,
             hash: hex_decode(j["hash"].as_str()?)?,
@@ -233,7 +276,123 @@ pub fn ensure_admin(sys: &Engine) -> Result<()> {
     Ok(())
 }
 
-/// Name of the personal workspace of a user who is not an administrator.
-pub fn personal_workspace(user: &str) -> String {
-    format!("u_{user}")
+/// Accounts created before 2.0 reached their personal workspace `u_<name>`
+/// without any grant. Each one keeps it: a write grant on it, and it becomes
+/// the account's default workspace, so applications connected as that user
+/// land where their data is. Runs at startup; an account is migrated once.
+pub fn migrate_personal_workspaces(sys: &Engine, exists: impl Fn(&str) -> bool) -> Result<usize> {
+    let mut migrated = 0;
+    for (key, _) in sys.keys_matching("user:*", 0) {
+        let Some((Value::Doc(j), _)) = sys.get(&key)? else { continue };
+        if j.get("model").is_some() {
+            continue;
+        }
+        let Some(mut user) = User::from_json(&key["user:".len()..], &j) else { continue };
+        let personal = format!("u_{}", user.name);
+        if user.role != Role::Admin && exists(&personal) {
+            user.grants.entry(personal.clone()).or_insert(Priv::Write);
+            user.default_workspace.get_or_insert(personal);
+            migrated += 1;
+        }
+        save_user(sys, &user)?;
+    }
+    Ok(migrated)
+}
+
+/// A project or workspace name, or one of the two parts of `travel.places`.
+pub fn valid_name_part(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// `analytics` or `travel.places`: a workspace, alone or in a project.
+pub fn valid_workspace_name(name: &str) -> bool {
+    match name.split_once('.') {
+        Some((project, rest)) => valid_name_part(project) && valid_name_part(rest),
+        None => valid_name_part(name),
+    }
+}
+
+/// The project of a workspace: `travel` for `travel.places`, none for `analytics`.
+pub fn project_of(workspace: &str) -> Option<&str> {
+    workspace.split_once('.').map(|(p, _)| p)
+}
+
+/// Checks a grant scope and writes it the one way it is stored: `*` (also
+/// written `*.*` or `all`), `<project>.*`, `*.<workspace>`,
+/// `<project>.<workspace>` or `<workspace>`.
+pub fn normalize_scope(scope: &str) -> std::result::Result<String, String> {
+    let s = scope.trim();
+    if s == "*" || s == "*.*" || s.eq_ignore_ascii_case("all") {
+        return Ok("*".into());
+    }
+    let ok = match s.split_once('.') {
+        Some((p, w)) => (p == "*" || valid_name_part(p)) && (w == "*" || valid_name_part(w)),
+        None => valid_name_part(s),
+    };
+    if ok {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "'{scope}' is not a scope: write a workspace (places, travel.places), the workspaces of a project \
+             (travel.*), a workspace of every project (*.places) or everything (*.*)"
+        ))
+    }
+}
+
+/// Whether a grant on `scope` covers `workspace`.
+pub fn scope_covers(scope: &str, workspace: &str) -> bool {
+    if scope == "*" {
+        return true;
+    }
+    match (scope.split_once('.'), workspace.split_once('.')) {
+        (Some((sp, sw)), Some((p, w))) => (sp == "*" || sp == p) && (sw == "*" || sw == w),
+        (None, None) => scope == workspace,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scopes_cover_projects_and_workspaces() {
+        for (scope, ws, covered) in [
+            ("*", "default", true),
+            ("*", "travel.places", true),
+            ("travel.*", "travel.places", true),
+            ("travel.*", "school.places", false),
+            ("travel.*", "places", false),
+            ("*.places", "school.places", true),
+            ("*.places", "school.cache", false),
+            ("travel.places", "travel.places", true),
+            ("places", "travel.places", false),
+            ("places", "places", true),
+        ] {
+            assert_eq!(scope_covers(scope, ws), covered, "{scope} on {ws}");
+        }
+        assert_eq!(normalize_scope("*.*").unwrap(), "*");
+        assert_eq!(normalize_scope("ALL").unwrap(), "*");
+        assert_eq!(normalize_scope("travel.*").unwrap(), "travel.*");
+        assert!(normalize_scope("a.b.c").is_err() && normalize_scope("ba ak").is_err());
+        assert!(
+            valid_workspace_name("travel.places") && !valid_workspace_name("travel.") && !valid_workspace_name("a.b.c")
+        );
+    }
+
+    #[test]
+    fn a_login_enters_the_default_or_the_only_workspace() {
+        let all: Vec<String> = ["default", "travel.places", "travel.cache", "school.places"].map(String::from).to_vec();
+        let mut u = User::new("dev", "pw", Role::Editor);
+        assert_eq!(u.arrival(&all), None);
+        u.grants.insert("school.places".into(), Priv::Read);
+        assert_eq!(u.arrival(&all).as_deref(), Some("school.places"));
+        u.grants.insert("travel.*".into(), Priv::Write);
+        assert_eq!(u.arrival(&all), None);
+        u.default_workspace = Some("travel.cache".into());
+        assert_eq!(u.arrival(&all).as_deref(), Some("travel.cache"));
+        assert!(u.manages("travel.cache") && !u.manages("school.places") && !u.manages("default"));
+        assert_eq!(u.access("travel.places"), Some(Priv::Write));
+        assert_eq!(u.access("default"), None);
+    }
 }
