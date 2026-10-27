@@ -84,7 +84,15 @@ pub struct Link {
     pub applied_ops: u64,
     pub last_sync: Option<i64>,
     pub running: bool,
+    /// How far this node's clock is ahead of the master's (negative: behind),
+    /// from the time in its last heartbeat; a few milliseconds of it are the
+    /// network.
+    pub clock_drift_ms: Option<i64>,
 }
+
+/// Beyond this, the clocks of a master and a replica disagree enough to
+/// matter (TTLs, dates written by each, certificates): KivaDB warns.
+pub const MAX_CLOCK_DRIFT_MS: i64 = 1000;
 
 pub struct ReplState {
     seq: AtomicU64,
@@ -243,12 +251,37 @@ impl ReplState {
         let addrs: Vec<String> = replicas.iter().map(|r| r.listen.clone()).collect();
         drop(replicas);
         self.remember(inst, &addrs);
-        json!({ "epoch": self.epoch(), "seq": self.seq(), "nodes": nodes }).to_string().into_bytes()
+        // The master's clock, for the replicas to compare theirs with.
+        json!({ "epoch": self.epoch(), "seq": self.seq(), "nodes": nodes, "time": crate::util::now_ms() })
+            .to_string()
+            .into_bytes()
+    }
+
+    /// Keeps the drift of this node's clock from the master's, and warns
+    /// once each time it goes beyond [`MAX_CLOCK_DRIFT_MS`]. KivaDB does not
+    /// correct it: the system's time synchronization (NTP) does.
+    fn compare_clocks(&self, inst: &Instance, master: &str, drift: i64) {
+        let before = {
+            let mut link = self.link.lock().unwrap_or_else(|e| e.into_inner());
+            link.clock_drift_ms.replace(drift)
+        };
+        let over = |d: i64| d.abs() > MAX_CLOCK_DRIFT_MS;
+        if over(drift) && !before.is_some_and(over) {
+            let msg = format!(
+                "this node's clock is {} the master's ({master}): turn on time synchronization (NTP) on both machines",
+                crate::util::drift_text(drift)
+            );
+            eprintln!("[WARN] {msg}");
+            inst.audit.log("system", &format!("clock: {msg}"), false);
+        }
     }
 
     /// A replica learns the group from its master's heartbeat.
     fn learn(&self, inst: &Instance, master: &str, payload: &[u8]) {
         let Ok(j) = serde_json::from_slice::<Json>(payload) else { return };
+        if let Some(master_time) = j["time"].as_i64() {
+            self.compare_clocks(inst, master, crate::util::now_ms() - master_time);
+        }
         self.set_epoch(inst, j["epoch"].as_u64().unwrap_or(0));
         let me = self.node_id();
         let mut peers = Vec::new();

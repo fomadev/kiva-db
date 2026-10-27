@@ -25,6 +25,12 @@ pub const KNOWN: &[(&str, &str, &str, &str)] = &[
     ("network", "port", "2911", "TCP port of the server"),
     ("network", "bind", "127.0.0.1", "Address the server listens on"),
     ("security", "auth_required", "false", "Require a username and password"),
+    (
+        "time",
+        "zone",
+        "local",
+        "Time zone dates are shown and read in: local (the machine's), UTC, a name such as Africa/Kinshasa, or +01:00",
+    ),
     ("server", "threads", "8", "Commands executed in parallel"),
     ("server", "max_clients", "1000", "Maximum simultaneous connections"),
     ("http", "enabled", "true", "Expose the REST API when serving"),
@@ -134,6 +140,7 @@ fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         "snapshot_interval" | "snapshot_every" | "timeout_ms" | "memory_limit_mb" => int_in(1, u32::MAX as u64),
         "role" => matches!(value, "master" | "replica" | "slave"),
         "sync_mode" => matches!(value, "async" | "sync"),
+        "zone" => return crate::time::Zone::parse(value).map(|_| ()),
         _ => true,
     };
     if ok {

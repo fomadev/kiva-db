@@ -607,6 +607,30 @@ pub struct Cond {
     pub field: String,
     pub op: CmpOp,
     pub value: Json,
+    /// `month(created_at) = 10`: the part of the field's date that is compared.
+    pub func: Option<crate::time::TimeFn>,
+}
+
+impl Cond {
+    pub fn new(pattern: impl Into<String>, field: impl Into<String>, op: CmpOp, value: Json) -> Cond {
+        Cond { pattern: pattern.into(), field: field.into(), op, value, func: None }
+    }
+
+    /// Whether the value of the field passes the condition.
+    pub fn test(&self, v: &Json) -> bool {
+        match self.func {
+            Some(f) => f.of(v).is_some_and(|n| compare_json(&Json::from(n), self.op, &self.value)),
+            None => compare_json(v, self.op, &self.value),
+        }
+    }
+
+    /// `created_at` or `month(created_at)`, as the condition is written.
+    pub fn target(&self) -> String {
+        match self.func {
+            Some(f) => format!("{}({}.{})", f.name(), self.pattern, self.field),
+            None => format!("{}.{}", self.pattern, self.field),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -628,21 +652,11 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
         (CmpOp::In | CmpOp::Like | CmpOp::ILike, _, _) => return false,
         _ => {}
     }
-    let ord = match (a, b) {
-        (Json::Number(x), Json::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => x.partial_cmp(&y),
-            _ => None,
-        },
-        (Json::String(x), Json::String(y)) => Some(x.cmp(y)),
-        (Json::Bool(x), Json::Bool(y)) => {
-            return match op {
-                CmpOp::Eq => x == y,
-                CmpOp::Ne => x != y,
-                _ => false,
-            }
-        }
-        (Json::Null, Json::Null) => Some(Equal),
-        _ => None,
+    // `now() - 7 days`, `time "08:00"`: moments compared as moments, whatever
+    // the form of the text in the document.
+    let ord = match crate::time::tagged(b) {
+        Some((tag, text)) => crate::time::compare_tagged(a, tag, text),
+        None => plain_order(a, b, op),
     };
     match (ord, op) {
         (None, CmpOp::Ne) => true,
@@ -654,6 +668,25 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
         (Some(o), CmpOp::Lt) => o == Less,
         (Some(o), CmpOp::Le) => o != Greater,
         (Some(_), CmpOp::In | CmpOp::Like | CmpOp::ILike) => unreachable!("answered above"),
+    }
+}
+
+/// The order of two JSON values of the same kind; booleans only compare for
+/// `=` and `!=`, and answer through `Equal` / `Less`.
+fn plain_order(a: &Json, b: &Json, op: CmpOp) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::*;
+    match (a, b) {
+        (Json::Number(x), Json::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => x.partial_cmp(&y),
+            _ => None,
+        },
+        (Json::String(x), Json::String(y)) => Some(x.cmp(y)),
+        (Json::Bool(x), Json::Bool(y)) => match op {
+            CmpOp::Eq | CmpOp::Ne => Some(if x == y { Equal } else { Less }),
+            _ => None,
+        },
+        (Json::Null, Json::Null) => Some(Equal),
+        _ => None,
     }
 }
 
@@ -3487,9 +3520,7 @@ impl Engine {
         for c in &q.filter {
             filter.push((jsonpath::parse_path(&c.field).map_err(KivaError::Invalid)?, c));
         }
-        let passes = |doc: &Json| {
-            filter.iter().all(|(p, c)| jsonpath::get(doc, p).is_some_and(|v| compare_json(v, c.op, &c.value)))
-        };
+        let passes = |doc: &Json| filter.iter().all(|(p, c)| jsonpath::get(doc, p).is_some_and(|v| c.test(v)));
         let query = vector::Query::new(q.vector.clone(), q.metric);
         let mut inner = self.lock();
         let now = now_ms();
@@ -3605,9 +3636,7 @@ impl Engine {
                     *read += 1;
                     match inner.value_of(key, &e) {
                         Ok(Value::Doc(d)) => {
-                            let ok = rest
-                                .iter()
-                                .all(|(p, c)| jsonpath::get(&d, p).is_some_and(|v| compare_json(v, c.op, &c.value)));
+                            let ok = rest.iter().all(|(p, c)| jsonpath::get(&d, p).is_some_and(|v| c.test(v)));
                             if ok {
                                 docs.insert(key.to_string(), d);
                             }
@@ -3742,6 +3771,10 @@ impl Engine {
                 && pattern_covers(&s.pattern, &cond.pattern)
         };
         let prefixed = cond.op == CmpOp::Like && cond.value.as_str().is_some_and(|p| !like_prefix(p).is_empty());
+        // A moment is found in a range of texts: only a B-tree has one.
+        if crate::time::tagged(&cond.value).is_some() {
+            return inner.sec.iter().position(|s| s.kind == IndexKind::BTree && usable(s));
+        }
         let preferred = if prefixed { IndexKind::BTree } else { IndexKind::Hash };
         let first = inner.sec.iter().position(|s| s.kind == preferred && usable(s));
         first.or_else(|| inner.sec.iter().position(usable))
@@ -3752,6 +3785,28 @@ impl Engine {
     fn index_candidates(idx: &SecIndex, cond: &Cond) -> Vec<String> {
         let mut out = Vec::new();
         let mut push = |set: &BTreeSet<String>| out.extend(set.iter().cloned());
+        if let (Some(("$datetime", text)), Postings::Tree(map)) = (crate::time::tagged(&cond.value), &idx.map) {
+            // Texts of moments sort by date first, but not exactly by moment
+            // (zones, fractions of a second): read the dates two days around,
+            // then keep the values that pass, still without reading a document.
+            let Ok(at) = crate::time::parse_datetime(text, &crate::time::Zone::Utc) else { return out };
+            let day = |d: i64| SKey::Str(crate::time::date_text((at + chrono::Duration::days(d)).date_naive()));
+            let lo = match cond.op {
+                CmpOp::Gt | CmpOp::Ge | CmpOp::Eq => Bound::Included(day(-2)),
+                _ => Bound::Unbounded,
+            };
+            let hi = match cond.op {
+                CmpOp::Lt | CmpOp::Le | CmpOp::Eq => Bound::Excluded(day(3)),
+                _ => Bound::Unbounded,
+            };
+            for (sk, set) in map.range((lo, hi)) {
+                if matches!(sk, SKey::Str(_)) && cond.test(&sk.to_json()) {
+                    push(set);
+                }
+            }
+            out.sort();
+            return out;
+        }
         match cond.op {
             CmpOp::Eq => {
                 if let Some(set) = SKey::from_json(&cond.value).and_then(|sk| idx.map.get(&sk)) {
@@ -3838,6 +3893,12 @@ impl Engine {
     /// Whether an index on the field of `cond` could answer it: false for
     /// `!=`, and for a value that cannot be looked up.
     pub fn indexable(cond: &Cond) -> bool {
+        if cond.func.is_some() {
+            return false;
+        }
+        if let Some((tag, _)) = crate::time::tagged(&cond.value) {
+            return tag == "$datetime" && !matches!(cond.op, CmpOp::Ne | CmpOp::In | CmpOp::Like | CmpOp::ILike);
+        }
         match cond.op {
             CmpOp::Ne => false,
             CmpOp::In => cond.value.as_array().is_some_and(|l| l.iter().all(|v| SKey::from_json(v).is_some())),

@@ -3,7 +3,9 @@
 // See the LICENSE file in the project root for full license information.
 
 use crate::error::{KivaError, Result};
+use crate::time;
 use crate::util::{b64_decode, b64_encode, hex_encode};
+use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde_json::Value as Json;
 
 /// On-disk type tag of a stored value.
@@ -17,6 +19,12 @@ pub enum Type {
     Array = 5,
     Object = 6,
     Bytes = 7,
+    /// A day of the calendar: `2026-10-27`.
+    Date = 8,
+    /// An instant, in UTC to the millisecond.
+    DateTime = 9,
+    /// A time of day: `14:30:00`.
+    Time = 10,
 }
 
 impl Type {
@@ -29,6 +37,9 @@ impl Type {
             Type::Array => "array",
             Type::Object => "object",
             Type::Bytes => "bytes",
+            Type::Date => "date",
+            Type::DateTime => "datetime",
+            Type::Time => "time",
         }
     }
 
@@ -41,6 +52,9 @@ impl Type {
             "array" => Type::Array,
             "object" => Type::Object,
             "bytes" => Type::Bytes,
+            "date" => Type::Date,
+            "datetime" => Type::DateTime,
+            "time" => Type::Time,
             _ => return None,
         })
     }
@@ -54,12 +68,20 @@ impl Type {
             5 => Type::Array,
             6 => Type::Object,
             7 => Type::Bytes,
+            8 => Type::Date,
+            9 => Type::DateTime,
+            10 => Type::Time,
             _ => return None,
         })
     }
 
     pub fn is_doc(self) -> bool {
         matches!(self, Type::Array | Type::Object)
+    }
+
+    /// `date`, `datetime` or `time`.
+    pub fn is_temporal(self) -> bool {
+        matches!(self, Type::Date | Type::DateTime | Type::Time)
     }
 }
 
@@ -73,6 +95,9 @@ pub enum Value {
     Null,
     Doc(Json),
     Bytes(Vec<u8>),
+    Date(NaiveDate),
+    DateTime(DateTime<Utc>),
+    Time(NaiveTime),
 }
 
 impl Value {
@@ -85,6 +110,9 @@ impl Value {
             Value::Doc(j) if j.is_array() => Type::Array,
             Value::Doc(_) => Type::Object,
             Value::Bytes(_) => Type::Bytes,
+            Value::Date(_) => Type::Date,
+            Value::DateTime(_) => Type::DateTime,
+            Value::Time(_) => Type::Time,
         }
     }
 
@@ -109,6 +137,10 @@ impl Value {
                 }
             }
             Value::Bytes(b) => b.clone(),
+            // Text, as the other values: a datetime as ISO 8601 in UTC.
+            Value::Date(d) => time::date_text(*d).into_bytes(),
+            Value::DateTime(t) => time::iso(*t).into_bytes(),
+            Value::Time(t) => time::time_text(*t).into_bytes(),
         })
     }
 
@@ -147,6 +179,11 @@ impl Value {
                 Value::Doc(j)
             }
             Type::Bytes => Value::Bytes(raw.to_vec()),
+            Type::Date => Value::Date(time::parse_date(&text(raw)?).map_err(KivaError::Corrupted)?),
+            Type::DateTime => {
+                Value::DateTime(time::parse_datetime(&text(raw)?, &time::Zone::Utc).map_err(KivaError::Corrupted)?)
+            }
+            Type::Time => Value::Time(time::parse_time(&text(raw)?).map_err(KivaError::Corrupted)?),
         })
     }
 
@@ -165,6 +202,10 @@ impl Value {
                     format!("0x{}", hex_encode(b))
                 }
             }
+            Value::Date(d) => time::date_text(*d),
+            // In the zone of the session.
+            Value::DateTime(t) => time::show(*t),
+            Value::Time(t) => time::time_text(*t),
         }
     }
 
@@ -176,6 +217,9 @@ impl Value {
             Value::Null => Json::Null,
             Value::Doc(j) => j.clone(),
             Value::Bytes(b) => serde_json::json!({ "$bytes": b64_encode(b) }),
+            Value::Date(d) => Json::String(time::date_text(*d)),
+            Value::DateTime(t) => Json::String(time::iso(*t)),
+            Value::Time(t) => Json::String(time::time_text(*t)),
         }
     }
 

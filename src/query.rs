@@ -24,8 +24,9 @@
 //! refuses them with what to do instead, rather than with a generic syntax
 //! error.
 
-use crate::engine::{compare_json, CmpOp, Cond, MAX_IN_VALUES};
+use crate::engine::{CmpOp, Cond, MAX_IN_VALUES};
 use crate::jsonpath::{self, Seg};
+use crate::time::TimeFn;
 use serde_json::{Map, Value as Json};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -140,10 +141,20 @@ pub fn check_field(field: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `month(created_at)` -> (`month`, `created_at`); a plain field has no function.
+pub fn split_time_fn(field: &str) -> (Option<TimeFn>, &str) {
+    let inner = field.split_once('(').and_then(|(name, rest)| Some((TimeFn::parse(name)?, rest.strip_suffix(')')?)));
+    match inner {
+        Some((f, inner)) => (Some(f), inner.trim()),
+        None => (None, field),
+    }
+}
+
 /// The value of the condition: one string, number, boolean or null; for
 /// `in`, a list of them; for `like` and `ilike`, a text pattern.
 pub fn check_value(op: CmpOp, value: &Json) -> Result<(), String> {
-    let scalar = |v: &Json| !matches!(v, Json::Array(_) | Json::Object(_));
+    // A moment (`{"$datetime": ...}`, `{"$time": ...}`) counts as one value.
+    let scalar = |v: &Json| !matches!(v, Json::Array(_) | Json::Object(_)) || crate::time::tagged(v).is_some();
     match op {
         CmpOp::In => match value.as_array() {
             Some(list) if list.is_empty() => Err("'in' needs at least one value: in [\"Goma\", \"Bukavu\"]".into()),
@@ -199,8 +210,32 @@ impl Expr {
     pub fn test(cond: Cond) -> Result<Expr, String> {
         check_field(&cond.field)?;
         check_value(cond.op, &cond.value)?;
+        if let Some(e) = Self::year_range(&cond)? {
+            return Ok(e);
+        }
         let path = jsonpath::parse_path(&cond.field)?;
         Ok(Expr::Test(Test { cond, path }))
+    }
+
+    /// `year(x) = 2026` is `x >= <1 January 2026> and x < <1 January 2027>`,
+    /// in the session's zone: a range, that a B-tree index on `x` answers.
+    fn year_range(cond: &Cond) -> Result<Option<Expr>, String> {
+        let Some(TimeFn::Year) = cond.func else { return Ok(None) };
+        let Some(year) = cond.value.as_i64() else { return Ok(None) };
+        let Some((from, to)) = crate::time::year_bounds(year) else { return Ok(None) };
+        let bound = |op: CmpOp, at| {
+            let c = Cond::new(cond.pattern.clone(), cond.field.clone(), op, crate::time::datetime_json(at));
+            Self::test(c)
+        };
+        Ok(Some(match cond.op {
+            CmpOp::Eq => Expr::and(vec![bound(CmpOp::Ge, from)?, bound(CmpOp::Lt, to)?]),
+            CmpOp::Ne => Expr::or(vec![bound(CmpOp::Lt, from)?, bound(CmpOp::Ge, to)?]),
+            CmpOp::Gt => bound(CmpOp::Ge, to)?,
+            CmpOp::Ge => bound(CmpOp::Ge, from)?,
+            CmpOp::Lt => bound(CmpOp::Lt, from)?,
+            CmpOp::Le => bound(CmpOp::Lt, to)?,
+            CmpOp::In | CmpOp::Like | CmpOp::ILike => return Ok(None),
+        }))
     }
 
     /// `and` of the parts; nested `and`s are flattened.
@@ -242,7 +277,7 @@ impl Expr {
     /// document lacks is false, so `not` of it is true.
     pub fn matches(&self, doc: &Json) -> bool {
         match self {
-            Expr::Test(t) => jsonpath::get(doc, &t.path).is_some_and(|v| compare_json(v, t.cond.op, &t.cond.value)),
+            Expr::Test(t) => jsonpath::get(doc, &t.path).is_some_and(|v| t.cond.test(v)),
             Expr::And(v) => v.iter().all(|e| e.matches(doc)),
             Expr::Or(v) => v.iter().any(|e| e.matches(doc)),
             Expr::Not(e) => !e.matches(doc),
@@ -317,8 +352,10 @@ impl Expr {
             items.iter().map(|i| Self::from_json_at(i, pattern, depth + 1)).collect()
         };
         let leaf = |field: &str, cmp: CmpOp, value: Json| {
+            // `"field": "month(created_at)"` compares a part of the field's date.
+            let (func, field) = split_time_fn(field);
             let field = field.strip_prefix(pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
-            Self::test(Cond { pattern: pattern.to_string(), field: field.to_string(), op: cmp, value })
+            Self::test(Cond { func, ..Cond::new(pattern, field, cmp, value) })
         };
         match j {
             Json::Array(_) => Ok(Expr::and(list(j, "and")?)),
@@ -367,7 +404,13 @@ impl fmt::Display for Expr {
             }
         };
         match self {
-            Expr::Test(t) => write!(f, "{} {} {}", t.cond.field, t.cond.op.symbol(), t.cond.value),
+            Expr::Test(t) => match t.cond.func {
+                Some(func) => write!(f, "{}({}) {} {}", func.name(), t.cond.field, t.cond.op.symbol(), t.cond.value),
+                None if crate::time::tagged(&t.cond.value).is_some() => {
+                    write!(f, "{} {} {}", t.cond.field, t.cond.op.symbol(), crate::time::show_value(&t.cond.value))
+                }
+                None => write!(f, "{} {} {}", t.cond.field, t.cond.op.symbol(), t.cond.value),
+            },
             Expr::And(v) | Expr::Or(v) => {
                 let and = matches!(self, Expr::And(_));
                 for (i, e) in v.iter().enumerate() {
@@ -530,7 +573,8 @@ struct Bucket {
 #[derive(Clone, Debug)]
 pub struct Aggregation {
     aggs: Vec<Agg>,
-    group_by: Option<(String, Vec<Seg>)>,
+    /// The field, its path, and the part of its date that groups (`month(created_at)`).
+    group_by: Option<(String, Vec<Seg>, Option<TimeFn>)>,
     groups: BTreeMap<GroupKey, Bucket>,
     matches: usize,
 }
@@ -568,8 +612,9 @@ impl Aggregation {
         }
         let group_by = match group_by {
             Some(f) => {
-                check_field(f)?;
-                Some((f.to_string(), jsonpath::parse_path(f)?))
+                let (func, field) = split_time_fn(f);
+                check_field(field)?;
+                Some((f.to_string(), jsonpath::parse_path(field)?, func))
             }
             None => None,
         };
@@ -588,7 +633,13 @@ impl Aggregation {
     /// Folds one document in.
     pub fn add(&mut self, doc: &Json) -> Result<(), String> {
         let key = match &self.group_by {
-            Some((_, path)) => GroupKey(jsonpath::get(doc, path).cloned().unwrap_or(Json::Null)),
+            Some((_, path, func)) => {
+                let v = jsonpath::get(doc, path);
+                GroupKey(match func {
+                    Some(f) => v.and_then(|v| f.of(v)).map(Json::from).unwrap_or(Json::Null),
+                    None => v.cloned().unwrap_or(Json::Null),
+                })
+            }
             None => GroupKey(Json::Null),
         };
         if !self.groups.contains_key(&key) {
@@ -734,8 +785,7 @@ mod tests {
     use serde_json::json;
 
     fn cond(field: &str, op: &str, value: Json) -> Expr {
-        Expr::test(Cond { pattern: "user:*".into(), field: field.into(), op: CmpOp::parse(op).unwrap(), value })
-            .unwrap()
+        Expr::test(Cond::new("user:*", field, CmpOp::parse(op).unwrap(), value)).unwrap()
     }
 
     #[test]

@@ -33,6 +33,7 @@ impl Session {
                 Ok(())
             }
             "project" => self.cmd_project(a, out),
+            "timezone" => self.cmd_timezone(a, out),
             "users" => self.cmd_users(out),
             "create" => self.cmd_create(a, out),
             "tune" => self.cmd_tune(a, out),
@@ -223,7 +224,12 @@ impl Session {
             if let Some(w) = &u.default_workspace {
                 grants.push_str(&format!(" (default: {w})"));
             }
-            out.say(format!(" {:<20} | {:<7} | {:<19} | {grants}", u.name, u.role.name(), fmt_time(u.created)));
+            out.say(format!(
+                " {:<20} | {:<7} | {:<19} | {grants}",
+                u.name,
+                u.role.name(),
+                crate::time::show_secs(u.created)
+            ));
         }
         Ok(())
     }
@@ -727,7 +733,7 @@ impl Session {
     fn cmd_modify(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
             "Usage: modify user \"<name>\" password \"<new>\" | modify user \"<name>\" role \"<role>\" | \
-                             modify user \"<name>\" default workspace <name>|none";
+                             modify user \"<name>\" default workspace <name>|none | modify user \"<name>\" timezone <zone>|none";
         let mut c = Cur::new(a);
         if !c.eat("user") {
             return Err(USAGE.into());
@@ -757,6 +763,24 @@ impl Session {
             user.role = role;
             auth::save_user(&self.inst.system, &user)?;
             out.say(format!("Role of '{name}' set to [{}].", role.name()));
+        } else if c.eat("timezone") {
+            let zone = if c.peek().is_some_and(|t| t.is_kw("none")) {
+                c.next();
+                None
+            } else {
+                let t = word(c.next(), "a time zone (Africa/Kinshasa, UTC, +01:00)")?;
+                Some(crate::time::Zone::parse(&t)?.name())
+            };
+            c.finish(USAGE)?;
+            if !is_admin && name != self.user_name() {
+                return Err("permission denied: you can only change your own time zone.".into());
+            }
+            out.say(match &zone {
+                Some(z) => format!("Time zone of '{name}' set to {z}: it applies from the next login."),
+                None => format!("'{name}' now uses the server's time zone, from the next login."),
+            });
+            user.timezone = zone;
+            auth::save_user(&self.inst.system, &user)?;
         } else if c.eat("default") {
             if !c.eat("workspace") {
                 return Err(USAGE.into());
@@ -856,7 +880,8 @@ impl Session {
                 | ("server", "max_clients")
                 | ("resp", "max_collection_members")
                 | ("semantic", _)
-                | ("failover", _) => {}
+                | ("failover", _)
+                | ("time", _) => {}
                 ("replication", "sync_mode" | "min_slaves_ack" | "master_user" | "master_password") => {}
                 ("replication", _) => {
                     out.say("Note: use 'replica start' or 'replica promote' to change the replication role now.")
@@ -976,6 +1001,35 @@ impl Session {
         } else {
             Err(USAGE.into())
         }
+    }
+
+    /// `timezone` shows the zone dates are shown and read in; `timezone <name>`
+    /// changes it for this session, `timezone default` goes back to the
+    /// user's, else the server's.
+    fn cmd_timezone(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "Usage: timezone [<name> | default]   (names: UTC, local, Africa/Kinshasa, +01:00...)";
+        let mut c = Cur::new(a);
+        if let Some(t) = c.next() {
+            c.finish(USAGE)?;
+            self.tz = if t.is_kw("default") {
+                let user = self.user.as_ref().map(|u| u.name.clone());
+                user.and_then(|n| auth::get_user(&self.inst.system, &n).ok().flatten())
+                    .and_then(|u| u.timezone)
+                    .and_then(|z| crate::time::Zone::parse(&z).ok())
+            } else {
+                Some(crate::time::Zone::parse(&t.text)?)
+            };
+            self.use_zone();
+        }
+        let zone = self.zone();
+        let from = if self.tz.is_some() { "this session" } else { "the server's time.zone" };
+        out.say(format!(
+            "Time zone: {} (from {from}). It is {} here, {} UTC.",
+            zone.name(),
+            crate::time::show(crate::time::now()),
+            crate::time::iso(crate::time::now())
+        ));
+        Ok(())
     }
 
     /// `project list | create <name> | remove <name>`: projects group

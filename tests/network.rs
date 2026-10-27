@@ -340,6 +340,17 @@ fn replication_and_failover() {
     let status = ok(&mut r, "replica status");
     assert!(status.contains("Role: replica") && status.contains("Link: connected"));
     assert!(ok(&mut r, "stats").contains(&format!("replica of 127.0.0.1:{port_m} (connected)")));
+    // The heartbeats carry the master's clock: one machine, so a few milliseconds at most.
+    let started = Instant::now();
+    let clock = loop {
+        let stats = ok(&mut r, "stats");
+        if let Some(line) = stats.lines().find(|l| l.contains("> Clock                :")) {
+            break line.to_string();
+        }
+        assert!(started.elapsed() < Duration::from_secs(10), "no clock line in:\n{stats}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert!(clock.contains(" ms ") && clock.contains("the master") && !clock.contains("WARN"), "{clock}");
 
     // Synchronous mode waits for the acknowledgement before returning.
     ok(&mut m, "config set sync_mode sync");

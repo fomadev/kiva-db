@@ -345,6 +345,17 @@ pub fn url_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// `1.4 s ahead of`, `250 ms behind`: a clock drift in words.
+pub fn drift_text(drift_ms: i64) -> String {
+    let side = if drift_ms >= 0 { "ahead of" } else { "behind" };
+    let d = drift_ms.unsigned_abs();
+    if d >= 1000 {
+        format!("{:.1} s {side}", d as f64 / 1000.0)
+    } else {
+        format!("{d} ms {side}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,13 +4,15 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 ## Unreleased (2.0.0)
 
-Accounts reach only what they are granted, and projects group the workspaces of one application under its name (`travel.places`, `school.places`).
+Accounts reach only what they are granted, and projects group the workspaces of one application under its name (`travel.places`, `school.places`). Dates, times and datetimes are types of their own, with time zones.
 
 ### Upgrading
 
 * **Incompatible:** a new account no longer gets a personal workspace `u_<name>`. It reaches no workspace until an administrator grants it some, and lands in none at login unless it has a default workspace or can reach only one. Scripts that create a user and then write with it must give it access (`create user ... grant write on <workspace>`).
 * Existing accounts keep working: on its first start, 2.0 turns each personal workspace `u_<name>` into a write grant and makes it the account's default workspace, so applications connected with those accounts land on their data as before. Accounts saved by 2.0 carry the new model; an earlier version reads them, but gives back to each user a `u_<name>` workspace reached without a grant, and ignores the grants on scopes such as `travel.*`. Make a backup before upgrading if you may need to go back.
 * `compact` outside the admin role now needs write access to every workspace of the project (`grant write on travel.*`), instead of the personal workspace.
+* A key of type `date`, `datetime` or `time` is stored with a type an earlier version does not know: 1.x cannot read it. Make a backup before upgrading if you may need to go back.
+* Account creation dates (`users`) are shown in the server's time zone (`time.zone`, the machine's by default, as before), not always the machine's.
 * The `users` structured request answers `default_workspace` instead of `home`; `whoami` answers `workspace` and `access` as `null` for a session in no workspace.
 
 ### Added
@@ -20,6 +22,11 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 * `create user "app" identified by "..." grant write on travel.* default workspace travel.places`: the account and its access in one command. `modify user "app" default workspace travel.places` chooses where it lands at login ([16.3](DOCUMENTATION.md#163-managing-accounts), [16.5](DOCUMENTATION.md#165-logging-in)).
 * Log in straight into a workspace as `<user>@<workspace>`, in the shell, over HTTP and from Redis clients (`redis://app%40travel.places:secret@host:6379`), which send it again at every reconnection. `SELECT travel.places` opens a workspace by its name ([23.4](DOCUMENTATION.md#234-logins-databases-roles)).
 * `workspace move places_travel to travel.places` renames a workspace or moves it into a project; its files stay where they are, and its grants follow it ([14.7](DOCUMENTATION.md#147-renaming-or-moving-a-workspace)).
+* Three types for moments: `set datetime created_at "2026-10-27 14:30:00"` (an instant, in UTC to the millisecond), `set date born "2004-05-09"`, `set time opens "08:00"`. `now()` (or `current_timestamp`), `today()` (`current_date`) and `current_time` give the moment of the action, moved by `+ 30 days`, `- 2 hours`... A text is never turned into a date by itself ([5.8](DOCUMENTATION.md#58-date-datetime-time)).
+* `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and `weekday()` in `print`, in conditions (`get where month(order:*.created_at) = 10`) and in `group by`. Conditions compare the ISO dates of documents as moments when the value is one (`created_at > now() - 7 days`), whatever their form; a B-tree index answers them, and `year(x) = 2026` too ([11.1](DOCUMENTATION.md#111-the-condition)). `json set k .seen now()` writes ISO 8601 in UTC.
+* Time zones: `config set time.zone Africa/Kinshasa` for the server, `modify user "app" timezone ...` for an account, `timezone ...` for a session. Datetimes are kept in UTC and shown in the zone; programs (REST, structured requests, Redis, drivers) always get ISO 8601 in UTC ([5.9](DOCUMENTATION.md#59-time-zones)).
+* Replicas compare their clock with the master's at every heartbeat: `stats` shows the difference, and beyond one second the replica warns in its log and the audit log, so that NTP gets turned on ([25.4](DOCUMENTATION.md#254-watching-it)). `stats` also shows the server's time in UTC and in its zone.
+* Node.js driver 1.2.0: a `Date` is stored as a `datetime` and comes back as a `Date`; `date` and `time` through `{ type }` ([24.3](DOCUMENTATION.md#243-nodejs)).
 
 ## 1.7.1 - 2026-10-27
 

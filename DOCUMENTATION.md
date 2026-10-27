@@ -768,7 +768,7 @@ A line that starts with `#` or `--` is ignored. Useful in command files.
 
 ## Chapter 5 — Data types
 
-KivaDB has seven types. `typeof` tells you the type of a key:
+KivaDB has ten types: string, number, boolean, null, array, object, bytes, and date, datetime and time ([5.8](#58-date-datetime-time)). `typeof` tells you the type of a key:
 
 ```text
 kiva> typeof age
@@ -869,7 +869,65 @@ note: 0x48656c6c6f [bytes]
 
 Three ways to write bytes: hexadecimal after `0x`, base64 after `b64:`, or the `bytes` prefix followed by a quoted text. The shell always displays bytes in hexadecimal (only the first 64 bytes of large values).
 
-### 5.8 Types are enforced
+### 5.8 date, datetime, time
+
+Three types hold moments:
+
+| Type | Written | Holds | Time zone |
+| :--- | :--- | :--- | :--- |
+| `datetime` | `"2026-10-27 14:30:00"` | An instant, kept in UTC to the millisecond | Shown in yours, read in yours when the text has no zone |
+| `date` | `"2026-10-27"` | A day of the calendar | None: a birthday is the same day everywhere |
+| `time` | `"14:30"` or `"14:30:00"` | A time of day | None: "opens at 8:00" stays 8:00 |
+
+```text
+kiva> set datetime created_at "2026-10-27 14:30:00"
+OK: created_at saved.
+kiva> set date born '2004-05-09'
+OK: born saved.
+kiva> set time opens "08:00"
+OK: opens saved.
+kiva> get created_at and born and opens
+created_at: 2026-10-27 14:30:00 +01:00 [datetime]
+born: 2004-05-09 [date]
+opens: 08:00:00 [time]
+```
+
+* **The type is written** before the key, as for `number`, and the text is quoted (double or single quotes). Without it, `set ref "2026-10-27"` stores text: KivaDB never turns a text into a date by itself, so a reference that looks like a date stays what it is.
+* **A datetime** may use `T` instead of the space, leave out the seconds, and carry its zone: `"2026-10-27T13:30:00Z"`, `"2026-10-27 14:30:00+01:00"`, `"2026-10-27 13:30 UTC"`. Without a zone, the text is a wall clock of your time zone ([5.9](#59-time-zones)); a date alone is midnight there.
+* **The moment of the action**: `now()` (or `current_timestamp`) is the date and time to the millisecond, `today()` (or `current_date`) the day in your time zone, `current_time` the time of day:
+
+  ```text
+  kiva> set created_at now()
+  kiva> set due today() + 30 days
+  kiva> set reminder now() + 2 hours - 30 minutes
+  kiva> set closes time "18:00" - 15 minutes
+  ```
+
+  A moment moves by `ms`, `seconds`, `minutes`, `hours`, `days` or `weeks` (singular or plural; `s`, `min`, `h`, `d`, `w` too). Months and years vary in length, so they are not units: write the date. A `date` moves by days or weeks only.
+* **Parts of a moment**: `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and `weekday()` (1 for Monday to 7 for Sunday) are functions, not types. They work in `print` (`print month(created_at)`), in conditions and in `group by` ([11.1](#111-the-condition)). A datetime is read in your time zone: 23:30 UTC on 31 December is already 2027 in Kinshasa.
+* **In documents**, JSON has no date type: dates are text in ISO 8601. `json set order:1 .created_at now()` writes `"2026-10-27T13:30:00.250Z"` (UTC). Conditions compare such texts as moments when the value is one (`now() - 7 days`, `datetime "..."`), whatever their form: with or without `Z`, milliseconds or a zone.
+* **Programs** (REST, structured requests, Redis, the drivers) always get a datetime in ISO 8601, in UTC: `2026-10-27T13:30:00.000Z`. Each program shows it in the time zone of its own user. They write one as such a text, or as milliseconds since 1970.
+
+### 5.9 Time zones
+
+A datetime is stored in UTC, so the same instant is right wherever the server is. The time zone only decides how dates are shown and how a text without a zone is read:
+
+```text
+kiva> config set time.zone Africa/Kinshasa
+kiva> timezone
+Time zone: Africa/Kinshasa (from the server's time.zone). It is 2026-10-27 14:30:00 +01:00 here, 2026-10-27T13:30:00.000Z UTC.
+kiva> timezone America/New_York
+kiva> get created_at
+created_at: 2026-10-27 09:30:00 -04:00 [datetime]
+kiva> timezone default
+```
+
+* `time.zone` is the server's zone: `local` (the machine's, the default), `UTC`, a name of the IANA list such as `Africa/Kinshasa`, `Africa/Lubumbashi`, `Europe/Paris`, `America/New_York`, or an offset such as `+01:00`. Names follow summer time; offsets do not. It applies at once, also to the dates of `users` and `stats`.
+* `modify user "app" timezone Africa/Lubumbashi` gives an account its own zone, from its next login (`... timezone none` to go back to the server's). Anyone may set their own; an admin, anyone's.
+* `timezone <name>` changes it for the session only; `timezone default` goes back to the account's, else the server's.
+* A server in another country is not "late": its clock is right, only its zone differs, and `time.zone` settles that. A clock that is really wrong is set by the system's time synchronization (NTP: `timedatectl set-ntp true` on Linux, automatic on Windows and macOS), not by KivaDB. `stats` shows the server's time in UTC and in its zone, and a replica warns when its clock is more than a second away from its master's ([25.4](#254-watching-it)).
+
+### 5.10 Types are enforced
 
 `update` never changes the type of a key:
 
@@ -1119,6 +1177,8 @@ kiva> print (age + 9) * 2, "years"
 ```
 
 Several expressions separated by commas are displayed on one line, separated by spaces. Paths into documents work too: `print user:1.age + 1`.
+
+The parts of a date, a time or a datetime are functions ([5.8](#58-date-datetime-time)): `print year(created_at), month(created_at), weekday(born)` gives `2026 10 7`. `print now(), today()` shows the moment in your time zone.
 
 ### 8.3 Text and interpolation
 
@@ -1461,6 +1521,21 @@ Count: 2
 ```
 
 Regular expressions are not part of the language: `like` and `ilike` cover prefixes, suffixes and words inside a text, and an index can serve them ([11.4](#114-indexes--making-queries-fast)).
+
+**Dates.** The value may be a moment ([5.8](#58-date-datetime-time)): `now()`, `today()`, `datetime "2026-10-27 14:30"`, `time "08:00"`, moved by durations. The field, ISO text in the documents, is then compared as a moment, whatever its form. A function compares a part of the field's date:
+
+```text
+kiva> get where order:*.created_at > now() - 7 days
+kiva> get where order:*.created_at >= datetime "2026-10-01" and created_at < datetime "2026-11-01"
+kiva> get where year(order:*.created_at) = 2026 and month(created_at) = 10
+kiva> get where weekday(order:*.created_at) in [6, 7]
+kiva> get where place:*.opens <= time "08:00"
+kiva> count order:* group by month(order:*.created_at)
+```
+
+* `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and `weekday()` read the field in your time zone. A document whose field is not a date does not match.
+* A date compared with `today()` is text compared with text: `"2026-10-27"` sorts as it should.
+* A B-tree index on the field answers comparisons with a moment, and `year(...)` too: `year(x) = 2026` runs as `x >= datetime "2026-01-01" and x < datetime "2027-01-01"`, in your time zone (`explain` shows it). The other functions read every document of the pattern.
 
 The field starts at the first dot after the last `*`: in `user:*.address.city`, the pattern is `user:*` and the field is `address.city`. Spaces around the operator are optional (`user:*.age>26`). If the pattern itself needs quoting, quote the whole left side: `"*.active" = true`.
 
@@ -2350,6 +2425,7 @@ network.port = 2911
 | `network.port` | `2911` | KivaDB protocol port | next start |
 | `network.bind` | `127.0.0.1` | Address to listen on | next start |
 | `security.auth_required` | `false` | Ask for a user name and password | immediately |
+| `time.zone` | `local` | Time zone dates are shown and read in: `local`, `UTC`, `Africa/Kinshasa`, `+01:00` ([5.9](#59-time-zones)) | immediately |
 | `server.threads` | `8` | Commands executed at the same time | next start |
 | `server.max_clients` | `1000` | Simultaneous connections | immediately |
 | `http.enabled` | `true` | Start the REST API | next start |
@@ -3296,6 +3372,7 @@ The command language answers with text written for people. A program that needs 
 Notes on `query` and `aggregate`:
 
 * `where` is the condition of [11.1](#111-the-condition) as JSON: `{"field": "age", "cmp": ">", "value": 18}` (`cmp` defaults to `=`), `{"role": "dev", "city": "Goma"}` (equalities joined by `and`; a list as value means `in`: `{"city": ["Goma", "Bukavu"]}`), `{"and": [...]}`, `{"or": [...]}`, `{"not": {...}}`, or a list (its items joined by `and`). With `where`, `target` is the key pattern alone.
+* Dates: a value `{"$datetime": "2026-10-27T13:30:00Z"}` compares the field as a moment, `{"$time": "08:00"}` as a time of day; a field written `"month(created_at)"` compares a part of its date ([11.1](#111-the-condition)), and so does `"group_by": "month(created_at)"`.
 * `compute` names each aggregate: `{"n": "count", "mean_age": {"avg": "age"}, "top": {"max": "salary"}}`, or a list `["count", {"avg": "age"}]` whose results are named `count`, `avg_age`. Without it, `count`. At most 32 per request.
 
 ```json
@@ -3307,7 +3384,7 @@ answers `{"matches": 3, "groups": [{"key": "admin", "matches": 1, "values": {"n"
 
 Notes on `put`:
 
-* `value` is plain JSON matching `type`. A number may be given as a JSON number or as text (`"3.14"`), bytes are base64 text.
+* `value` is plain JSON matching `type`. A number may be given as a JSON number or as text (`"3.14"`), bytes are base64 text. A `datetime` is a text (`"2026-10-27T13:30:00Z"`, or a wall clock of the session's zone such as `"2026-10-27 14:30"`) or milliseconds since 1970; a `date` is `"2026-10-27"`, a `time` `"14:30:00"`. `get` answers a datetime in ISO 8601, in UTC.
 * `mode` is `create` (fail if the key exists), `update` (fail if it does not) or `upsert` (default).
 * A write that a unique index refuses ([11.7](#117-unique-indexes)) fails with a message starting with `UNIQUE:`; over HTTP, with code 409.
 * `ttl` absent keeps the current expiry of the key, `0` removes it, a positive number sets it in seconds.
@@ -3586,7 +3663,7 @@ Unlike a default Redis, every write is in the data file before the answer: keys,
 | set | `object` `{"redis": "set", "members": ["a", "b"]}` ([23.8](#238-sets-and-sorted-sets)) |
 | sorted set | `object` `{"redis": "zset", "members": {"alice": 12.5}}` |
 
-KivaDB values read through Redis: strings, numbers, booleans, null and bytes come back as Redis strings; objects are hashes and arrays are lists (`GET` on them answers `WRONGTYPE`, as Redis does). An object marked `"redis": "set"` or `"zset"` is a set or a sorted set, never a hash.
+KivaDB values read through Redis: strings, numbers, booleans, null and bytes come back as Redis strings, and so do dates, times and datetimes, in ISO 8601 (a datetime in UTC: `2026-10-27T13:30:00.000Z`); objects are hashes and arrays are lists (`GET` on them answers `WRONGTYPE`, as Redis does). An object marked `"redis": "set"` or `"zset"` is a set or a sorted set, never a hash.
 
 ### 23.3 Supported commands
 
@@ -4054,6 +4131,8 @@ await db.subscribe("user:*");
 
 To encrypt the connection, add `tls: { fingerprint: "..." }` with the fingerprint shown by `kivadb tls` ([16.11](#1611-encrypted-connections-tls)). Its README lists every method.
 
+From driver **1.2.0** (with KivaDB 2.0 or later), a JavaScript `Date` is stored as a `datetime` and comes back as a `Date`; a `date` or a `time` is given as text with its type: `db.set("born", "2004-05-09", { type: "date" })` ([5.8](#58-date-datetime-time)).
+
 From driver **1.1.0** (with KivaDB 1.7.0 or later), `add` stores a document under a key KivaDB names ([6.7](#67-add--let-kivadb-name-the-key)), `query` takes a condition as JSON with `in`, `like` and `ilike` ([11.1](#111-the-condition), [20.4](#204-structured-requests-for-tools)), and an error keeps the code word of KivaDB's message in `err.code`, such as `UNIQUE` for a write a unique index refuses ([11.7](#117-unique-indexes)):
 
 ```javascript
@@ -4237,7 +4316,7 @@ OK: place:66f1c2a0e4b0a1b2c3d4e5f6 saved.
 OK: place:66f1c2a0e4b0a1b2c3d4e5f7 saved.
 ```
 
-The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"` (a date before 1970 or after 9999, which `mongoexport` writes as a number of milliseconds, is turned into the same form), which `>` and `<` compare correctly as long as they all have this form. `$numberInt`, `$numberLong`, `$numberDouble` and `$numberDecimal` become numbers, with two limits: an integer beyond 2^53 (9 007 199 254 740 992) would lose its last digits, so it stays text; a `Decimal128` keeps about 15 significant digits, enough for measures, not for amounts that must be exact to the last digit (store those as text, or in the smallest unit as an integer). Texts with quotes are safe: `JSON.stringify` writes `\"`, and a document literal is read as JSON (the shell's limit on quotes concerns quoted strings such as `set name "..."`, [4](#chapter-4--syntax-rules)). Type the `node -e` command in bash or Git Bash: Windows PowerShell 5.1 changes the double quotes it passes to programs. The `.kva` file itself may come from any Windows tool: since 1.7.1, `kivadb run` reads UTF-16 and byte-order-marked files ([3.10](#310-command-files-kva)). Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
+The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"` (a date before 1970 or after 9999, which `mongoexport` writes as a number of milliseconds, is turned into the same form), which `>` and `<` compare as moments when the value is one (`created_at > now() - 30 days`, `created_at >= datetime "2026-01-01"`, [11.1](#111-the-condition)), and as text otherwise, correctly as long as they all have this form. `$numberInt`, `$numberLong`, `$numberDouble` and `$numberDecimal` become numbers, with two limits: an integer beyond 2^53 (9 007 199 254 740 992) would lose its last digits, so it stays text; a `Decimal128` keeps about 15 significant digits, enough for measures, not for amounts that must be exact to the last digit (store those as text, or in the smallest unit as an integer). Texts with quotes are safe: `JSON.stringify` writes `\"`, and a document literal is read as JSON (the shell's limit on quotes concerns quoted strings such as `set name "..."`, [4](#chapter-4--syntax-rules)). Type the `node -e` command in bash or Git Bash: Windows PowerShell 5.1 changes the double quotes it passes to programs. The `.kva` file itself may come from any Windows tool: since 1.7.1, `kivadb run` reads UTF-16 and byte-order-marked files ([3.10](#310-command-files-kva)). Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
 
 ---
 
@@ -4320,6 +4399,8 @@ Role: replica (read-only)
 ```
 
 The sequence counts the operations of all workspaces together, in one order: a replica that acknowledged operation 1024 has everything before it, in every workspace. `wait` and the lag mean the same.
+
+**Clocks.** Each heartbeat carries the master's time, and the replica compares it with its own. `stats` on a replica shows the difference (`> Clock : 3 ms ahead of the master`). Beyond one second, the replica warns once in its log and in the audit log (`this node's clock is 4.2 s behind the master's ...`): TTLs, `now()` and certificates then disagree between the nodes, and a promoted replica would write dates off by that much. KivaDB does not move its clock: turn on the system's time synchronization (NTP) on every node.
 
 ### 25.5 Asynchronous or synchronous
 
@@ -5154,6 +5235,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | Command | Effect |
 | :--- | :--- |
 | `set [type] <key> <value> [ttl <sec>] [if not exists]` | Create (`if not exists`: skip if present) |
+| `set datetime <key> "2026-10-27 14:30"`, `set date <key> "..."`, `set time <key> "..."` | A moment ([5.8](#58-date-datetime-time)) |
+| `set <key> now()` / `today()` / `current_time`, `+ 7 days`, `- 2 hours` | The moment of the action, moved by durations |
 | `add <prefix> <value> [ttl <sec>]` | Create a key named by KivaDB: `<prefix>` + a new identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |
@@ -5163,7 +5246,8 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `typeof <key>` | Its type |
 | `change [type] <old> to [type] <new> [value]` | Rename or migrate |
 | `bump [type] <key> add\|set <sec>` | Extend or reset the TTL |
-| `print <expr>, <expr>` | Calculate and display |
+| `print <expr>, <expr>` | Calculate and display; `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()`, `weekday()`, `now()`, `today()` |
+| `timezone [<name> \| default]` | Show or change the time zone of the session ([5.9](#59-time-zones)) |
 
 ### Listing and querying
 
@@ -5249,6 +5333,7 @@ While that command runs, connect Kiva Studio to `localhost`, port 2911: the traf
 | `modify user "<n>" password "<p>"` | Change a password |
 | `modify user "<n>" role "<r>"` | Change a role (admin) |
 | `modify user "<n>" default workspace <w>\|none` | Where the user lands at login (admin) |
+| `modify user "<n>" timezone <zone>\|none` | The user's time zone (their own, or admin) |
 | `drop user "<n>"` | Delete an account (admin) |
 | `grant read\|write on <scope>[, <scope>...] to "<n>"` | Give access: `travel.places`, `travel.*`, `*.places`, `*.*` (admin) |
 | `grant admin to "<n>"` | Make an admin (admin) |

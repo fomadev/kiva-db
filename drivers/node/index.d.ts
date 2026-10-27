@@ -20,7 +20,17 @@ export interface ConnectOptions {
   tls?: boolean | ({ fingerprint?: string } & Record<string, unknown>);
 }
 
-export type KivaType = "string" | "number" | "boolean" | "null" | "array" | "object" | "bytes";
+export type KivaType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "null"
+  | "array"
+  | "object"
+  | "bytes"
+  | "date"
+  | "datetime"
+  | "time";
 
 export interface SetOptions {
   /** Seconds until the key expires; 0 removes an expiry. Omitted keeps the current one. */

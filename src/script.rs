@@ -67,6 +67,9 @@ fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
         Value::Null => LVal::Nil,
         Value::Doc(j) => json_to_lua(lua, j)?,
         Value::Bytes(b) => LVal::String(lua.create_string(b)?),
+        Value::Date(_) | Value::DateTime(_) | Value::Time(_) => {
+            LVal::String(lua.create_string(v.to_json().as_str().unwrap_or(""))?)
+        }
     })
 }
 

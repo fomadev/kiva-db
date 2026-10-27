@@ -855,6 +855,125 @@ fn accounts_from_before_2_0_keep_their_personal_workspace() {
 }
 
 #[test]
+fn dates_times_and_datetimes() {
+    let dir = TempDir::new("dates");
+    let mut s = kiva(&dir);
+    ok(&mut s, "config set time.zone Africa/Kinshasa");
+
+    // Typed values: a datetime is an instant, shown in the zone; dates and times have none.
+    ok(&mut s, r#"set datetime created_at "2026-10-27 14:30:00""#);
+    ok(&mut s, "set date born '2004-05-09'");
+    ok(&mut s, r#"set time opens "08:00""#);
+    assert_eq!(
+        ok(&mut s, "get created_at and born and opens"),
+        "created_at: 2026-10-27 14:30:00 +01:00 [datetime]\nborn: 2004-05-09 [date]\nopens: 08:00:00 [time]"
+    );
+    ok(&mut s, "timezone America/New_York");
+    assert_eq!(ok(&mut s, "get created_at"), "created_at: 2026-10-27 09:30:00 -04:00 [datetime]");
+    assert_eq!(ok(&mut s, "get born"), "born: 2004-05-09 [date]");
+    ok(&mut s, "timezone default");
+    // A text with its own zone is that moment, wherever it is read.
+    ok(&mut s, r#"update datetime created_at "2026-10-27T13:30:00Z""#);
+    assert_eq!(ok(&mut s, "get created_at"), "created_at: 2026-10-27 14:30:00 +01:00 [datetime]");
+    assert!(fails(&mut s, r#"set datetime bad "27/10/2026""#).contains("is not a datetime"));
+    assert!(fails(&mut s, "set date bad 2026-10-27").contains("A date is quoted"));
+    assert!(fails(&mut s, r#"update created_at "2026-10-27""#).contains("Cannot update [datetime]"));
+    // Without a type keyword, a date-like text stays text; `date` and `time` remain key names.
+    ok(&mut s, r#"set ref "2026-10-27""#);
+    assert_eq!(ok(&mut s, "typeof ref"), " -> ref is a [string]");
+    ok(&mut s, r#"set date "x""#);
+    ok(&mut s, "set time now()");
+    assert_eq!(ok(&mut s, "typeof date and typeof time"), " -> date is a [string]\n -> time is a [datetime]");
+
+    // The moment of the action, moved by durations.
+    ok(&mut s, "set at now()");
+    ok(&mut s, "set due today() + 30 days");
+    ok(&mut s, "set soon now() + 2 hours - 30 minutes");
+    ok(&mut s, "set lunch time '12:00' + 90 minutes");
+    assert_eq!(ok(&mut s, "get lunch"), "lunch: 13:30:00 [time]");
+    ok(&mut s, "set at2 current_timestamp");
+    assert!(ok(&mut s, "typeof due and typeof at2").contains("due is a [date]"));
+    assert!(fails(&mut s, "set late today() + 2 hours").contains("a date moves by days or weeks"));
+    assert!(fails(&mut s, "set late now() + 1 month").contains("months and years vary in length"));
+    assert!(fails(&mut s, "set number n now()").contains("Value is a datetime, not a number"));
+
+    // Functions, in print and in the session's zone.
+    assert_eq!(ok(&mut s, "print year(created_at), month(created_at), day(created_at)"), "2026 10 27");
+    assert_eq!(ok(&mut s, "print hour(created_at), weekday(born), minute(opens)"), "14 7 0");
+    assert!(fails(&mut s, "print month(42)").contains("takes a date, a time or a datetime"));
+
+    // Documents keep their dates as ISO text, compared as moments.
+    ok(&mut s, "set doc {}");
+    ok(&mut s, "json set doc .seen now()");
+    assert!(ok(&mut s, "get doc.seen").contains("Z"));
+    for (k, at) in [
+        ("o:1", "2026-10-27T13:30:00Z"),
+        ("o:2", "2026-12-31T23:30:00Z"),
+        ("o:3", "2025-03-01 10:00"),
+        ("o:4", "2026-10-27"),
+    ] {
+        ok(&mut s, &format!(r#"set {k} {{"at": "{at}", "opens": "08:00"}}"#));
+    }
+    let keys = |s: &mut Session, q: &str| {
+        let out = ok(s, q);
+        out.lines()
+            .filter_map(|l| l.split(':').nth(1).map(|n| n.to_string()))
+            .filter(|n| n.len() == 1)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    assert_eq!(keys(&mut s, r#"get where o:*.at >= datetime "2026-10-27 14:30" return opens"#), "1,2");
+    // 23:30 UTC on 31 December is already 2027 in Kinshasa.
+    assert_eq!(keys(&mut s, "get where year(o:*.at) = 2027 return opens"), "2");
+    assert_eq!(keys(&mut s, "get where month(o:*.at) = 10 return opens"), "1,4");
+    assert_eq!(keys(&mut s, r#"get where o:*.opens >= time "07:30" return opens"#), "1,2,3,4");
+    assert_eq!(keys(&mut s, "get where o:*.at < now() - 365 days return opens"), "3");
+    assert_eq!(
+        ok(&mut s, "count o:* group by year(o:*.at)"),
+        "Count by year(at) (3 groups, 4 matches):\n  2025: 1\n  2026: 2\n  2027: 1"
+    );
+    // An index answers moments and year(): the same documents, fewer read.
+    ok(&mut s, "create index on o: (at)");
+    let plan = ok(&mut s, "explain get where year(o:*.at) = 2026");
+    assert!(plan.contains(r#"at >= datetime "2026-01-01 00:00:00 +01:00""#) && plan.contains("INDEX"), "{plan}");
+    assert_eq!(keys(&mut s, "get where year(o:*.at) = 2026 return opens"), "1,4");
+    assert!(ok(&mut s, r#"explain get where o:*.at < datetime "2026-01-01""#).contains("INDEX SCAN"));
+    assert_eq!(keys(&mut s, r#"get where o:*.at < datetime "2026-01-01" return opens"#), "3");
+    assert_eq!(keys(&mut s, r#"get where o:*.at = datetime "2026-10-27 14:30" return opens"#), "1");
+
+    // The server's zone, the session's, and an account's.
+    assert!(fails(&mut s, "config set time.zone Mars/Olympus").contains("is not a time zone"));
+    assert!(ok(&mut s, "timezone").starts_with("Time zone: Africa/Kinshasa (from the server's time.zone)"));
+    assert!(fails(&mut s, "timezone Nowhere").contains("is not a time zone"));
+    ok(&mut s, r#"create user "ny" identified by "pw""#);
+    ok(&mut s, r#"grant read on default to "ny""#);
+    ok(&mut s, r#"modify user "ny" timezone America/New_York"#);
+    let mut ny = Session::new(s.inst.clone(), false, None);
+    ok(&mut ny, "auth ny pw");
+    assert_eq!(ok(&mut ny, "get created_at"), "created_at: 2026-10-27 09:30:00 -04:00 [datetime]");
+    assert!(ok(&mut s, "stats").contains("> Clock (UTC)          : "));
+
+    // Programs get ISO 8601 in UTC, whatever the zone, and give a text or milliseconds.
+    use kivadb::api::handle;
+    use serde_json::json;
+    let got = handle(&mut s, &json!({"op": "get", "key": "created_at"})).unwrap();
+    assert_eq!((got["type"].as_str(), got["value"].as_str()), (Some("datetime"), Some("2026-10-27T13:30:00.000Z")));
+    handle(&mut s, &json!({"op": "put", "key": "api_at", "type": "datetime", "value": "2026-10-27 14:30"})).unwrap();
+    handle(&mut s, &json!({"op": "put", "key": "api_ms", "type": "datetime", "value": 1793107800000i64})).unwrap();
+    assert_eq!(
+        ok(&mut s, "get api_at and api_ms"),
+        "api_at: 2026-10-27 14:30:00 +01:00 [datetime]\napi_ms: 2026-10-27 14:30:00 +01:00 [datetime]"
+    );
+    assert!(handle(&mut s, &json!({"op": "put", "key": "x", "type": "date", "value": "2026-13-01"})).is_err());
+    let q = json!({"op": "query", "target": "o:*", "where": {"field": "month(at)", "cmp": "=", "value": 10}});
+    assert_eq!(handle(&mut s, &q).unwrap()["rows"].as_array().map(|r| r.len()), Some(2));
+    let q = json!({"op": "query", "target": "o:*", "where": {"field": "at", "cmp": "<", "value": {"$datetime": "2026-01-01T00:00:00Z"}}});
+    assert_eq!(handle(&mut s, &q).unwrap()["rows"].as_array().map(|r| r.len()), Some(1));
+    let agg = json!({"op": "aggregate", "target": "o:*", "functions": ["count"], "group_by": "year(at)"});
+    assert_eq!(handle(&mut s, &agg).unwrap()["groups"].as_array().map(|g| g.len()), Some(3));
+}
+
+#[test]
 fn skip_auth_bypasses_login() {
     let dir = TempDir::new("skipauth");
     {

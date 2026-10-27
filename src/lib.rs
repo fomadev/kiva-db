@@ -41,6 +41,7 @@ pub mod semantic_cache;
 pub mod server;
 pub mod session;
 pub mod shell;
+pub mod time;
 pub mod tls;
 pub mod update;
 pub mod util;
