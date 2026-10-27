@@ -21,6 +21,8 @@ use crate::value::{Type, Value};
 pub use crate::vector::AutoTune;
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
+
+mod ordering;
 use serde_json::Value as Json;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -709,6 +711,67 @@ pub struct Plan {
     /// Keys the engine expects to examine.
     pub candidates: usize,
     pub total_keys: usize,
+    /// How the rows are put in the order asked for, if one was.
+    pub order: Option<String>,
+}
+
+/// How the documents a query selects are handed out.
+#[derive(Clone, Debug, Default)]
+pub struct ReadOpts {
+    /// 0: no limit.
+    pub limit: usize,
+    /// By the value of a field; otherwise in key order.
+    pub order: Option<Order>,
+    /// The rows after this key: the next page.
+    pub after: Option<String>,
+    /// Key order from the last key.
+    pub reverse: bool,
+}
+
+/// `order by <field> [asc|desc]`.
+#[derive(Clone, Debug)]
+pub struct Order {
+    pub field: String,
+    path: Vec<jsonpath::Seg>,
+    pub desc: bool,
+}
+
+impl Order {
+    pub fn new(field: &str, desc: bool) -> std::result::Result<Order, String> {
+        crate::query::check_field(field)?;
+        let path = jsonpath::parse_path(field)?;
+        Ok(Order { field: field.to_string(), path, desc })
+    }
+
+    /// `created_at desc`.
+    pub fn describe(&self) -> String {
+        format!("{} {}", self.field, if self.desc { "desc" } else { "asc" })
+    }
+
+    fn key_of(&self, doc: &Json) -> Option<SKey> {
+        ordering::sort_key(jsonpath::get(doc, &self.path))
+    }
+}
+
+/// What running a query did, counted while it ran (`explain analyze`).
+#[derive(Clone, Debug, Default)]
+pub struct Measured {
+    /// Keys taken from secondary indexes: listed, or checked against one.
+    pub index_entries: u64,
+    /// Keys looked at, whether or not a document was read for them.
+    pub keys_examined: u64,
+    /// Documents read, from the value cache or from disk.
+    pub docs_read: u64,
+    pub from_cache: u64,
+    /// Documents read that did not pass the condition.
+    pub filtered_out: u64,
+    pub returned: u64,
+    /// Rows handed to the sort, when the order is made in memory.
+    pub sorted: u64,
+    pub plan_time: Duration,
+    pub read_time: Duration,
+    pub sort_time: Duration,
+    pub total_time: Duration,
 }
 
 pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
@@ -4520,12 +4583,34 @@ impl Engine {
     /// vector search takes them as the documents passing `cond`.
     fn index_candidates(idx: &SecIndex, cond: &Cond) -> Vec<String> {
         let mut out = Vec::new();
-        let mut push = |set: &BTreeSet<String>| out.extend(set.iter().cloned());
+        Self::visit_postings(idx, cond, &mut |set| {
+            out.extend(set.iter().cloned());
+            true
+        });
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// How many keys the index lists for `cond`, counted up to `cap`:
+    /// what choosing among indexes costs, without copying a key.
+    fn count_postings(idx: &SecIndex, cond: &Cond, cap: usize) -> usize {
+        let mut n = 0;
+        Self::visit_postings(idx, cond, &mut |set| {
+            n += set.len();
+            n < cap
+        });
+        n
+    }
+
+    /// Calls `f` with the keys of each indexed value satisfying `cond`,
+    /// until it returns false.
+    fn visit_postings(idx: &SecIndex, cond: &Cond, f: &mut dyn FnMut(&BTreeSet<String>) -> bool) {
         if let (Some(("$datetime", text)), Postings::Tree(map)) = (crate::time::tagged(&cond.value), &idx.map) {
             // Texts of moments sort by date first, but not exactly by moment
             // (zones, fractions of a second): read the dates two days around,
             // then keep the values that pass, still without reading a document.
-            let Ok(at) = crate::time::parse_datetime(text, &crate::time::Zone::Utc) else { return out };
+            let Ok(at) = crate::time::parse_datetime(text, &crate::time::Zone::Utc) else { return };
             let day = |d: i64| SKey::Str(crate::time::date_text((at + chrono::Duration::days(d)).date_naive()));
             let lo = match cond.op {
                 CmpOp::Gt | CmpOp::Ge | CmpOp::Eq => Bound::Included(day(-2)),
@@ -4536,37 +4621,34 @@ impl Engine {
                 _ => Bound::Unbounded,
             };
             for (sk, set) in map.range((lo, hi)) {
-                if matches!(sk, SKey::Str(_)) && cond.test(&sk.to_json()) {
-                    push(set);
+                if Self::admits(cond, sk) && !f(set) {
+                    return;
                 }
             }
-            out.sort();
-            return out;
+            return;
         }
         match cond.op {
             CmpOp::Eq => {
                 if let Some(set) = SKey::from_json(&cond.value).and_then(|sk| idx.map.get(&sk)) {
-                    push(set);
+                    f(set);
                 }
-                return out;
+                return;
             }
             CmpOp::In => {
                 for v in cond.value.as_array().into_iter().flatten() {
                     if let Some(set) = SKey::from_json(v).and_then(|sk| idx.map.get(&sk)) {
-                        push(set);
+                        if !f(set) {
+                            return;
+                        }
                     }
                 }
-                out.sort();
-                out.dedup();
-                return out;
+                return;
             }
             CmpOp::Like | CmpOp::ILike => {
                 let Some(pattern) = cond.value.as_str() else {
-                    return out;
+                    return;
                 };
-                let fold = cond.op == CmpOp::ILike;
-                let matching = |sk: &SKey| matches!(sk, SKey::Str(t) if like_match(t, pattern, fold));
-                let prefix = if fold { String::new() } else { like_prefix(pattern) };
+                let prefix = if cond.op == CmpOp::ILike { String::new() } else { like_prefix(pattern) };
                 match &idx.map {
                     // The values that start with the pattern's text are
                     // next to each other in a B-tree.
@@ -4576,54 +4658,83 @@ impl Engine {
                             if !matches!(sk, SKey::Str(t) if t.starts_with(&prefix)) {
                                 break;
                             }
-                            if matching(sk) {
-                                push(set);
+                            if Self::admits(cond, sk) && !f(set) {
+                                return;
                             }
                         }
                     }
                     // Otherwise every distinct value is tested: still
                     // without reading a document.
-                    map => map.for_each(|sk, set| {
-                        if matching(sk) {
-                            push(set)
-                        }
-                    }),
+                    map => {
+                        let mut go = true;
+                        map.for_each(|sk, set| {
+                            if go && Self::admits(cond, sk) {
+                                go = f(set);
+                            }
+                        })
+                    }
                 }
-                out.sort();
-                return out;
+                return;
             }
             _ => {}
         }
         let Some(sk) = SKey::from_json(&cond.value) else {
-            return out;
+            return;
         };
         // Only a B-tree is ever chosen for a range.
         let Postings::Tree(map) = &idx.map else {
-            return out;
+            return;
         };
         match cond.op {
             CmpOp::Gt | CmpOp::Ge => {
                 let lo = if cond.op == CmpOp::Gt { Bound::Excluded(&sk) } else { Bound::Included(&sk) };
                 for (k, set) in map.range((lo, Bound::Unbounded)) {
-                    if !k.same_kind(&sk) {
+                    if !k.same_kind(&sk) || !f(set) {
                         break;
                     }
-                    push(set);
                 }
             }
             CmpOp::Lt | CmpOp::Le => {
                 let hi = if cond.op == CmpOp::Lt { Bound::Excluded(&sk) } else { Bound::Included(&sk) };
                 for (k, set) in map.range((Bound::Unbounded, hi)).rev() {
-                    if !k.same_kind(&sk) {
+                    if !k.same_kind(&sk) || !f(set) {
                         break;
                     }
-                    push(set);
                 }
             }
             _ => {}
         }
-        out.sort();
-        out
+    }
+
+    /// Whether an indexed value satisfies `cond`, as [`Self::visit_postings`]
+    /// decides: an `and` checks the keys of its smallest part against the
+    /// other indexes this way, without listing their keys.
+    fn admits(cond: &Cond, sk: &SKey) -> bool {
+        if crate::time::tagged(&cond.value).is_some() {
+            return matches!(sk, SKey::Str(_)) && cond.test(&sk.to_json());
+        }
+        use std::cmp::Ordering::*;
+        // As SKey::from_json(v) would compare, without building it.
+        let order = |v: &Json| match (sk, v) {
+            (SKey::Null, Json::Null) => Some(Equal),
+            (SKey::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
+            (SKey::Num(a), Json::Number(n)) => n.as_f64().map(|b| a.cmp(&OrdF64(b))),
+            (SKey::Str(a), Json::String(b)) => Some(a.as_str().cmp(b.as_str())),
+            _ => None,
+        };
+        match cond.op {
+            CmpOp::Eq => order(&cond.value) == Some(Equal),
+            CmpOp::In => cond.value.as_array().is_some_and(|l| l.iter().any(|v| order(v) == Some(Equal))),
+            CmpOp::Like | CmpOp::ILike => match (sk, cond.value.as_str()) {
+                (SKey::Str(t), Some(p)) => like_match(t, p, cond.op == CmpOp::ILike),
+                _ => false,
+            },
+            CmpOp::Gt => order(&cond.value) == Some(Greater),
+            CmpOp::Ge => matches!(order(&cond.value), Some(Greater | Equal)),
+            CmpOp::Lt => order(&cond.value) == Some(Less),
+            CmpOp::Le => matches!(order(&cond.value), Some(Less | Equal)),
+            CmpOp::Ne => false,
+        }
     }
 
     /// Whether an index on the field of `cond` could answer it: false for
@@ -4653,11 +4764,13 @@ impl Engine {
 
     /// How `q` would be executed, without running it.
     pub fn explain_query(&self, q: &Query) -> Plan {
-        let inner = self.lock();
-        match q.expr.as_ref().and_then(|e| Self::index_plan(&inner, e)) {
-            Some(p) => p.plan(inner.index.len()),
-            None => Self::scan_plan(&inner, &q.pattern),
-        }
+        self.explain_read(q, &ReadOpts::default())
+    }
+
+    /// How `q` would be read with `opts`, without reading a document: the
+    /// indexes are consulted as running it would, nothing else.
+    pub fn explain_read(&self, q: &Query, opts: &ReadOpts) -> Plan {
+        Self::choose(&self.lock(), q, opts, true).plan
     }
 
     fn scan_plan(inner: &Inner, pattern: &str) -> Plan {
@@ -4672,39 +4785,27 @@ impl Engine {
             index: None,
             candidates,
             total_keys: inner.index.len(),
+            order: None,
         }
     }
 
+    fn index_name(idx: &SecIndex) -> String {
+        let kind = if idx.kind == IndexKind::Hash { " using hash" } else { "" };
+        format!("{} ({}){kind}", idx.pattern, idx.field)
+    }
+
     /// The keys the secondary indexes give for `e`, sorted, when they can:
-    /// a comparison with an index, an `and` with at least one such part
-    /// (their keys intersected), an `or` whose parts all have one (merged).
-    /// `not` never: it selects what an index does not list.
+    /// a comparison with an index, an `and` with at least one such part,
+    /// an `or` whose parts all have one (merged). `not` never: it selects
+    /// what an index does not list.
     fn index_plan(inner: &Inner, e: &Expr) -> Option<IndexPlan> {
         match e {
             Expr::Test(t) => {
-                let i = Self::find_index(inner, &t.cond)?;
-                let idx = &inner.sec[i];
-                let kind = if idx.kind == IndexKind::Hash { " using hash" } else { "" };
-                let mut keys = Self::index_candidates(idx, &t.cond);
-                keys.dedup();
-                Some(IndexPlan { keys, used: format!("{} ({}){kind}", idx.pattern, idx.field), indexes: 1 })
+                let idx = &inner.sec[Self::find_index(inner, &t.cond)?];
+                let keys = Self::index_candidates(idx, &t.cond);
+                Some(IndexPlan { entries: keys.len() as u64, keys, used: Self::index_name(idx), indexes: 1 })
             }
-            Expr::And(parts) => {
-                let mut plans: Vec<IndexPlan> = parts.iter().filter_map(|p| Self::index_plan(inner, p)).collect();
-                // Smallest first: each intersection then walks fewer keys.
-                plans.sort_by_key(|p| p.keys.len());
-                let mut it = plans.into_iter();
-                let mut acc = it.next()?;
-                for p in it {
-                    if acc.keys.is_empty() {
-                        break;
-                    }
-                    acc.keys = intersect_sorted(&acc.keys, &p.keys);
-                    acc.used = format!("{} and {}", acc.used, p.used);
-                    acc.indexes += p.indexes;
-                }
-                Some(acc)
-            }
+            Expr::And(parts) => Self::and_plan(inner, parts),
             Expr::Or(parts) => {
                 let plans: Option<Vec<IndexPlan>> = parts.iter().map(|p| Self::index_plan(inner, p)).collect();
                 let mut it = plans?.into_iter();
@@ -4713,11 +4814,215 @@ impl Engine {
                     acc.keys = union_sorted(&acc.keys, &p.keys);
                     acc.used = format!("{} or {}", acc.used, p.used);
                     acc.indexes += p.indexes;
+                    acc.entries += p.entries;
                 }
                 acc.used = format!("({})", acc.used);
                 Some(acc)
             }
             Expr::Not(_) => None,
+        }
+    }
+
+    /// An `and`: the keys of its smallest indexed part are listed, then
+    /// checked against the index of each other comparison (the value it
+    /// holds for the key), without listing that index's keys. Parts that
+    /// are `or`s are listed and intersected. Comparing every field of a
+    /// unique index on several fields with `=` is one lookup in it.
+    fn and_plan(inner: &Inner, parts: &[Expr]) -> Option<IndexPlan> {
+        let mut tests: Vec<(usize, &Cond)> = Vec::new();
+        let mut whole: Vec<IndexPlan> = Vec::new();
+        for p in parts {
+            match p {
+                Expr::Test(t) => {
+                    if let Some(i) = Self::find_index(inner, &t.cond) {
+                        tests.push((i, &t.cond));
+                    }
+                }
+                p => whole.extend(Self::index_plan(inner, p)),
+            }
+        }
+        whole.extend(Self::composite_plan(inner, parts));
+        whole.sort_by_key(|p| p.keys.len());
+        // Smallest first, counted without copying a key, and only up to
+        // the smallest part known so far.
+        let mut best = whole.first().map_or(usize::MAX, |p| p.keys.len());
+        let mut sized: Vec<(usize, usize, &Cond)> = tests
+            .into_iter()
+            .map(|(i, c)| {
+                let n = Self::count_postings(&inner.sec[i], c, best.saturating_add(1));
+                best = best.min(n);
+                (n, i, c)
+            })
+            .collect();
+        sized.sort_by_key(|s| s.0);
+        let test_first = sized.first().is_some_and(|(n, ..)| whole.first().is_none_or(|w| *n < w.keys.len()));
+        let mut acc = if test_first {
+            let (_, i, c) = sized.remove(0);
+            let idx = &inner.sec[i];
+            let keys = Self::index_candidates(idx, c);
+            IndexPlan { entries: keys.len() as u64, keys, used: Self::index_name(idx), indexes: 1 }
+        } else if !whole.is_empty() {
+            whole.remove(0)
+        } else {
+            return None;
+        };
+        for p in whole {
+            acc.keys = intersect_sorted(&acc.keys, &p.keys);
+            acc.used = format!("{} and {}", acc.used, p.used);
+            acc.indexes += p.indexes;
+            acc.entries += p.entries;
+        }
+        for (_, i, c) in sized {
+            let idx = &inner.sec[i];
+            acc.entries += acc.keys.len() as u64;
+            acc.keys.retain(|k| idx.rev.get(k).is_some_and(|sk| Self::admits(c, sk)));
+            acc.used = format!("{} and {}", acc.used, Self::index_name(idx));
+            acc.indexes += 1;
+        }
+        Some(acc)
+    }
+
+    /// A unique index on several fields, each of which the `and` compares
+    /// with `=`: its keys for those values.
+    fn composite_plan(inner: &Inner, parts: &[Expr]) -> Option<IndexPlan> {
+        let equal: Vec<&Cond> = parts
+            .iter()
+            .filter_map(|p| match p {
+                Expr::Test(t) if t.cond.op == CmpOp::Eq && t.cond.func.is_none() => Some(&t.cond),
+                _ => None,
+            })
+            .collect();
+        if equal.len() < 2 {
+            return None;
+        }
+        inner.sec.iter().filter(|s| s.paths.len() > 1 && !s.fold).find_map(|s| {
+            let values: Option<Vec<SKey>> = s
+                .field
+                .split(", ")
+                .map(|f| {
+                    let c = equal.iter().find(|c| c.field == f && pattern_covers(&s.pattern, &c.pattern))?;
+                    crate::time::tagged(&c.value).is_none().then(|| SKey::from_json(&c.value)).flatten()
+                })
+                .collect();
+            let keys: Vec<String> = s.map.get(&SKey::Tuple(values?)).into_iter().flatten().cloned().collect();
+            Some(IndexPlan { entries: keys.len() as u64, keys, used: Self::index_name(s), indexes: 1 })
+        })
+    }
+
+    /// A B-tree on the field of `order` covering `pattern`: its values are
+    /// in order, so a query with a limit can read them first to last and
+    /// stop.
+    fn order_index(inner: &Inner, pattern: &str, order: &Order) -> Option<usize> {
+        inner.sec.iter().position(|s| {
+            s.kind == IndexKind::BTree
+                && s.paths.len() == 1
+                && !s.fold
+                && s.field == order.field
+                && pattern_covers(&s.pattern, pattern)
+        })
+    }
+
+    /// Where the documents of `q` come from, and the plan that says so.
+    fn choose(inner: &Inner, q: &Query, opts: &ReadOpts, estimate: bool) -> Chosen {
+        let total_keys = inner.index.len();
+        let limit = opts.limit;
+        if let Some(o) = opts.order.as_ref().filter(|_| limit > 0) {
+            if let Some(oi) = Self::order_index(inner, &q.pattern, o) {
+                // Reading the order index until `limit` documents pass takes
+                // about limit * n / c of its n keys when c pass, each checked
+                // against the indexes of the filter (a lookup, far cheaper
+                // than reading a document: counted as 1/32 of one), then
+                // `limit` documents. Reading the c candidates reads all c.
+                // Past `enough` candidates the order index is cheaper: the
+                // counting stops there.
+                let n = inner.sec[oi].rev.len() as u128;
+                let l = limit as u128;
+                let enough = l + ((l * n / 32) as f64).sqrt() as u128 + 2;
+                let c = q.expr.as_ref().and_then(|e| Self::estimate(inner, e, enough as usize)).map(|c| c as u128);
+                if c.is_none_or(|c| l + l * n / (32 * c.max(1)) < c) {
+                    let probe = q.expr.as_ref().map_or(Probe::Any, |e| Self::probe_of(inner, e));
+                    let mut index = Self::index_name(&inner.sec[oi]);
+                    if let Some(f) = probe.describe(inner) {
+                        index = format!("{index} for the order, {f} checked for the filter");
+                    }
+                    let plan = Plan {
+                        strategy: "INDEX ORDER SCAN",
+                        index: Some(index),
+                        candidates: c.map_or(n, |c| (l * n / c.max(1)).min(n)) as usize,
+                        total_keys,
+                        order: Some(format!("{}, read in the order of the index: stops after {limit}", o.describe())),
+                    };
+                    return Chosen { source: Source::Walk(oi, probe), plan, entries: 0 };
+                }
+            }
+        }
+        let listed = q.expr.as_ref().and_then(|e| Self::index_plan(inner, e));
+        let entries = listed.as_ref().map_or(0, |p| p.entries);
+        let (source, mut plan) = match listed {
+            Some(p) => {
+                let plan = p.plan(total_keys);
+                (Source::Keys(p.keys), plan)
+            }
+            None if estimate => (Source::Prefix, Self::scan_plan(inner, &q.pattern)),
+            // The keys of the prefix are not counted: a limited reading
+            // stops before most of them.
+            None => {
+                let prefix = glob_prefix(&q.pattern);
+                let strategy = if prefix.is_empty() { "FULL SCAN" } else { "PREFIX SCAN" };
+                (Source::Prefix, Plan { strategy, index: None, candidates: 0, total_keys, order: None })
+            }
+        };
+        if let Some(o) = &opts.order {
+            plan.order = Some(match limit {
+                0 => format!("{}, sorted in memory", o.describe()),
+                n => format!("{}, sorted in memory (the first {n} kept while reading)", o.describe()),
+            });
+        }
+        Chosen { source, plan, entries }
+    }
+
+    /// How many keys the indexes give for `e`, counted up to about `cap`
+    /// without copying one; `None` when they cannot tell.
+    fn estimate(inner: &Inner, e: &Expr, cap: usize) -> Option<usize> {
+        match e {
+            Expr::Test(t) => {
+                let i = Self::find_index(inner, &t.cond)?;
+                Some(Self::count_postings(&inner.sec[i], &t.cond, cap))
+            }
+            Expr::And(parts) => parts.iter().filter_map(|p| Self::estimate(inner, p, cap)).min(),
+            Expr::Or(parts) => {
+                parts.iter().map(|p| Self::estimate(inner, p, cap)).sum::<Option<usize>>().map(|n| n.min(cap))
+            }
+            Expr::Not(_) => None,
+        }
+    }
+
+    /// The parts of `e` the indexes can check for one key, by the value
+    /// they hold for it.
+    fn probe_of(inner: &Inner, e: &Expr) -> Probe {
+        match e {
+            Expr::Test(t) => match Self::find_index(inner, &t.cond) {
+                Some(i) => Probe::Test(i, t.cond.clone()),
+                None => Probe::Any,
+            },
+            Expr::And(parts) => {
+                let parts: Vec<Probe> =
+                    parts.iter().map(|p| Self::probe_of(inner, p)).filter(|p| !matches!(p, Probe::Any)).collect();
+                if parts.is_empty() {
+                    Probe::Any
+                } else {
+                    Probe::And(parts)
+                }
+            }
+            Expr::Or(parts) => {
+                let parts: Vec<Probe> = parts.iter().map(|p| Self::probe_of(inner, p)).collect();
+                if parts.iter().any(|p| matches!(p, Probe::Any)) {
+                    Probe::Any
+                } else {
+                    Probe::Or(parts)
+                }
+            }
+            Expr::Not(_) => Probe::Any,
         }
     }
 
@@ -4745,54 +5050,397 @@ impl Engine {
         &self,
         q: &Query,
         limit: usize,
-        mut f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+        f: impl FnMut(String, Json) -> std::result::Result<(), String>,
     ) -> Result<Plan> {
+        Ok(self.read_query(q, &ReadOpts { limit, ..ReadOpts::default() }, f)?.0)
+    }
+
+    /// Calls `f` with each document `q` selects, in the order and from the
+    /// position `opts` says, counting what the reading did. `f` runs while
+    /// the engine is locked.
+    pub fn read_query(
+        &self,
+        q: &Query,
+        opts: &ReadOpts,
+        f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+    ) -> Result<(Plan, Measured)> {
+        self.run_query(q, opts, true, f)
+    }
+
+    /// [`Self::read_query`] without a plan to show: a scan does not count
+    /// the keys of its prefix first.
+    pub fn find(
+        &self,
+        q: &Query,
+        opts: &ReadOpts,
+        f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+    ) -> Result<Measured> {
+        Ok(self.run_query(q, opts, false, f)?.1)
+    }
+
+    fn run_query(
+        &self,
+        q: &Query,
+        opts: &ReadOpts,
+        estimate: bool,
+        mut f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+    ) -> Result<(Plan, Measured)> {
+        let started = Instant::now();
         let mut inner = self.lock();
-        let total_keys = inner.index.len();
-        let (candidates, plan) = match q.expr.as_ref().and_then(|e| Self::index_plan(&inner, e)) {
-            Some(p) => {
-                let plan = p.plan(total_keys);
-                (p.keys, plan)
-            }
-            None => {
-                let plan = Self::scan_plan(&inner, &q.pattern);
-                let prefix = glob_prefix(&q.pattern);
-                let keys = inner
-                    .index
-                    .range::<str, _>((Bound::Included(prefix), Bound::Unbounded))
-                    .take_while(|(k, _)| k.starts_with(prefix))
-                    .filter(|(_, e)| e.ty.is_doc())
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                (keys, plan)
-            }
-        };
+        let chosen = Self::choose(&inner, q, opts, estimate);
+        let mut m = Measured { index_entries: chosen.entries, ..Measured::default() };
+        m.plan_time = started.elapsed();
         let now = now_ms();
-        let mut found = 0;
-        for key in candidates {
-            if !glob_match(&q.pattern, &key) {
-                continue;
+        let limit = opts.limit;
+        let mut emit = |m: &mut Measured, key: String, doc: Json| -> Result<bool> {
+            f(key, doc).map_err(KivaError::Invalid)?;
+            m.returned += 1;
+            Ok(limit == 0 || m.returned < limit as u64)
+        };
+        let Some(order) = &opts.order else {
+            // Key order: the documents go out as they are read.
+            let reverse = opts.reverse;
+            match chosen.source {
+                Source::Keys(keys) => {
+                    let keys = match &opts.after {
+                        Some(a) if reverse => &keys[..keys.partition_point(|k| k < a)],
+                        Some(a) => &keys[keys.partition_point(|k| k <= a)..],
+                        None => &keys[..],
+                    };
+                    let mut go = true;
+                    let mut each = |key: &String| -> Result<()> {
+                        if go {
+                            if let Some(doc) = Self::examine(&mut inner, q, key, now, &mut m)? {
+                                go = emit(&mut m, key.clone(), doc)?;
+                            }
+                        }
+                        Ok(())
+                    };
+                    if reverse {
+                        keys.iter().rev().try_for_each(&mut each)?;
+                    } else {
+                        keys.iter().try_for_each(&mut each)?;
+                    }
+                }
+                Source::Prefix => {
+                    let mut from = opts.after.clone();
+                    'chunks: loop {
+                        let chunk = Self::prefix_chunk(&inner, &q.pattern, from.as_deref(), reverse);
+                        let Some(last) = chunk.last() else { break };
+                        from = Some(last.clone());
+                        for key in chunk {
+                            if let Some(doc) = Self::examine(&mut inner, q, &key, now, &mut m)? {
+                                if !emit(&mut m, key, doc)? {
+                                    break 'chunks;
+                                }
+                            }
+                        }
+                    }
+                }
+                Source::Walk(..) => unreachable!("an order index is only chosen to sort"),
             }
-            let Some(e) = inner.live(&key, now) else {
-                continue;
-            };
-            if !e.ty.is_doc() {
-                continue;
+            m.read_time = started.elapsed() - m.plan_time;
+            m.total_time = started.elapsed();
+            return Ok((chosen.plan, m));
+        };
+        if opts.reverse {
+            return Err(KivaError::Invalid("with 'order by', say 'desc' rather than 'reverse'".into()));
+        }
+        // The row the reading goes on after, for a page after the first.
+        let after = match &opts.after {
+            Some(k) => {
+                let every = Query { pattern: "*".into(), expr: None };
+                let doc = Self::examine(&mut inner, &every, k, now, &mut Measured::default())?.ok_or_else(|| {
+                    KivaError::Invalid(format!(
+                        "'after {k}': no such document, so its place in the order is unknown; \
+                             page from the last key the previous page returned"
+                    ))
+                })?;
+                Some((order.key_of(&doc), k.clone()))
             }
-            let Value::Doc(doc) = inner.value_of(&key, &e)? else {
-                continue;
-            };
-            // An index only narrows the reading: the whole condition decides.
-            if q.matches(&doc) {
-                f(key, doc).map_err(KivaError::Invalid)?;
-                found += 1;
-                if limit != 0 && found >= limit {
-                    break;
+            None => None,
+        };
+        let follows = |sk: &Option<SKey>, key: &str| {
+            after
+                .as_ref()
+                .is_none_or(|(a, ak)| ordering::compare(sk, key, a, ak, order.desc) == std::cmp::Ordering::Greater)
+        };
+        let mut top = ordering::TopK::new(limit, order.desc);
+        match chosen.source {
+            Source::Keys(keys) => {
+                for key in &keys {
+                    if let Some(doc) = Self::examine(&mut inner, q, key, now, &mut m)? {
+                        let sk = order.key_of(&doc);
+                        if follows(&sk, key) {
+                            top.offer(sk, key.clone(), doc);
+                        }
+                    }
+                }
+            }
+            Source::Prefix => {
+                let mut from: Option<String> = None;
+                loop {
+                    let chunk = Self::prefix_chunk(&inner, &q.pattern, from.as_deref(), false);
+                    let Some(last) = chunk.last() else { break };
+                    from = Some(last.clone());
+                    for key in chunk {
+                        if let Some(doc) = Self::examine(&mut inner, q, &key, now, &mut m)? {
+                            let sk = order.key_of(&doc);
+                            if follows(&sk, &key) {
+                                top.offer(sk, key, doc);
+                            }
+                        }
+                    }
+                }
+            }
+            Source::Walk(oi, probe) => {
+                // The values in order. A row after `after` sorts after it:
+                // the walk starts where no earlier value can.
+                let mut from = match &after {
+                    Some((Some(sk), _)) => ordering::walk_start(sk, order.desc).map(|v| (v, None)),
+                    _ => None,
+                };
+                // After a row without a value, only rows without one follow.
+                if !matches!(after, Some((None, _))) {
+                    'walk: loop {
+                        let chunk = Self::walk_chunk(&inner.sec[oi], from.as_ref(), order.desc);
+                        let Some((v, keys)) = chunk.last() else { break };
+                        from = Some((v.clone(), keys.last().cloned()));
+                        for (v, keys) in chunk {
+                            if top.full_before(&v) {
+                                break 'walk;
+                            }
+                            // The value the index holds is the field's: it
+                            // places the row before its document is read, and
+                            // a row that cannot be kept is not read at all.
+                            let mut sk = None;
+                            for key in keys {
+                                m.index_entries += 1;
+                                if !probe.passes(&inner, &key, &mut m.index_entries) {
+                                    continue;
+                                }
+                                let sk = sk.get_or_insert_with(|| ordering::sort_key_of(&v));
+                                if !follows(sk, &key) || !top.would_keep(sk, &key) {
+                                    continue;
+                                }
+                                if let Some(doc) = Self::examine(&mut inner, q, &key, now, &mut m)? {
+                                    top.offer(sk.clone(), key, doc);
+                                }
+                            }
+                        }
+                    }
+                }
+                // The documents without a value (no field, null, an array or
+                // an object) come last, in key order: those the index does
+                // not list among its values.
+                let mut from: Option<String> = after.as_ref().filter(|(sk, _)| sk.is_none()).map(|(_, k)| k.clone());
+                'tail: while top.len() < limit {
+                    let chunk = Self::prefix_chunk(&inner, &q.pattern, from.as_deref(), false);
+                    let Some(last) = chunk.last() else { break };
+                    from = Some(last.clone());
+                    for key in chunk {
+                        if top.len() >= limit {
+                            break 'tail;
+                        }
+                        if inner.sec[oi].rev.get(&key).is_some_and(|sk| *sk != SKey::Null)
+                            || !probe.passes(&inner, &key, &mut m.index_entries)
+                        {
+                            continue;
+                        }
+                        if let Some(doc) = Self::examine(&mut inner, q, &key, now, &mut m)? {
+                            let sk = order.key_of(&doc);
+                            if sk.is_none() && follows(&sk, &key) {
+                                top.offer(sk, key, doc);
+                            }
+                        }
+                    }
                 }
             }
         }
-        Ok(plan)
+        m.read_time = started.elapsed() - m.plan_time;
+        m.sorted = top.offered;
+        let rows = top.into_sorted();
+        m.sort_time = started.elapsed() - m.plan_time - m.read_time;
+        for row in rows {
+            if !emit(&mut m, row.key, row.doc)? {
+                break;
+            }
+        }
+        m.total_time = started.elapsed();
+        Ok((chosen.plan, m))
     }
+
+    /// The document at `key` if it is one of `q`'s, counting the reading.
+    fn examine(inner: &mut Inner, q: &Query, key: &str, now: i64, m: &mut Measured) -> Result<Option<Json>> {
+        m.keys_examined += 1;
+        if !glob_match(&q.pattern, key) {
+            return Ok(None);
+        }
+        let Some(e) = inner.live(key, now) else {
+            return Ok(None);
+        };
+        if !e.ty.is_doc() {
+            return Ok(None);
+        }
+        m.docs_read += 1;
+        let value = match inner.cache.get(key, e.version) {
+            Some(v) => {
+                m.from_cache += 1;
+                v
+            }
+            None => {
+                let v = inner.read_value(key, &e)?;
+                inner.cache.put(key, e.version, &v, e.raw_size as usize);
+                v
+            }
+        };
+        let Value::Doc(doc) = value else {
+            return Ok(None);
+        };
+        // An index only narrows the reading: the whole condition decides.
+        if q.matches(&doc) {
+            Ok(Some(doc))
+        } else {
+            m.filtered_out += 1;
+            Ok(None)
+        }
+    }
+
+    /// The next keys of `pattern`'s prefix after `from` (before it, in
+    /// reverse), a few at a time: a limited query stops without copying
+    /// the keys it never reaches.
+    fn prefix_chunk(inner: &Inner, pattern: &str, from: Option<&str>, reverse: bool) -> Vec<String> {
+        const CHUNK: usize = 256;
+        let prefix = glob_prefix(pattern);
+        let ours = |k: &&String| k.starts_with(prefix);
+        if reverse {
+            if from.is_some_and(|f| f <= prefix) {
+                return Vec::new();
+            }
+            let end = prefix_successor(prefix);
+            let hi = match (from, end.as_deref()) {
+                (Some(f), Some(e)) if e < f => Bound::Excluded(e),
+                (Some(f), _) => Bound::Excluded(f),
+                (None, Some(e)) => Bound::Excluded(e),
+                (None, None) => Bound::Unbounded,
+            };
+            let range = inner.index.range::<str, _>((Bound::Included(prefix), hi));
+            range.rev().map(|(k, _)| k).take_while(ours).take(CHUNK).cloned().collect()
+        } else {
+            let lo = match from {
+                Some(f) if f >= prefix => Bound::Excluded(f),
+                _ => Bound::Included(prefix),
+            };
+            let range = inner.index.range::<str, _>((lo, Bound::Unbounded));
+            range.map(|(k, _)| k).take_while(ours).take(CHUNK).cloned().collect()
+        }
+    }
+
+    /// The next entries of a B-tree index in the order of its values after
+    /// `from` (a value, and the last key read at it), nulls left out.
+    fn walk_chunk(idx: &SecIndex, from: Option<&(SKey, Option<String>)>, desc: bool) -> Vec<(SKey, Vec<String>)> {
+        const CHUNK: usize = 256;
+        let Postings::Tree(map) = &idx.map else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let mut n = 0;
+        let mut take = |v: &SKey, set: &BTreeSet<String>| {
+            if *v == SKey::Null {
+                return true;
+            }
+            let keys: Box<dyn Iterator<Item = &String>> = match from {
+                Some((fv, Some(k))) if fv == v => {
+                    Box::new(set.range::<String, _>((Bound::Excluded(k), Bound::Unbounded)))
+                }
+                _ => Box::new(set.iter()),
+            };
+            let keys: Vec<String> = keys.take(CHUNK - n).cloned().collect();
+            n += keys.len();
+            if !keys.is_empty() {
+                out.push((v.clone(), keys));
+            }
+            n < CHUNK
+        };
+        match (from, desc) {
+            (None, false) => map.iter().all(|(v, s)| take(v, s)),
+            (None, true) => map.iter().rev().all(|(v, s)| take(v, s)),
+            (Some((v, _)), false) => map.range(v..).all(|(v, s)| take(v, s)),
+            (Some((v, _)), true) => map.range(..=v).rev().all(|(v, s)| take(v, s)),
+        };
+        out
+    }
+}
+
+/// The smallest text after every text starting with `prefix`; `None` when
+/// there is none (an empty prefix).
+fn prefix_successor(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(c) = chars.pop() {
+        let next = (c as u32 + 1..=char::MAX as u32).find_map(char::from_u32);
+        if let Some(n) = next {
+            chars.push(n);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
+/// Where the documents of a query come from.
+enum Source {
+    /// Keys given by the indexes, sorted.
+    Keys(Vec<String>),
+    /// The keys sharing the pattern's prefix, read a few at a time.
+    Prefix,
+    /// A B-tree on the order field, read in order, each key checked first
+    /// against the indexes of the filter.
+    Walk(usize, Probe),
+}
+
+/// What the indexes can tell of a condition for one key, from the value
+/// each holds for it: `Any` when they cannot. A document a probe refuses
+/// never passes the condition; one it lets through is still tested whole.
+enum Probe {
+    Any,
+    Test(usize, Cond),
+    And(Vec<Probe>),
+    Or(Vec<Probe>),
+}
+
+impl Probe {
+    fn passes(&self, inner: &Inner, key: &str, lookups: &mut u64) -> bool {
+        match self {
+            Probe::Any => true,
+            Probe::Test(i, c) => {
+                *lookups += 1;
+                inner.sec[*i].rev.get(key).is_some_and(|sk| Engine::admits(c, sk))
+            }
+            Probe::And(parts) => parts.iter().all(|p| p.passes(inner, key, lookups)),
+            Probe::Or(parts) => parts.iter().any(|p| p.passes(inner, key, lookups)),
+        }
+    }
+
+    /// The indexes it checks, as a formula.
+    fn describe(&self, inner: &Inner) -> Option<String> {
+        let join = |parts: &[Probe], word: &str| {
+            let names: Vec<String> = parts.iter().filter_map(|p| p.describe(inner)).collect();
+            Some(format!("({})", names.join(word)))
+        };
+        match self {
+            Probe::Any => None,
+            Probe::Test(i, _) => Some(Engine::index_name(&inner.sec[*i])),
+            Probe::And(parts) if parts.len() == 1 => parts[0].describe(inner),
+            Probe::And(parts) => join(parts, " and "),
+            Probe::Or(parts) => join(parts, " or "),
+        }
+    }
+}
+
+struct Chosen {
+    source: Source,
+    plan: Plan,
+    /// Index entries read while choosing (keys listed, or checked).
+    entries: u64,
 }
 
 /// Keys given by secondary indexes for part of a condition.
@@ -4802,6 +5450,8 @@ struct IndexPlan {
     /// The indexes used, as a formula: `user:* (role) and user:* (age)`.
     used: String,
     indexes: usize,
+    /// Index entries read: keys listed, or checked against an index.
+    entries: u64,
 }
 
 impl IndexPlan {
@@ -4811,6 +5461,7 @@ impl IndexPlan {
             index: Some(self.used.clone()),
             candidates: self.keys.len(),
             total_keys,
+            order: None,
         }
     }
 }

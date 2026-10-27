@@ -18,8 +18,9 @@
 //! `avg`, `min`, `max`, optionally per value of one field (`group by`), in
 //! one pass and without keeping the documents.
 //!
-//! Joins, sorting pipelines (`order by`, `distinct`, `having`) and queries
-//! spanning several servers are not part of the language. This module
+//! `get where` sorts by one field (`order by`) and pages (`after`). Joins,
+//! other pipelines (`distinct`, `having`, `offset`) and queries spanning
+//! several servers are not part of the language. This module
 //! recognises them, in the shell's syntax and in structured requests, and
 //! refuses them with what to do instead, rather than with a generic syntax
 //! error.
@@ -47,7 +48,7 @@ pub enum Unsupported {
     Combination,
     /// Two key patterns, or a value taken from other documents.
     Join,
-    /// `order by`, `distinct`, `having`...
+    /// `distinct`, `having`, `offset`, sorting an aggregate...
     Pipeline,
     /// A query sent to several servers or shards.
     Distributed,
@@ -68,8 +69,9 @@ impl Unsupported {
                  Keep related data in the same document, or read the related keys by name (get a and b)."
             }
             Unsupported::Pipeline => {
-                "sorting pipelines (order by, distinct, having...) are not supported: the aggregates are \
-                 count, sum, avg, min and max, with 'group by <field>'; 'range' and 'keys' return keys in order."
+                "sorting pipelines (distinct, having, offset, an aggregate sorted...) are not supported: \
+                 get where sorts with 'order by <field> [desc]' and pages with 'after <key>'; the aggregates \
+                 are count, sum, avg, min and max, with 'group by <field>'; 'range' and 'keys' return keys in order."
             }
             Unsupported::Distributed => {
                 "distributed queries are not supported: one KivaDB server holds all of a workspace's data \
@@ -111,7 +113,7 @@ pub fn unsupported_request_field(name: &str) -> Option<Unsupported> {
     Some(match name.to_ascii_lowercase().as_str() {
         "and" | "or" | "not" | "conditions" | "filters" | "filter" => Unsupported::Combination,
         "join" | "joins" | "lookup" | "with" => Unsupported::Join,
-        "group" | "groupby" | "order" | "order_by" | "orderby" | "sort" | "pipeline" | "distinct" | "having" => {
+        "group" | "groupby" | "order" | "orderby" | "sort" | "pipeline" | "distinct" | "having" | "offset" | "skip" => {
             Unsupported::Pipeline
         }
         "shard" | "shards" | "nodes" | "cluster" | "distributed" => Unsupported::Distributed,
@@ -802,7 +804,8 @@ mod tests {
         assert_eq!(unsupported_word("return"), None);
 
         assert!(check_request(&json!({"op": "query", "target": "a:*.b", "join": "c:*"})).is_err());
-        assert!(check_request(&json!({"op": "query", "target": "a:*.b", "order_by": "b"})).is_err());
+        assert!(check_request(&json!({"op": "query", "target": "a:*.b", "order_by": "b"})).is_ok());
+        assert!(check_request(&json!({"op": "query", "target": "a:*.b", "offset": 20})).is_err());
         assert!(check_request(&json!({"op": "query", "target": "a:*.b", "and": []})).is_err());
         assert!(check_request(&json!({"op": "query", "target": "a:*", "where": {}, "group_by": "b"})).is_ok());
 

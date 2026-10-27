@@ -1554,7 +1554,7 @@ user:*.role = "dev" and not address.city = "Goma"
 ### 11.2 `get where` — find documents
 
 ```text
-get where <condition> [limit N] [return field1, field2]
+get where <condition> [order by <field> [asc|desc]] [limit N] [after <key>] [reverse] [return field1, field2]
 ```
 
 The condition is one comparison or several ([11.1](#111-the-condition)).
@@ -1577,6 +1577,30 @@ user:1: {"name":"Alice","role":"admin","age":30,"address":{"city":"Kinshasa"}}
 ```
 
 Comparisons are made between values of the same kind: numbers with numbers, text with text (alphabetical order). A document that lacks the field never matches that comparison.
+
+#### Order and pages
+
+Rows come in key order; `reverse` starts from the last key. `order by <field>` sorts them by the value of a field instead, `asc` (the default) or `desc`. Rows of the same value come in key order.
+
+```text
+kiva> get where user:*.age > 20 order by age desc limit 2 return name, age
+user:3: {"name":"Carol","age":41}
+user:1: {"name":"Alice","age":30}
+(2 matches)
+kiva> get where user:*.age > 20 order by age desc limit 2 after user:1 return name, age
+user:2: {"name":"Bob","age":25}
+(1 matches)
+```
+
+`after <key>` gives the next page: the rows that come after that key, in the same order. Pass the last key of the page you have. Rows written or deleted meanwhile before that point do not shift the page: no row comes twice, none is skipped. In key order the key may have been deleted since. In the order of a field it must still be a document, since its value says where the next page starts; otherwise the error says so.
+
+How values sort:
+
+* By kind first: `false` and `true`, then numbers, then texts; then by value.
+* A datetime with an offset (`2026-10-27T15:30:00+01:00`, `...Z`) sorts by its instant: `15:30+01:00` comes before `15:00Z`, and fractions of a second count. A datetime without an offset is a wall clock, whose instant depends on the zone, and sorts as its text. A time `08:00` sorts as `08:00:00`. A date `2026-10-27` sorts as its text, which is its order.
+* Documents without the field, or holding `null`, an array or an object there, come last in both directions.
+
+With a B-tree index on the field and a `limit`, KivaDB reads the index from its first value (its last, with `desc`). It stops once it has `limit` rows that pass the condition, reading only their documents: `INDEX ORDER SCAN` in `explain` ([11.5](#115-explain--see-how-a-query-will-run)). Otherwise the documents found are sorted in memory: only the first `limit` are kept while they are read, or all of them without a `limit`. A query sorts by one field, and the aggregates do not sort.
 
 ### 11.3 Aggregates: `count`, `sum`, `avg`, `min`, `max`, `group by`
 
@@ -1687,6 +1711,7 @@ Query Plan
 | :--- | :--- |
 | `INDEX SCAN` | A secondary index gives the candidates directly |
 | `INDEX MERGE` | Several indexes, intersected for `and` and merged for `or` |
+| `INDEX ORDER SCAN` | A B-tree index on the field of `order by`, read in order until the `limit` is reached; the condition is checked on the indexes it can be, before a document is read |
 | `PREFIX SCAN` | Only the keys sharing the pattern's prefix are examined |
 | `FULL SCAN` | Every key is examined (pattern starting with `*`) |
 | `ORDERED INDEX RANGE SCAN` | A `range` query: a slice of the sorted keys |
@@ -1696,7 +1721,7 @@ Query Plan
 
 With several comparisons, KivaDB uses every index it can:
 
-* `and`: the keys of each indexed comparison are intersected, smallest list first. One indexed comparison is enough; the others are tested on the documents it gives.
+* `and`: the keys of the indexed comparison that gives the fewest are listed (counted first, without being copied). Each of them is then checked against the index of every other comparison, which holds the value of the field for that key, so a document is read only when every index agrees. One indexed comparison is enough; the others are tested on the documents it gives. When the `and` compares with `=` every field of a unique index on several fields ([11.7](#117-unique-indexes)), that index finds the document in one lookup.
 * `or`: the keys of each part are merged, but only when **every** part has an index. One part without an index means reading the whole pattern anyway.
 * `not`: never an index, since it selects what the index does not list.
 
@@ -1720,6 +1745,66 @@ Query Plan
 
 A query with one comparison runs exactly as before: the same index, the same reading.
 
+`explain` also shows the order and the page of a query: `Order` says whether the rows are read in the order of an index or sorted in memory, and `After` and `Limit` give the page. With `order by` and a `limit` but no B-tree on the field, a `Tip` gives the index that would let the query stop early.
+
+#### `explain analyze` — run the query and measure it
+
+`explain` decides the plan from the indexes and reads no document. `explain analyze` **runs the query**: it reads what the query reads and counts it. The rows are not shown; the counts and times are.
+
+```text
+kiva> create index on user:* (age)
+kiva> explain analyze get where user:*.age > 20 order by age desc limit 2
+Query Plan (explain analyze: the query was run; its rows are not shown)
+  Filter    : user:*.age > 20
+  Strategy  : INDEX ORDER SCAN
+  Index     : user:* (age) for the order, user:* (age) checked for the filter
+  Order     : age desc, read in the order of the index: stops after 2
+  Limit     : 2
+  Estimated : 2 of 8 keys examined
+Measured
+  Index entries : 4
+  Keys examined : 2
+  Documents     : 2 read (0 from the value cache, 2 from disk), 0 filtered out
+  Sorted        : 2 rows in 0.003 ms
+  Returned      : 2
+  Time          : 0.315 ms (plan 0.014 ms, read and filter 0.287 ms, sort 0.003 ms)
+```
+
+Everything under `Query Plan` is decided before the reading (`Estimated` is an estimate). Everything under `Measured` was counted while the query ran:
+
+| Line | Counts |
+| :--- | :--- |
+| `Index entries` | Keys taken from secondary indexes: listed, walked in order, or checked against an index for one key |
+| `Keys examined` | Keys looked at, whether a document was read for them or not (another type, expired, outside the pattern) |
+| `Documents` | Documents read, from the value cache ([18](#chapter-18--keeping-values-in-memory-value-cache)) or from the data file, and those that did not pass the condition |
+| `Sorted` | Rows put in order in memory, and the time it took; absent without `order by` |
+| `Returned` | Rows the query gives; for an aggregate, `Groups` and the documents folded |
+| `Time` | The whole query, then choosing the plan, reading and testing the documents, and sorting |
+
+Many `Documents` read against few `Returned` mean that the plan reads documents the condition then rejects: an index on the field tested, or a more selective comparison first, would avoid them. A large `Sorted` with a small `limit` calls for a B-tree index on the field of `order by`.
+
+`explain analyze` works with `get where` and the aggregates (`count`, `sum`, `avg`, `min`, `max`, with `group by`). It costs what the query costs: run it on a copy, or with a `limit`, when the query reads a lot. It needs read access, like the query. It reads what is committed, like `get where`: inside a transaction, not the transaction's own writes. Neither `explain` nor `explain analyze` runs a write:
+
+```text
+kiva> explain analyze set x 1
+Error: explain analyze never runs a write ('set'): it explains the reads get where, count, sum, avg, min and max
+```
+
+A plan shows the condition as written and the names of the indexes, never the values of the documents read.
+
+Over REST, `{"op": "explain", ..., "analyze": true}` answers the same counts under `analyze` ([20.4](#204-structured-requests-for-tools)):
+
+```json
+{"plan": {"strategy": "INDEX ORDER SCAN", "index": "user:* (age) for the order, user:* (age) checked for the filter",
+          "candidates": 2, "total_keys": 8, "order": "age desc, read in the order of the index: stops after 2"},
+ "suggestion": null,
+ "analyze": {"index_entries": 4, "keys_examined": 2, "documents_read": 2, "from_cache": 0, "from_disk": 2,
+             "filtered_out": 0, "sorted": 2, "returned": 2,
+             "time_ms": {"total": 0.274, "plan": 0.023, "read": 0.217, "sort": 0.003}}}
+```
+
+**How the plan is chosen.** The plans use what the indexes know, exact and kept up to date by every write: the keys of each value, the number of distinct values and of documents indexed (`indexes` shows them). With a `limit` and a B-tree on the field of `order by`, KivaDB compares reading that index in order with reading the documents the condition selects and sorting them. It counts those documents from the indexes, without copying a key, and stops counting once the answer is clear. The comparison assumes the condition and the order are independent; `explain analyze` shows what was actually read. Choosing never changes the answer, only the reading.
+
 ### 11.6 What a query does not do
 
 A query reads **one key pattern**, tests its documents against comparisons with literal values, and returns them in key order or folds them into aggregates. That is a choice: every query is then one pass over indexes or one range of keys, in memory, and `explain` can say in advance what it will cost. KivaDB refuses the rest at once, and says what to do instead:
@@ -1727,19 +1812,19 @@ A query reads **one key pattern**, tests its documents against comparisons with 
 | Refused | Example | Instead |
 | :--- | :--- | :--- |
 | Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user`, `... and order:*.total > 5` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
-| Sorting pipelines | `order by`, `distinct`, `having`, `group by` on `get` | The aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
+| Sorting pipelines | `distinct`, `having`, `offset`, `group by` on `get`, `order by` on an aggregate | `order by <field>` and `after <key>` on `get where` ([11.2](#112-get-where--find-documents)); the aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
 | Other operators | `between`, `contains`, `matches`, `regexp` | The comparisons of [11.1](#111-the-condition): `age >= 20 and age <= 30` for a range, `in [...]` for several values, `like` / `ilike` for text patterns |
 | Other combinations | `&&`, `\|\|`, `xor` | `and`, `or`, `not` and parentheses |
 | Distributed queries | `@node2`, `across`, `shard`, `explain distributed` | Nothing to do: one server holds all of a workspace's data |
 
 ```text
-kiva> get where user:*.role = "dev" order by age
-Error: 'order': sorting pipelines (order by, distinct, having...) are not supported: the aggregates are count, sum, avg, min and max, with 'group by <field>'; 'range' and 'keys' return keys in order.
+kiva> get where user:*.role = "dev" limit 5 offset 2
+Error: 'offset': sorting pipelines (distinct, having, offset, an aggregate sorted...) are not supported: get where sorts with 'order by <field> [desc]' and pages with 'after <key>'; the aggregates are count, sum, avg, min and max, with 'group by <field>'; 'range' and 'keys' return keys in order.
 kiva> get where user:*.name = order:*.user
 Error: 'order:*.user' names a field of other documents: joins are not supported: a query reads one key pattern and compares with a literal value. Keep related data in the same document, or read the related keys by name (get a and b).
 ```
 
-Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` and `aggregate` requests follow the same rules: a request with a field such as `join`, `order_by` or `distinct`, or with an array or object as `value` (except a list for `in`), is refused; `and`, `or` and `not` go inside `where` ([20.4](#204-structured-requests-for-tools)).
+Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused). The structured `query` and `aggregate` requests follow the same rules: a request with a field such as `join`, `offset` or `distinct`, or with an array or object as `value` (except a list for `in`), is refused; `and`, `or` and `not` go inside `where` ([20.4](#204-structured-requests-for-tools)).
 
 ### 11.7 Unique indexes
 
@@ -1777,7 +1862,7 @@ Error: UNIQUE: 'place:5' not written: 'place:1' already holds ["ville",null,"gom
 * **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Without `ignore case`, values compare as in conditions: `"Goma"` and `"goma"` differ. `ignore case` applies to every text field of the index (`type` too, as the errors above show), never to numbers or booleans; the documents keep their own text. So the error shows the value as the index compares it, in small letters (`["quartier","place:1","katindo"]`), not the text stored in either document: `get place:2` still answers `"Katindo"`.
 * **When it is checked.** At every write, under the same lock as the write itself: two clients creating the same place at the same instant cannot both succeed, which a "read, then write if absent" in the application cannot promise. Writing a document again with its own value is allowed. A transaction is judged by what its keys hold at `commit`: swapping two values between documents in one transaction works, and a transaction that would leave a duplicate is refused as a whole. A deleted or expired document frees its value.
 * **Creating it** is refused while two documents already hold the same value; the error names them. Change one, then create the index again.
-* **Queries.** A unique index on one field, without `ignore case`, also answers queries like any index. On several fields, or with `ignore case`, it only guards the writes: queries use indexes on one field, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)), and `ilike` finds texts without regard to capitals ([11.1](#111-the-condition)).
+* **Queries.** A unique index on one field, without `ignore case`, also answers queries like any index. On several fields, without `ignore case`, it answers an `and` that compares each of its fields with `=` (`place:*.type = "quartier" and parent = "place:1" and name = "katindo"`) in one lookup. With `ignore case`, it only guards the writes: queries use the other indexes, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)), and `ilike` finds texts without regard to capitals ([11.1](#111-the-condition)).
 * `indexes` shows `unique` and `ignore case`; `drop index on place: (type, parent, name)` removes it. Like every index, it is defined per node: create it on the master; a replica copies what the master accepted.
 * An index on several fields, or with `ignore case`, that is not unique is refused.
 
@@ -3471,9 +3556,9 @@ The command language answers with text written for people. A program that needs 
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
 | `users` | - | `users`: name, role, grants, default workspace, created, whether the password is empty (admin only) |
-| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below) | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
+| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below); `order_by` (`"created_at desc"`), `after` (a key), `reverse` | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
 | `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
-| `explain` | the same as `query` | `plan`: strategy, index, candidates, total keys; `suggestion`: the index to create, if any |
+| `explain` | the same as `query`; `analyze`: `true` to run it | `plan`: strategy, index, candidates, total keys, order; `suggestion`: the index to create, if any; with `analyze`, `analyze`: the counts and times of [11.5](#115-explain--see-how-a-query-will-run) |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
 
 Notes on `query` and `aggregate`:
@@ -4480,7 +4565,8 @@ A MongoDB collection becomes a key pattern: each document is stored under `<coll
 | `updateOne({_id}, {$set: {name}})` | `json set place:<id> .name "..."` ([10.3](#103-changing-a-field)) |
 | `deleteOne({_id})`, `deleteMany({parentId: {$in: ids}})` | `del place:<id>`; for many, read the keys with `get where ... in [...]`, then `del a and b ...` in one transaction ([13](#chapter-13--transactions)) |
 | Sessions and transactions | `begin` ... `commit` ([13](#chapter-13--transactions)) |
-| `sort`, `skip`, `$lookup` | Not part of the language: keys come back in key order, and related data is read by name ([11.6](#116-what-a-query-does-not-do)) |
+| `find(...).sort({name: -1}).limit(20)` | `get where ... order by name desc limit 20`; the next page with `after <last key>` rather than `skip` ([11.2](#112-get-where--find-documents)) |
+| `$lookup` | Not part of the language: related data is read by name ([11.6](#116-what-a-query-does-not-do)) |
 
 **A missing field in a unique index.** MongoDB counts a field a document lacks as `null`: two top-level places without `parentId`, of the same type and name, conflict. KivaDB does not constrain a document that lacks one of the fields of a unique index ([11.7](#117-unique-indexes)), so those two would both be written. Write the field as `null` instead of leaving it out, in the application and in the import: `{"type": "PROVINCE", "parentId": null, "name": "Nord-Kivu"}` is checked, `{"type": "PROVINCE", "name": "Nord-Kivu"}` is not. In the import script below, add `doc.parentId ??= null;` before `console.log` for each field of a unique index that documents may lack.
 
@@ -5473,7 +5559,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `json insert <key> <.path[n]> <value>` | Insert into an array |
 | `json incr <key> <.path> <number>` | Add to a number |
 | `json type / len / keys <key> [<.path>]` | Type, length, field names |
-| `get where <pat>.<field> <op> <value> [and\|or ...] [limit N] [return f1, f2]` | Find documents; `and`, `or`, `not`, parentheses |
+| `get where <pat>.<field> <op> <value> [and\|or ...] [order by <field> [desc]] [limit N] [after <key>] [return f1, f2]` | Find documents; `and`, `or`, `not`, parentheses; sorted, a page after a key |
 | `<field> [not] in [v1, v2...]`, `<field> [not] like\|ilike "Kin%"` | One of several values; a text pattern (`ilike`: capitals or not) ([11.1](#111-the-condition)) |
 | `count` / `sum` / `avg` / `min` / `max` `where ...` or `<pat>[.<field>] [where ...]` `[group by <field>]` | Aggregates |
 | `create index on <pat> (<field>) [using btree\|hash]` | Create an index; also `on <pat>.<field>` (admin) |
@@ -5482,7 +5568,8 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `indexes` | List indexes |
 | `schema set <pat> {"<field>": {"type": ..., "required": true, "default": ...}}` | Rules and defaults for the documents of a pattern ([11.8](#118-schemas-rules-for-the-documents-of-a-pattern)) (admin) |
 | `schemas`, `schema show / check / drop <pat>` | List, show, find the documents that do not follow it, remove it (`drop`: admin) |
-| `explain <query>` | Show the execution plan |
+| `explain <query>` | Show the execution plan, reading no document |
+| `explain analyze <query>` | Run a read query and show what it read, filtered, sorted and returned, and how long each stage took |
 | `get similar <pat>.<field> to <vector> [where <field> <op> <value> [and ...]] [limit N] [metric m] [ef N] [exact] [return f1, f2]` | Vector similarity search, filtered on other fields ([12.9](#129-filtering-on-other-fields)) |
 | `create vector index on <pat> (<field>)` | Keep vectors in memory, exact search (admin) |
 | `create vector index on <pat> (<field>) using hnsw [metric m] [m N] [ef N] [ef_search N] [quantize sq8\|none]` | Approximate index for large collections (admin) |

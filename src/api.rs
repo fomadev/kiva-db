@@ -63,6 +63,47 @@ fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
     Query::single(cond).map_err(KivaError::Invalid)
 }
 
+/// `"order_by": "created_at desc"`, `"after"`, `"reverse"` and `"limit"` of a query.
+fn read_opts(req: &Json, q: &crate::query::Query, limit: usize) -> Result<crate::engine::ReadOpts> {
+    let order = match &req["order_by"] {
+        Json::Null => None,
+        Json::String(s) => {
+            let mut words = s.split_whitespace();
+            let field = words.next().ok_or_else(|| invalid("\"order_by\" names a field: \"created_at desc\""))?;
+            let desc = match words.next().map(str::to_ascii_lowercase).as_deref() {
+                None | Some("asc") => false,
+                Some("desc") => true,
+                Some(w) => return Err(invalid(format!("\"order_by\": '{w}' is neither asc nor desc"))),
+            };
+            if words.next().is_some() {
+                return Err(invalid("\"order_by\" is one field, then asc or desc: KivaDB sorts by one field"));
+            }
+            let field = field.strip_prefix(&q.pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
+            Some(crate::engine::Order::new(field, desc).map_err(KivaError::Invalid)?)
+        }
+        _ => return Err(invalid("\"order_by\" is a text: \"created_at\" or \"created_at desc\"")),
+    };
+    let after = match &req["after"] {
+        Json::Null => None,
+        a => Some(a.as_str().ok_or_else(|| invalid("\"after\" is the key to go on after"))?.to_string()),
+    };
+    let reverse = req["reverse"].as_bool().unwrap_or(false);
+    if order.is_some() && reverse {
+        return Err(invalid("with \"order_by\", write \"created_at desc\" rather than \"reverse\""));
+    }
+    Ok(crate::engine::ReadOpts { limit, order, after, reverse })
+}
+
+pub fn measured_json(m: &crate::engine::Measured) -> Json {
+    let ms = |d: std::time::Duration| (d.as_secs_f64() * 1_000_000.0).round() / 1000.0;
+    json!({
+        "index_entries": m.index_entries, "keys_examined": m.keys_examined, "documents_read": m.docs_read,
+        "from_cache": m.from_cache, "from_disk": m.docs_read - m.from_cache, "filtered_out": m.filtered_out,
+        "sorted": m.sorted, "returned": m.returned,
+        "time_ms": { "total": ms(m.total_time), "plan": ms(m.plan_time), "read": ms(m.read_time), "sort": ms(m.sort_time) },
+    })
+}
+
 fn vector_filter(j: &Json, pattern: &str) -> Result<Vec<crate::engine::Cond>> {
     let cond = |field: &str, cmp: &str, value: &Json| -> Result<crate::engine::Cond> {
         let field = field.strip_prefix(pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(field);
@@ -256,9 +297,21 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             // One pattern, a condition, no join or sorting: see crate::query.
             crate::query::check_request(req).map_err(KivaError::Invalid)?;
             let q = request_query(req, op == "aggregate")?;
-            let plan_json = |p: &crate::engine::Plan| json!({ "strategy": p.strategy, "index": p.index, "candidates": p.candidates, "total_keys": p.total_keys });
+            let plan_json = |p: &crate::engine::Plan| json!({ "strategy": p.strategy, "index": p.index, "candidates": p.candidates, "total_keys": p.total_keys, "order": p.order });
+            if op == "aggregate" && !req["order_by"].is_null() {
+                return Err(invalid(crate::query::Unsupported::Pipeline.message()));
+            }
             if op == "explain" {
-                let plan = sess.engine.explain_query(&q);
+                let opts = read_opts(req, &q, req["limit"].as_u64().unwrap_or(0) as usize)?;
+                // `"analyze": true` runs the query: its rows are counted, not returned.
+                let measured = match req["analyze"].as_bool().unwrap_or(false) {
+                    true => Some(sess.engine.read_query(&q, &opts, |_, _| Ok(()))?),
+                    false => None,
+                };
+                let plan = match &measured {
+                    Some((plan, _)) => plan.clone(),
+                    None => sess.engine.explain_read(&q, &opts),
+                };
                 let suggestion = plan.index.is_none().then(|| {
                     let conds = q.expr.iter().flat_map(|e| e.positive_conditions());
                     let missing = conds
@@ -266,7 +319,11 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                         .find(|c| crate::engine::Engine::indexable(c) && sess.engine.explain(c).index.is_none());
                     missing.map(|c| format!("create index on {} ({})", c.pattern, c.field))
                 });
-                return Ok(json!({ "plan": plan_json(&plan), "suggestion": suggestion.flatten() }));
+                let mut out = json!({ "plan": plan_json(&plan), "suggestion": suggestion.flatten() });
+                if let Some((_, m)) = &measured {
+                    out["analyze"] = measured_json(m);
+                }
+                return Ok(out);
             }
             if op == "aggregate" {
                 use crate::query::{aggregated_json, Aggregation};
@@ -285,8 +342,12 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 return Ok(out);
             }
             let limit = req["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
-            let (rows, plan) = sess.engine.query_expr(&q, limit)?;
-            let rows: Vec<Json> = rows.into_iter().map(|(k, doc)| json!({ "key": k, "value": doc })).collect();
+            let opts = read_opts(req, &q, limit)?;
+            let mut rows = Vec::new();
+            let (plan, _) = sess.engine.read_query(&q, &opts, |k, doc| {
+                rows.push(json!({ "key": k, "value": doc }));
+                Ok(())
+            })?;
             Ok(json!({ "rows": rows, "plan": plan_json(&plan) }))
         }
         "similar" => {
