@@ -75,6 +75,34 @@ fn a_kva_file_runs_command_by_command() {
 }
 
 #[test]
+fn files_saved_by_windows_powershell_run_as_well() {
+    let dir = TempDir::new("kva_bom");
+    let home = dir.path().join("home");
+    let text = "set ville \"Élisabethville\"\r\nset bad oops\r\n";
+    // UTF-8 with a byte order mark, and UTF-16 (Windows PowerShell 5.1 with `>`).
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend(text.as_bytes());
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    for (name, bytes) in [("bom.kva", bom), ("utf16.kva", utf16)] {
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).unwrap();
+        let o = kivadb(&home, &["run", file.to_str().unwrap(), "--keep-going"], None);
+        assert!(out(&o).contains("OK: ville saved."), "{name}: {}", out(&o));
+        // The first line is a command, and the lines keep their numbers.
+        assert!(!err(&o).contains("Unknown command"), "{name}: {}", err(&o));
+        assert!(err(&o).contains(&format!("{name}:2: Error: String values like 'oops'")), "{name}: {}", err(&o));
+        assert_eq!(out(&kivadb(&home, &["-e", "get ville"], None)), "ville: Élisabethville [string]\n");
+        kivadb(&home, &["-e", "del ville"], None);
+    }
+    // Bytes that are not text are refused before anything runs.
+    let file = dir.path().join("binary.kva");
+    std::fs::write(&file, [0x73, 0x65, 0x74, 0x20, 0xC3, 0x28]).unwrap();
+    let o = kivadb(&home, &["run", file.to_str().unwrap()], None);
+    assert!(err(&o).contains("is not UTF-8 text"), "{}", err(&o));
+}
+
+#[test]
 fn a_failing_command_is_reported_with_its_line_and_stops_the_file() {
     let dir = TempDir::new("kva_error");
     let file = dir.path().join("broken.kva");

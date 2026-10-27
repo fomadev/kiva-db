@@ -115,9 +115,31 @@ pub fn split(source: &str) -> Result<Vec<Statement>, (usize, String)> {
     }
 }
 
+/// The text of a file: UTF-8, with or without a byte order mark, or UTF-16
+/// with one (what Windows PowerShell 5.1 writes with `>` or `Out-File`).
+pub fn decode(bytes: &[u8]) -> Result<String, String> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let (pairs, odd) = rest.as_chunks::<2>();
+        if !odd.is_empty() {
+            return Err("it starts as UTF-16 text but has an odd number of bytes".to_string());
+        }
+        let units: Vec<u16> = pairs.iter().map(|&p| unit(p)).collect();
+        String::from_utf16(&units).map_err(|_| "it starts as UTF-16 text but is not valid UTF-16".to_string())
+    };
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => std::str::from_utf8(rest).map(String::from).map_err(|e| e.to_string()),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => std::str::from_utf8(bytes)
+            .map(String::from)
+            .map_err(|_| "it is not UTF-8 text (save it as UTF-8, or as UTF-16 with a byte order mark)".to_string()),
+    }
+}
+
 /// Reads and splits a `.kva` file; errors are ready to show.
 pub fn load(path: &std::path::Path) -> Result<Vec<Statement>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let text = decode(&bytes).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     split(&text).map_err(|(line, msg)| format!("{}:{line}: {msg}", path.display()))
 }
 
@@ -151,6 +173,27 @@ mod tests {
         assert_eq!(s[2].text, "set user:1 {\n  \"nom\": \"Fordi\",\n  \"age\": 22\n}");
         // Windows line endings work too.
         assert_eq!(split("set a 1\r\nset b {\r\n\"x\": 1\r\n}\r\n").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn files_written_by_windows_tools_are_decoded() {
+        let text = "set nom \"Élisabethville\"\r\nset b {\"x\": 1}\r\n";
+        let utf16 = |be: bool| -> Vec<u8> {
+            let mut out = if be { vec![0xFE, 0xFF] } else { vec![0xFF, 0xFE] };
+            for u in text.encode_utf16() {
+                out.extend(if be { u.to_be_bytes() } else { u.to_le_bytes() });
+            }
+            out
+        };
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend(text.as_bytes());
+        for bytes in [text.as_bytes().to_vec(), bom, utf16(false), utf16(true)] {
+            let decoded = decode(&bytes).unwrap();
+            assert_eq!(decoded, text);
+            assert_eq!(split(&decoded).unwrap()[0].text, "set nom \"Élisabethville\"");
+        }
+        assert!(decode(&[0xFF, 0xFE, 0x41]).unwrap_err().contains("odd number"));
+        assert!(decode(&[0xC3, 0x28]).unwrap_err().contains("not UTF-8"));
     }
 
     #[test]

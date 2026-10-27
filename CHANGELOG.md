@@ -2,6 +2,14 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
+## 1.7.1 - 2026-10-27
+
+A fix release: command files saved on Windows run as they are.
+
+### Fixed
+
+* `kivadb run`, `source` in the shell and `script load` refused a file saved by Windows PowerShell 5.1 (`>`, `Out-File`, `Set-Content -Encoding UTF8`): its first line began with a byte order mark (`Unknown command: 'set'`, with an invisible mark before `set`), or the whole file was UTF-16. They now read UTF-8 with or without a byte order mark, and UTF-16 with one; other bytes are refused before anything runs, with a message that says so ([3.10](DOCUMENTATION.md#310-command-files-kva)).
+
 ## 1.7.0 - 2026-10-27
 
 Queries with `in`, `like` and `ilike`, unique indexes (on several fields, optionally ignoring case), keys named by KivaDB with `add`, and a guide for applications coming from MongoDB.
