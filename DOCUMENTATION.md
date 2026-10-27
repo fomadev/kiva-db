@@ -1699,7 +1699,7 @@ Error: UNIQUE: 'place:5' not written: 'place:1' already holds ["ville",null,"gom
 ```
 
 * **The error** starts with `UNIQUE:` in the shell, the binary protocol and the REST API (code 409), and with `UNIQUE` for Redis clients (`-UNIQUE 'place:3' not written: ...`, [23.14](#2314-unique-indexes-and-add-from-a-redis-client)). Code can test that word instead of the whole message; the Node.js driver gives it as `err.code` ([24.3](#243-nodejs)).
-* **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Without `ignore case`, values compare as in conditions: `"Goma"` and `"goma"` differ. `ignore case` applies to every text field of the index (`type` too, as the errors above show), never to numbers or booleans; the documents keep their own text.
+* **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Without `ignore case`, values compare as in conditions: `"Goma"` and `"goma"` differ. `ignore case` applies to every text field of the index (`type` too, as the errors above show), never to numbers or booleans; the documents keep their own text. So the error shows the value as the index compares it, in small letters (`["quartier","place:1","katindo"]`), not the text stored in either document: `get place:2` still answers `"Katindo"`.
 * **When it is checked.** At every write, under the same lock as the write itself: two clients creating the same place at the same instant cannot both succeed, which a "read, then write if absent" in the application cannot promise. Writing a document again with its own value is allowed. A transaction is judged by what its keys hold at `commit`: swapping two values between documents in one transaction works, and a transaction that would leave a duplicate is refused as a whole. A deleted or expired document frees its value.
 * **Creating it** is refused while two documents already hold the same value; the error names them. Change one, then create the index again.
 * **Queries.** A unique index on one field, without `ignore case`, also answers queries like any index. On several fields, or with `ignore case`, it only guards the writes: queries use indexes on one field, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)), and `ilike` finds texts without regard to capitals ([11.1](#111-the-condition)).
@@ -4119,10 +4119,19 @@ A MongoDB collection becomes a key pattern: each document is stored under `<coll
 ```bash
 mongoexport --db app --collection places --jsonFormat=relaxed --out places.json
 node -e '
+  // MongoDB Extended JSON -> plain JSON: identifiers and dates become text, numbers become
+  // numbers (an integer too large to stay exact in JavaScript is kept as text).
+  const plain = (k, v) => {
+    if (v === null || typeof v !== "object") return v;
+    if ("$oid" in v) return v.$oid;
+    if ("$date" in v) return typeof v.$date === "string" ? v.$date : new Date(v.$date).toISOString();
+    if ("$numberLong" in v) return Number.isSafeInteger(Number(v.$numberLong)) ? Number(v.$numberLong) : v.$numberLong;
+    for (const t of ["$numberInt", "$numberDouble", "$numberDecimal"]) if (t in v) return Number(v[t]);
+    return v;
+  };
   const lines = require("fs").readFileSync("places.json", "utf8").split("\n").filter(Boolean);
   for (const line of lines) {
-    // {"$oid": "..."} and {"$date": "..."} become their text.
-    const { _id, ...doc } = JSON.parse(line, (k, v) => (v && v.$oid) || (v && v.$date) || v);
+    const { _id, ...doc } = JSON.parse(line, plain);
     console.log(`set place:${_id} ${JSON.stringify(doc)}`);
   }' > places.kva
 kivadb run places.kva
@@ -4133,7 +4142,7 @@ OK: place:66f1c2a0e4b0a1b2c3d4e5f6 saved.
 OK: place:66f1c2a0e4b0a1b2c3d4e5f7 saved.
 ```
 
-The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"`, which `>` and `<` compare correctly as long as they all have this form. Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
+The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"` (a date before 1970 or after 9999, which `mongoexport` writes as a number of milliseconds, is turned into the same form), which `>` and `<` compare correctly as long as they all have this form. `$numberInt`, `$numberLong`, `$numberDouble` and `$numberDecimal` become numbers, with two limits: an integer beyond 2^53 (9 007 199 254 740 992) would lose its last digits, so it stays text; a `Decimal128` keeps about 15 significant digits, enough for measures, not for amounts that must be exact to the last digit (store those as text, or in the smallest unit as an integer). Texts with quotes are safe: `JSON.stringify` writes `\"`, and a document literal is read as JSON (the shell's limit on quotes concerns quoted strings such as `set name "..."`, [4](#chapter-4--syntax-rules)). Run the script from bash or Git Bash: Windows PowerShell 5.1 writes `>` files in UTF-16 or with a byte order mark, which `kivadb run` does not accept. Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
 
 ---
 
