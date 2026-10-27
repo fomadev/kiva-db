@@ -33,7 +33,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 17 | strengthen | backup and restore | existing | `kivadb backup`, `restore --check` (SHA-256 of the archive and of every file, every record), `tests/backup.rs` | |
 | 18 | strengthen | authentication and permissions | done | 2.0 grants on scopes and projects, no implicit workspace ([16.4](../../DOCUMENTATION.md#164-workspaces-and-grants)), `tests/commands.rs` | |
 | 19 | strengthen | TLS and encryption at rest | existing | `tests/tls.rs`, `tests/encryption.rs`; an encrypted home of 1.7.1 opens with its key and not without (`tests/compat.rs`) | |
-| 20 | test | compatibility with 1.x | done | `tests/fixtures/v1.7.1*`, made by the 1.7.1 executable from `v1.7.1.kva`; `tests/compat.rs` | a fixture per later release |
+| 20 | test | compatibility with 1.x | done | `tests/fixtures/v1.7.1*`, made by the 1.7.1 executable from `v1.7.1.kva`; `tests/compat.rs`, which also runs the real 1.7.1 in CI (Linux) to go back | a fixture per later release |
 | 39 | document | migration guide | partial | "Upgrading" in the changelog | a migration chapter in DOCUMENTATION.md before the release |
 
 ## P1

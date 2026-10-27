@@ -234,3 +234,151 @@ fn a_format_from_a_newer_kivadb_is_refused() {
     assert!(err.contains("unsupported storage format 3"), "{err}");
     assert_eq!(std::fs::read(&store).unwrap(), bytes, "a refused file is left as it is");
 }
+
+/// Every record of a data file has a type of 1.x (codes 1 to 7, or 0 for a deletion).
+fn only_types_of_1_x(file: &Path) -> bool {
+    let data = std::fs::read(file).unwrap();
+    let mut pos = kivadb::format::FILE_HEADER_LEN as usize;
+    while data.len() - pos >= kivadb::format::REC_HEADER_LEN {
+        let h = kivadb::format::parse_header(&data[pos..]);
+        if h.ty > 7 {
+            return false;
+        }
+        pos += h.total_len() as usize;
+    }
+    true
+}
+
+/// The KivaDB 1.7.1 executable, when `KIVADB_V1_BIN` names one: the scenarios
+/// that go back to 1.x then run it for real.
+fn v1_bin() -> Option<PathBuf> {
+    std::env::var_os("KIVADB_V1_BIN").map(PathBuf::from).filter(|p| p.is_file())
+}
+
+fn run_v1(bin: &Path, home: &Path, commands: &[&str]) -> std::process::Output {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg("--home").arg(home).arg("--no-listen");
+    for c in commands {
+        cmd.arg("-e").arg(c);
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn a_home_used_by_2_0_without_its_new_types_goes_back_to_1_x() {
+    let dir = TempDir::new("compat_back_to_1");
+    let home = home_from("v1.7.1", &dir);
+    {
+        let inst = open(&home);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, r#"set user:4 {"name": "Dan", "role": "dev"}"#);
+        ok(&mut s, "del greeting");
+        ok(&mut s, "compact");
+        ok(&mut s, "set late 7");
+        drop(s);
+        inst.shutdown();
+    }
+    let store = home.join("data").join("store.kiva");
+    assert_eq!(format_of(&store), 1);
+    assert!(only_types_of_1_x(&store));
+    if let Some(bin) = v1_bin() {
+        let out =
+            run_v1(&bin, &home, &["get user:4.name", "get late", "get greeting", "count where user:*.role = \"dev\""]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            text.lines().collect::<Vec<_>>(),
+            ["user:4.name: Dan [string]", "late: 7 [number]", "greeting: (nil)", "Count: 3"]
+        );
+    }
+}
+
+#[test]
+fn a_home_holding_dates_is_refused_by_1_x_and_left_as_it_is() {
+    let dir = TempDir::new("compat_refused_by_1");
+    let home = home_from("v1.7.1", &dir);
+    {
+        let inst = open(&home);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, "set datetime seen '2026-10-27T14:30:00Z'");
+        drop(s);
+        inst.shutdown();
+    }
+    let store = home.join("data").join("store.kiva");
+    assert_eq!(format_of(&store), 2);
+    if let Some(bin) = v1_bin() {
+        let before = std::fs::read(&store).unwrap();
+        let out = run_v1(&bin, &home, &["get seen"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unsupported storage format 2"));
+        assert_eq!(std::fs::read(&store).unwrap(), before, "1.x must not touch it");
+    }
+    let mut s = Session::new(open(&home), true, None);
+    ok(&mut s, "timezone UTC");
+    assert_eq!(ok(&mut s, "get seen"), "seen: 2026-10-27 14:30:00 +00:00 [datetime]");
+}
+
+#[test]
+fn a_crash_while_the_first_date_is_written_loses_nothing_else() {
+    // The header is raised and synced before the record is written. A crash
+    // in between leaves either the old header, or the new one over records
+    // of 1.x only, or the new one and a cut date: each opens with every
+    // earlier value.
+    let dir = TempDir::new("compat_crash_format");
+    let home = home_from("v1.7.1", &dir);
+    let store = home.join("data").join("store.kiva");
+    let original = std::fs::read(&store).unwrap();
+
+    // The new header, no record yet.
+    let mut raised = original.clone();
+    raised[4..8].copy_from_slice(&2u32.to_le_bytes());
+    std::fs::write(&store, &raised).unwrap();
+    let _ = std::fs::remove_file(home.join("data").join("store.kiva.hint"));
+    {
+        let inst = open(&home);
+        let mut s = Session::new(inst.clone(), true, None);
+        the_values_of_1_7_1_are_all_there(&mut s);
+        ok(&mut s, "set date born '2004-05-09'");
+        drop(s);
+        inst.shutdown();
+    }
+
+    // The new header and a date cut in the middle of its bytes.
+    let full = std::fs::read(&store).unwrap();
+    let date_len = full.len() - raised.len();
+    std::fs::write(&store, &full[..raised.len() + date_len / 2]).unwrap();
+    let _ = std::fs::remove_file(home.join("data").join("store.kiva.hint"));
+    let inst = open(&home);
+    let mut s = Session::new(inst.clone(), true, None);
+    the_values_of_1_7_1_are_all_there(&mut s);
+    assert_eq!(ok(&mut s, "get born"), "born: (nil)");
+    assert!(ok(&mut s, "check").contains("CORRUPTED: 0"));
+    // And the next date is written whole.
+    ok(&mut s, "set date born '2004-05-09'");
+    assert_eq!(ok(&mut s, "get born"), "born: 2004-05-09 [date]");
+    assert_eq!(format_of(&store), 2);
+}
+
+#[test]
+fn a_backup_of_a_home_holding_dates_restores_them() {
+    let dir = TempDir::new("compat_backup_dates");
+    let home = home_from("v1.7.1", &dir);
+    let archive = dir.path().join("home.tar.gz");
+    {
+        let inst = open(&home);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, "set date born '2004-05-09'");
+        ok(&mut s, "set time opens '08:00'");
+        kivadb::backup::backup(&inst, &kivadb::backup::Scope::Home, &archive).unwrap();
+        drop(s);
+        inst.shutdown();
+    }
+    let target = dir.path().join("restored");
+    let opts = kivadb::backup::RestoreOptions { target: Some(target.clone()), ..Default::default() };
+    kivadb::backup::restore(&archive, &home, &opts).unwrap();
+    assert_eq!(format_of(&target.join("data").join("store.kiva")), 2);
+    let mut s = Session::new(open(&target), true, None);
+    assert_eq!(ok(&mut s, "get born and opens"), "born: 2004-05-09 [date]\nopens: 08:00:00 [time]");
+    the_values_of_1_7_1_are_all_there(&mut s);
+    assert!(ok(&mut s, "explain get where user:*.role = \"dev\"").contains("INDEX SCAN"));
+}
