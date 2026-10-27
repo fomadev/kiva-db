@@ -2425,16 +2425,21 @@ fn tuning_lets_the_workspace_write_meanwhile() {
         let e = e.clone();
         std::thread::spawn(move || e.tune_vector_index("chunk:*", "embedding", 1.0, 10, 300, None).unwrap())
     };
-    let (mut writes, mut slowest) = (0, std::time::Duration::ZERO);
+    // Counted in sections of the tuning (one search under the lock each)
+    // that began while the write waited for the lock, not in milliseconds: a
+    // loaded machine may pause any thread, for any time, but the tuner must
+    // let a waiting write in before its next search.
+    let (mut writes, mut slowest) = (0, 0);
     while !tuner.is_finished() {
-        let t = std::time::Instant::now();
         e.put(&format!("other:{writes}"), &Value::Str("x".into()), 0, false).unwrap();
-        slowest = slowest.max(t.elapsed());
+        slowest = slowest.max(Engine::sections_waited());
         writes += 1;
     }
     let r = tuner.join().unwrap();
-    assert!(writes > 100, "{writes} writes during the tuning ({} steps)", r.steps.len());
-    assert!(slowest < std::time::Duration::from_millis(500), "a write waited {slowest:?}");
+    let sections = e.tune_sections();
+    assert!(sections >= 600, "{sections} sections ({} steps)", r.steps.len());
+    assert!(slowest <= 1, "a write waited for {slowest} sections of the tuning");
+    assert!(writes > 100, "{writes} writes during {sections} sections");
 }
 
 #[test]
