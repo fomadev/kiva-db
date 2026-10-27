@@ -41,3 +41,19 @@ Tests in `tests/compat.rs`, the first two run against the real 1.7.1 executable 
 **Decision.** `GET /health` answers as long as the process runs; `GET /ready` answers `503` while it stops, and on a replica not connected to its master.
 
 **Why.** A load balancer or Kubernetes must not send reads to a replica that is still receiving its first snapshot (old data), but must not restart it either: it is healthy, only not ready.
+
+## 5. The change journal is derived from the data file
+
+**Decision.** The change journal (`store.kiva.changes/`) is written under the engine lock right after the data, each change recording where its data record ends. When a workspace opens, the journal is brought in line with the data file: changes whose data a crash lost are dropped, changes the journal lacks are rebuilt from the data records past the last one it names. Reads sync the data file and the journal before handing out changes. A compaction syncs the journal and records the new data file before it replaces the old one.
+
+**Considered.** Making the journal the source (write it first, then the data), or syncing both files at every write.
+
+**Why.** Without an fsync between the two files, the operating system may write either one first: a journal written first could hold changes whose data never reached the disk, or lose changes whose data did. The data file is already the log the engine trusts after a crash (checksums, transaction commit records), so deriving the journal from it closes the window without a second fsync per write. Handing out only what is synced keeps readers from seeing a change a crash would take back. Rebuilt changes keep their numbers; whether a rebuilt key was created is not known, and is said so (`"created": null`).
+
+**Delivery.** At least once: a reader may get a change again (a rebuild, a cursor read again), so applying one must be idempotent. Exactly once would need the reader's own writes in the same transaction as its cursor, which KivaDB cannot offer across systems.
+
+**Not covered.** Cursors are per node (each journal numbers its own changes), expirations are not changes, and backups do not carry the journal. Those are documented limits, not simulated guarantees.
+
+## 6. Schemas and journals are defined per node, for now
+
+Like secondary indexes, schemas and change journals are set on each node. A replica applies what its master accepted (validated, with its defaults filled in), so validation never diverges on the data that flows; what differs after a failover is what the new master checks next. Replicating these definitions (with the index definitions) is a later work item: it needs the definitions in the replication stream and a rule for a replica whose own definitions differ.

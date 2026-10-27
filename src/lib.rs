@@ -12,6 +12,7 @@ pub mod api;
 pub mod auth;
 pub mod backup;
 pub mod cache;
+pub mod changes;
 pub mod client;
 pub mod compress;
 pub mod config;

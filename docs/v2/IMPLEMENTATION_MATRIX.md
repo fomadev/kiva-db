@@ -43,7 +43,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 21 | add | optional schemas | done | `src/schema.rs`, checked in the engine on every write path, `tests/schemas.rs`, [11.8](../../DOCUMENTATION.md#118-schemas-rules-for-the-documents-of-a-pattern) | |
 | 22 | add | constraints and default values | done | `required`, `nullable`, `unique` (unique index), `min`/`max`, `minLength`/`maxLength`, `pattern`, `enum`, arrays and nested objects; defaults, `now()`, `today()`, `current_time` | |
 | 23 | add | composite indexes | partial | unique indexes on several fields ([11.7](../../DOCUMENTATION.md#117-unique-indexes)) | non-unique composite indexes |
-| 24 | add | durable change feed (CDC) | planned | notifications exist but are lost when nobody listens ([chapter 22](../../DOCUMENTATION.md#chapter-22--change-notifications)) | a journal with a cursor to resume from, retention, at-least-once delivery |
+| 24 | add | durable change feed (CDC) | done | `src/changes.rs`, hooks in `src/engine.rs`, `tests/changes.rs`, change journal tests in `tests/network.rs`, [22.5](../../DOCUMENTATION.md#225-the-change-journal-changes-kept-read-again-from-a-cursor), [decision 5](DECISIONS.md#5-the-change-journal-is-derived-from-the-data-file) | journals are per node (no replication of cursors); schemas are per node too (see 21) |
 | 25 | add | value history | not planned | [ROADMAP.md](../../ROADMAP.md): needs a retention policy and disk budgeting | |
 | 26 | modify | cache invalidation | existing | `the_value_cache_serves_hot_keys_and_never_returns_stale_data`, `the_value_cache_stays_within_its_budget` | |
 | 27 | strengthen | HNSW | existing | recall and `tune` tests in `tests/power.rs`, graph of 1.7.1 read back (`tests/compat.rs`) | |

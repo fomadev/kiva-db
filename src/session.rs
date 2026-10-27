@@ -231,6 +231,22 @@ impl Session {
         self.enter(workspace, level)
     }
 
+    /// Whether this session may still read its workspace, from the stored
+    /// account: for a long wait, during which a grant may be revoked.
+    pub fn check_reads_now(&self) -> Result<()> {
+        self.check(Need::Read)?;
+        let Some(u) = &self.user else { return Ok(()) };
+        if u.role == auth::Role::Admin {
+            return Ok(());
+        }
+        let still = auth::get_user(&self.inst.system, &u.name)?.and_then(|u| u.access(&self.ws)).is_some();
+        if still {
+            Ok(())
+        } else {
+            Err(KivaError::Denied(format!("no access to workspace '{}' any more", self.ws)))
+        }
+    }
+
     pub fn check(&self, need: Need) -> Result<()> {
         if need == Need::None {
             return Ok(());

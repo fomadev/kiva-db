@@ -818,3 +818,108 @@ fn replication_covers_every_workspace() {
     assert_eq!(code, ST_ERR);
     assert!(msg.contains("replicates every workspace"), "{msg}");
 }
+
+#[test]
+fn the_change_journal_over_rest_with_a_wait() {
+    let dir = TempDir::new("http_changes");
+    let inst = instance(&dir);
+    let port = http::start_http(&inst, "127.0.0.1", 0).unwrap();
+    let mut admin = Session::new(inst.clone(), true, None);
+    let get = |p: &str, auth: Option<&str>| http_req(port, "GET", p, None, auth);
+    assert_eq!(get("/v1/changes", None).status, 404, "no journal yet");
+    ok(&mut admin, "changes enable");
+    ok(&mut admin, r#"set user:1 {"name": "Ana"}"#);
+    ok(&mut admin, "del user:1");
+
+    let r = get("/v1/changes?from=beginning", None).json();
+    let ops: Vec<&str> = r["changes"].as_array().unwrap().iter().map(|c| c["op"].as_str().unwrap()).collect();
+    assert_eq!(ops, ["set", "delete"]);
+    assert_eq!((&r["changes"][0]["value"], &r["changes"][0]["created"]), (&json!({"name": "Ana"}), &json!(true)));
+    let cursor = r["cursor"].as_str().unwrap().to_string();
+    assert_eq!(r["changes"][1]["cursor"], cursor);
+
+    // Nothing after the cursor yet: the request waits for the next change.
+    let writer = {
+        let inst = inst.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            ok(&mut Session::new(inst, true, None), "set late 1");
+        })
+    };
+    let started = Instant::now();
+    let r = get(&format!("/v1/changes?cursor={cursor}&wait=10000"), None).json();
+    writer.join().unwrap();
+    assert_eq!(r["changes"][0]["key"], "late", "{r}");
+    assert!(started.elapsed() >= Duration::from_millis(250) && started.elapsed() < Duration::from_secs(8));
+    // A wait with nothing coming ends at its time, with no change.
+    let r = get(&format!("/v1/changes?cursor={}&wait=200", r["cursor"].as_str().unwrap()), None).json();
+    assert_eq!(r["changes"], json!([]));
+    let r = get("/v1/changes?cursor=00", None);
+    assert_eq!(r.status, 400);
+    assert!(r.body.contains("CURSOR_INVALID"), "{}", r.body);
+
+    // With authentication: read access to the workspace, checked at every request.
+    ok(&mut admin, r#"create user "feed" identified by "pw" grant read on default"#);
+    ok(&mut admin, "config set auth_required true");
+    let auth = Some("feed:pw");
+    assert_eq!(get("/v1/changes?from=beginning&consumer=search", auth).status, 200);
+    ok(&mut admin, r#"revoke read on default from "feed""#);
+    assert_eq!(get("/v1/changes?from=beginning", auth).status, 403);
+}
+
+#[test]
+fn a_killed_process_keeps_its_changes() {
+    let dir = TempDir::new("kill_changes");
+    let mut child = kivadb(dir.path()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdin.write_all(b"changes enable\n").unwrap();
+    for i in 0..200 {
+        stdin.write_all(format!("set k{i:03} \"value {i}\"\n").as_bytes()).unwrap();
+    }
+    stdin.write_all(b"begin\nset in_txn 1\nping\n").unwrap();
+    stdin.flush().unwrap();
+    while line.trim_end() != "PONG" {
+        line.clear();
+        assert!(stdout.read_line(&mut line).unwrap() > 0);
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let out = kivadb(dir.path()).args(["-e", "changes read from beginning limit 1000"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).replace('\r', "");
+    let changes: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
+    assert_eq!(changes.len(), 200, "{text}");
+    assert!(changes[0].starts_with("#1 ") && changes[0].ends_with("insert k000 (string) \"value 0\""), "{text}");
+    assert!(!text.contains("in_txn"), "the open transaction never happened");
+}
+
+#[test]
+fn a_replica_journals_what_its_master_sends() {
+    let (dir_m, dir_r) = (TempDir::new("cdc-master"), TempDir::new("cdc-replica"));
+    let (master, replica) = (instance(&dir_m), instance(&dir_r));
+    let port_m = server::start_tcp(&master, "127.0.0.1", 0).unwrap();
+    server::start_tcp(&replica, "127.0.0.1", 0).unwrap();
+    let mut m = Session::new(master.clone(), true, None);
+    let mut r = Session::new(replica.clone(), true, None);
+    ok(&mut m, "changes enable");
+    ok(&mut m, "set before 1");
+    ok(&mut r, "changes enable");
+    ok(&mut r, &format!("replica of 127.0.0.1 {port_m}"));
+    wait_for("the initial snapshot", || replica.repl.link().status == "connected");
+    ok(&mut m, r#"set live "one""#);
+    ok(&mut m, "begin");
+    ok(&mut m, "set t1 1 and t2 2");
+    ok(&mut m, "commit");
+    ok(&mut m, "del before");
+    wait_for("the live writes", || !replica.engine("default").unwrap().contains("before"));
+    let on_replica = ok(&mut r, "changes read from beginning");
+    for what in ["live", "t1", "t2", "delete before"] {
+        assert!(on_replica.contains(what), "{what} missing on the replica:\n{on_replica}");
+    }
+    // Each node numbers its own journal: a cursor of the master means nothing on the replica.
+    let cursor_m =
+        ok(&mut m, "changes read from now").lines().last().unwrap().split_whitespace().nth(1).unwrap().to_string();
+    assert!(fails(&mut r, &format!("changes read from {cursor_m}")).contains("another change journal"));
+}

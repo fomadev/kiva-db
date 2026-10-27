@@ -300,6 +300,50 @@ fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
     Ok(Response::ok(json!({ "key": key, "type": ty.name() })))
 }
 
+/// `GET /v1/changes`: the change journal of the workspace from a cursor.
+/// With `wait` (milliseconds, at most 30 000), waits for a change when
+/// there is none yet; access is checked again at every look, so a grant
+/// revoked meanwhile ends the wait.
+fn changes(sess: &mut Session, req: &Request) -> Result<Response> {
+    use crate::engine::ChangesFrom;
+    let q = |name: &str| req.query.get(name).map(|s| s.as_str());
+    let consumer = q("consumer").filter(|c| !c.is_empty());
+    let from = match (q("cursor").or(q("from")), consumer) {
+        (Some("beginning"), _) => ChangesFrom::Beginning,
+        (Some("now"), _) => ChangesFrom::Now,
+        (Some(c), _) => ChangesFrom::Cursor(c.to_string()),
+        (None, Some(_)) => ChangesFrom::Consumer,
+        (None, None) => ChangesFrom::Beginning,
+    };
+    let limit = q("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(100);
+    let wait = q("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0).min(30_000);
+    let pattern = q("pattern");
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(wait);
+    let mut from = from;
+    loop {
+        sess.check_reads_now()?;
+        let read = sess.engine.read_changes(from, limit, pattern, consumer)?;
+        if !read.changes.is_empty() || read.more || std::time::Instant::now() >= until {
+            let list: Vec<Json> =
+                read.changes.iter().map(|c| crate::changes::to_json(c, &read.cursor_of(c.seq))).collect();
+            return Ok(Response::ok(json!({
+                "workspace": sess.ws,
+                "cursor": read.cursor,
+                "more": read.more,
+                "first_seq": read.first_seq,
+                "last_seq": read.last_seq,
+                "changes": list,
+            })));
+        }
+        // Nothing yet: wait for the journal to move, from where this read ended.
+        let seen = read.last_seq;
+        from = ChangesFrom::Cursor(read.cursor);
+        while sess.engine.last_change() == Some(seen) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
 fn route(sess: &mut Session, req: &Request) -> Result<Response> {
     sess.use_zone();
     let method = req.method.as_str();
@@ -403,6 +447,7 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
                 "uptime_seconds": sess.inst.started.elapsed().as_secs(),
             }})))
         }
+        ("GET", "/v1/changes") => changes(sess, req),
         ("POST", "/v1/api") => {
             let body: Json = serde_json::from_slice(&req.body)?;
             let mut answer = crate::api::handle(sess, &body)?;
@@ -551,6 +596,40 @@ fn metrics(sess: &Session) -> String {
         "Operations the slowest replica is behind.",
         &[format!("kiva_replication_lag_ops {lag}")],
     );
+    if let Some(c) = sess.engine.changes_status() {
+        metric(
+            "kiva_changes_last_seq",
+            "counter",
+            "Number of the last change in the workspace's change journal.",
+            &[format!("kiva_changes_last_seq {}", c.last_seq)],
+        );
+        metric(
+            "kiva_changes_retained",
+            "gauge",
+            "Changes the journal keeps.",
+            &[format!("kiva_changes_retained {}", c.retained)],
+        );
+        metric(
+            "kiva_changes_bytes",
+            "gauge",
+            "Size of the change journal on disk.",
+            &[format!("kiva_changes_bytes {}", c.bytes)],
+        );
+        let lags: Vec<String> = c
+            .consumers
+            .iter()
+            .map(|(name, seq, _)| {
+                format!(
+                    "kiva_changes_consumer_lag{{consumer=\"{}\"}} {}",
+                    name.replace(['"', '\\'], "_"),
+                    c.last_seq.saturating_sub(*seq)
+                )
+            })
+            .collect();
+        if !lags.is_empty() {
+            metric("kiva_changes_consumer_lag", "gauge", "Changes a named consumer has not handled yet.", &lags);
+        }
+    }
     metric(
         "kiva_uptime_seconds",
         "gauge",
@@ -779,6 +858,7 @@ fn openapi() -> Json {
                 }
             },
             "/v1/stream": { "get": { "summary": "Server-Sent Events stream of key changes. Query: pattern (default *)." } },
+            "/v1/changes": { "get": { "summary": "The durable change journal of the workspace (changes enable). Query: cursor (or beginning, now), consumer, limit (at most 1000), pattern, wait (ms, at most 30000)." } },
             "/ws": { "get": { "summary": "WebSocket stream of key changes. Query: pattern (default *)." } }
         }
     })

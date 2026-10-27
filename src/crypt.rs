@@ -47,6 +47,8 @@ pub enum Domain {
     Record,
     Hint,
     Graphs,
+    /// The change journal (`crate::changes`).
+    Changes,
 }
 
 impl Domain {
@@ -55,6 +57,7 @@ impl Domain {
             Domain::Record => b"kivadb record v1",
             Domain::Hint => b"kivadb hint v1",
             Domain::Graphs => b"kivadb graphs v1",
+            Domain::Changes => b"kivadb changes v1",
         }
     }
 }
