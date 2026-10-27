@@ -25,6 +25,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 * **1.5.1** `config set` tells correctly whether a setting applies at once or at the next start; `help` lists the semantic cache, HNSW and failover commands
 * **1.6.0** Queries with `and` / `or` / `not` and aggregates with `group by`; hash indexes; HNSW quantization (`sq8`), filtered search and `tune ... auto`; semantic cache invalidated by `depends`; Redis streams, blocking commands, `WATCH`, JSON commands and millisecond expiry; replication of every workspace; memory bounds; faster group commit
 * **1.6.1** The message that refuses text where a vector is expected no longer contains runs of spaces
+* **1.7.0** Conditions with `in`, `like` and `ilike`; **unique indexes**, on several fields and optionally `ignore case`, with a stable `UNIQUE` error; keys named by KivaDB with `add` (ObjectId format); Node.js driver 1.1.0 (`add`, `query`); a guide for applications coming from MongoDB
 
 ## Next, in order of value
 

@@ -6,13 +6,14 @@
 
 KivaDB is a multi-model database you can start in one command: typed key-value data, JSON documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
 
-**Current release: 1.6.1** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
+**Current release: 1.7.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
 
 ## What it does
 
 * **Stores typed data**: strings, numbers, booleans, null, arrays, objects (JSON documents) and raw bytes.
 * **Keeps it safe**: every record is checksummed, a crash or a killed process loses nothing, and transactions are atomic.
-* **Finds it fast**: keys are kept sorted (range queries, pagination); documents are filtered with `and`, `or`, `not` and parentheses, served by sorted or hash indexes that the engine combines, and folded into aggregates (`count`, `sum`, `avg`, `min`, `max`, `group by`).
+* **Finds it fast**: keys are kept sorted (range queries, pagination); documents are filtered with `and`, `or`, `not` and parentheses, `in [...]`, `like` and `ilike` (any case), served by sorted or hash indexes that the engine combines, and folded into aggregates (`count`, `sum`, `avg`, `min`, `max`, `group by`).
+* **Keeps it consistent**: unique indexes, on one field or a combination of fields and optionally ignoring case, refuse a duplicate whoever writes it, even two clients at the same instant; `add place: {...}` names a new key with an identifier in MongoDB's ObjectId format. Applications [coming from MongoDB](DOCUMENTATION.md#249-coming-from-mongodb) find each operation's counterpart there.
 * **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes: exact, or HNSW for large collections, optionally quantized to one byte per number, filtered on other fields during the search, and tuned on your data (`tune vector index ... auto` keeps it tuned as it grows). A **semantic cache** gives back the answer of a question already asked in other words, so that a language model is not called twice, and drops it as soon as the data it `depends` on changes.
 * **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged (RESP2 and RESP3): strings, counters, expiry to the millisecond, hashes, lists, sets, sorted sets, streams with consumer groups, blocking commands (`BLPOP`, `XREAD BLOCK`...), transactions with `WATCH`, JSON documents (`JSON.*`), vector search (`KIVA.SIMILAR`), Lua scripts (`EVAL`), publish/subscribe and numbered databases. Checked with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.
 * **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
@@ -30,7 +31,7 @@ KivaDB is a multi-model database you can start in one command: typed key-value d
 | **Windows** (PowerShell) | `irm https://raw.githubusercontent.com/fomadev/kiva-db/main/install.ps1` &#124; `iex` |
 | **Linux, macOS** | `curl -sSL https://raw.githubusercontent.com/fomadev/kiva-db/main/install.sh` &#124; `bash` |
 | **Download** | Get the archive for Windows, Linux or macOS from the [releases page](https://github.com/fomadev/kiva-db/releases), unpack it, put `kivadb` in your `PATH` |
-| **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.6.1` |
+| **Docker** | `docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.7.0` |
 | **From source** | Install [Rust](https://rustup.rs) and a C compiler (used once, for the embedded Lua), then `cargo build --release`; the executable is `target/release/kivadb` |
 
 Step-by-step instructions for each system are in [Chapter 1](DOCUMENTATION.md#chapter-1--installation) of the documentation.
@@ -110,7 +111,7 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 
 ## Scope of this release
 
-KivaDB 1.6.1 stores the whole database on each node, with replicas and automatic failover. Clustering (spreading the data over several machines) and SQL / the PostgreSQL protocol are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
+KivaDB 1.7.0 stores the whole database on each node, with replicas and automatic failover. Clustering (spreading the data over several machines) and SQL / the PostgreSQL protocol are not part of it; [ROADMAP.md](ROADMAP.md) explains what comes next and why.
 
 ## License
 

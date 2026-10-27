@@ -2,7 +2,13 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased
+## 1.7.0 - 2026-10-26
+
+Queries with `in`, `like` and `ilike`, unique indexes (on several fields, optionally ignoring case), keys named by KivaDB with `add`, and a guide for applications coming from MongoDB.
+
+### Upgrading
+
+* An earlier version does not know the unique indexes: it does not check them, and it may forget them when it saves its index definitions. If you go back to 1.6, check `indexes` after upgrading again and create them anew.
 
 ### Added
 
