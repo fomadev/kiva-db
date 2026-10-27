@@ -1670,35 +1670,40 @@ Wildcards belong to the key pattern, never to the field (`user:*.na*` is refused
 A **unique index** refuses a second document holding the same value, whoever writes it: the shell, a program, a Redis client, a script.
 
 ```text
-create unique index on <pattern> (<field>[, <field>...]) [using btree|hash]
+create unique index on <pattern> (<field>[, <field>...]) [using btree|hash] [ignore case]
 ```
 
 ```text
 kiva> create unique index on user: (name)
 Unique index created on user:* (name): 3 documents indexed.
 kiva> set user:4 {"name": "Alice", "role": "ops"}
-Error: 'user:4' not written: 'user:1' already holds "Alice" in the unique index on user:* (name)
+Error: UNIQUE: 'user:4' not written: 'user:1' already holds "Alice" in the unique index on user:* (name)
 ```
 
-On **several fields**, it is the combination that must be unique: the same name may come back under another parent, not twice under the same one.
+On **several fields**, it is the combination that must be unique: the same name may come back under another parent, not twice under the same one. With **`ignore case`**, texts are compared without regard to capitals, in every alphabet (`Goma`, `GOMA` and `goma` are the same value; so are `Élisabethville` and `élisabethville`):
 
 ```text
-kiva> create unique index on place: (type, parent, nameLower)
-Unique index created on place:* (type, parent, nameLower): 0 documents indexed.
-kiva> set place:1 {"type": "VILLE", "parent": null, "name": "Goma", "nameLower": "goma"}
+kiva> create unique index on place: (type, parent, name) ignore case
+Unique index created on place:* (type, parent, name) ignore case: 0 documents indexed.
+kiva> set place:1 {"type": "VILLE", "parent": null, "name": "Goma"}
 OK: place:1 saved.
-kiva> set place:2 {"type": "QUARTIER", "parent": "place:1", "name": "Katindo", "nameLower": "katindo"}
+kiva> set place:2 {"type": "QUARTIER", "parent": "place:1", "name": "Katindo"}
 OK: place:2 saved.
-kiva> set place:3 {"type": "QUARTIER", "parent": "place:1", "name": "KATINDO", "nameLower": "katindo"}
-Error: 'place:3' not written: 'place:2' already holds ["QUARTIER","place:1","katindo"] in the unique index on place:* (type, parent, nameLower)
+kiva> set place:3 {"type": "QUARTIER", "parent": "place:1", "name": "KATINDO"}
+Error: UNIQUE: 'place:3' not written: 'place:2' already holds ["quartier","place:1","katindo"] in the unique index on place:* (type, parent, name) ignore case
+kiva> set place:4 {"type": "QUARTIER", "parent": "place:9", "name": "Katindo"}
+OK: place:4 saved.
+kiva> set place:5 {"type": "VILLE", "parent": null, "name": "goma"}
+Error: UNIQUE: 'place:5' not written: 'place:1' already holds ["ville",null,"goma"] in the unique index on place:* (type, parent, name) ignore case
 ```
 
-* **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Values compare as in conditions: `"Goma"` and `"goma"` differ, which is why the example keeps a field in small letters.
+* **The error** starts with `UNIQUE:` in the shell, the binary protocol and the REST API (code 409), and with `UNIQUE` for Redis clients (`-UNIQUE 'place:3' not written: ...`, [23.14](#2314-unique-indexes-and-add-from-a-redis-client)). Code can test that word instead of the whole message; the Node.js driver gives it as `err.code` ([24.3](#243-nodejs)).
+* **What counts.** `null` is a value like the others: two towns with `"parent": null` and the same name conflict. A document that lacks one of the fields (or holds an array or an object there) is not constrained, so leave a field out to let several documents go without it. Without `ignore case`, values compare as in conditions: `"Goma"` and `"goma"` differ. `ignore case` applies to every text field of the index (`type` too, as the errors above show), never to numbers or booleans; the documents keep their own text.
 * **When it is checked.** At every write, under the same lock as the write itself: two clients creating the same place at the same instant cannot both succeed, which a "read, then write if absent" in the application cannot promise. Writing a document again with its own value is allowed. A transaction is judged by what its keys hold at `commit`: swapping two values between documents in one transaction works, and a transaction that would leave a duplicate is refused as a whole. A deleted or expired document frees its value.
 * **Creating it** is refused while two documents already hold the same value; the error names them. Change one, then create the index again.
-* **Queries.** A unique index on one field also answers queries like any index. On several fields it only guards the writes: queries use indexes on one field, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)).
-* `indexes` shows `unique`; `drop index on place: (type, parent, nameLower)` removes it. Like every index, it is defined per node: create it on the master; a replica copies what the master accepted.
-* An index on several fields that is not unique is refused.
+* **Queries.** A unique index on one field, without `ignore case`, also answers queries like any index. On several fields, or with `ignore case`, it only guards the writes: queries use indexes on one field, which `and` combines ([11.5](#115-explain--see-how-a-query-will-run)), and `ilike` finds texts without regard to capitals ([11.1](#111-the-condition)).
+* `indexes` shows `unique` and `ignore case`; `drop index on place: (type, parent, name)` removes it. Like every index, it is defined per node: create it on the master; a replica copies what the master accepted.
+* An index on several fields, or with `ignore case`, that is not unique is refused.
 
 ---
 
@@ -3228,7 +3233,7 @@ Notes on `put`:
 
 * `value` is plain JSON matching `type`. A number may be given as a JSON number or as text (`"3.14"`), bytes are base64 text.
 * `mode` is `create` (fail if the key exists), `update` (fail if it does not) or `upsert` (default).
-* A write that a unique index refuses ([11.7](#117-unique-indexes)) fails with the message of the shell; over HTTP, with code 409.
+* A write that a unique index refuses ([11.7](#117-unique-indexes)) fails with a message starting with `UNIQUE:`; over HTTP, with code 409.
 * `ttl` absent keeps the current expiry of the key, `0` removes it, a positive number sets it in seconds.
 
 Because values travel as JSON, they are free of the shell's quoting rules: a text may contain both kinds of quotes.
@@ -3837,6 +3842,54 @@ OK
 * **Size.** Each command reads and rewrites the whole stream, so a stream may hold at most `resp.max_collection_members` entries (100 000 by default, [23.8](#238-sets-and-sorted-sets)). Keep it trimmed as Redis applications usually do: `XADD ... MAXLEN ~ 10000`, or `XTRIM`. `~` trims exactly to the number given, which Redis allows (it may keep a few more).
 * `XREAD` and `XREADGROUP` with `BLOCK` wait like `BLPOP` ([23.12](#2312-blocking-commands-and-watch)); `$` means the last id at the moment the command starts.
 
+### 23.14 Unique indexes and `add` from a Redis client
+
+A unique index ([11.7](#117-unique-indexes)) guards the documents a Redis client writes as well: `JSON.SET` and the other `JSON.*` commands that change a document, and `HSET` on a hash (a hash is a document whose values are text). A string written with `SET` is not a document and is never constrained.
+
+A refused write answers an error whose first word is `UNIQUE`, the way Redis errors start with a code (`WRONGTYPE`, `READONLY`):
+
+```text
+127.0.0.1:6379> JSON.SET place:3 $ '{"type": "QUARTIER", "parent": "place:1", "name": "KATINDO"}'
+(error) UNIQUE 'place:3' not written: 'place:2' already holds ["quartier","place:1","katindo"] in the unique index on place:* (type, parent, name) ignore case
+```
+
+With ioredis, test that word to answer a conflict:
+
+```js
+try {
+  await redis.call("JSON.SET", key, "$", JSON.stringify(place));
+} catch (err) {
+  if (err.message.startsWith("UNIQUE ")) return res.status(409).json({ error: "This place already exists." });
+  throw err;
+}
+```
+
+**In `MULTI` / `EXEC`.** The commands are queued and answer `QUEUED`, as in Redis; the unique indexes are checked when `EXEC` applies them, all together. If one write would leave a duplicate, `EXEC` answers the `UNIQUE` error and **nothing** of the transaction is applied: not the other commands either. (A command refused while it is queued, such as an unknown command, makes `EXEC` answer `EXECABORT` instead; a watched key that changed makes it answer nil, [23.12](#2312-blocking-commands-and-watch).)
+
+```text
+127.0.0.1:6379> MULTI
+OK
+127.0.0.1:6379> SET counter 1
+QUEUED
+127.0.0.1:6379> JSON.SET place:5 $ '{"type": "VILLE", "parent": null, "name": "goma"}'
+QUEUED
+127.0.0.1:6379> EXEC
+(error) UNIQUE 'place:5' not written: 'place:1' already holds ["ville",null,"goma"] in the unique index on place:* (type, parent, name) ignore case
+127.0.0.1:6379> EXISTS counter
+(integer) 0
+```
+
+**`add`** (a key named by KivaDB, [6.7](#67-add--let-kivadb-name-the-key)) goes through `KIVA.API`, which answers the key and the identifier as JSON:
+
+```js
+const r = JSON.parse(await redis.call("KIVA.API", JSON.stringify({
+  op: "add", prefix: "place:", value: { type: "VILLE", parent: null, name: "Bukavu" },
+})));
+// r = { key: "place:6adf9c3ca32f23553b1dbb10", id: "6adf9c3ca32f23553b1dbb10", type: "object" }
+```
+
+The queries with `in`, `like` and `ilike` go through `KIVA.API` too: `{"op": "query", "target": "place:*", "where": {"parent": ["place:1", "place:2"]}}` ([20.4](#204-structured-requests-for-tools)).
+
 ## Chapter 24 — Connecting from your programs
 
 Start KivaDB (`kivadb start`), then pick the approach that suits your language.
@@ -3905,7 +3958,23 @@ db.on("change", (e) => console.log(e.event, e.key));
 await db.subscribe("user:*");
 ```
 
-To encrypt the connection, add `tls: { fingerprint: "..." }` with the fingerprint shown by `kivadb tls` ([16.11](#1611-encrypted-connections-tls)). Its README lists every method. **A minimal client to read**: [`examples/nodejs/kiva.js`](examples/nodejs/kiva.js) shows the protocol in about fifty lines:
+To encrypt the connection, add `tls: { fingerprint: "..." }` with the fingerprint shown by `kivadb tls` ([16.11](#1611-encrypted-connections-tls)). Its README lists every method.
+
+From driver **1.1.0** (with KivaDB 1.7.0 or later), `add` stores a document under a key KivaDB names ([6.7](#67-add--let-kivadb-name-the-key)), `query` takes a condition as JSON with `in`, `like` and `ilike` ([11.1](#111-the-condition), [20.4](#204-structured-requests-for-tools)), and an error keeps the code word of KivaDB's message in `err.code`, such as `UNIQUE` for a write a unique index refuses ([11.7](#117-unique-indexes)):
+
+```javascript
+const { key, id } = await db.add("place:", { type: "QUARTIER", parent: "place:1", name: "Katindo" });
+const quarters = await db.query("place:*", { type: "QUARTIER", parent: "place:1" });
+const found = await db.query("place:*", { field: "name", cmp: "ilike", value: "kat%" });
+const children = await db.query("place:*", { parent: ["place:1", "place:2"] });   // a list means in
+try {
+  await db.add("place:", { type: "QUARTIER", parent: "place:1", name: "KATINDO" });
+} catch (err) {
+  if (err.code === "UNIQUE") console.log("already there");   // with an index ... ignore case
+}
+```
+
+Driver 1.0.0 has neither `add` nor `query`; its `api()` sends the same structured requests. **A minimal client to read**: [`examples/nodejs/kiva.js`](examples/nodejs/kiva.js) shows the protocol in about fifty lines:
 
 ```javascript
 const { KivaClient } = require("./kiva");
@@ -4021,6 +4090,49 @@ Kiva Studio is the desktop application for KivaDB (Windows, Linux, macOS). It is
 ### 24.8 Any other language
 
 Two options: use the REST API with your language's HTTP library, or implement the binary protocol of [section 20.2](#202-the-binary-protocol) (with the structured requests of [section 20.4](#204-structured-requests-for-tools) if you want JSON instead of text). The protocol is small; the Node.js client is about fifty lines and is a good model: build a frame, send it, read frames until one is not a notification.
+
+### 24.9 Coming from MongoDB
+
+A MongoDB collection becomes a key pattern: each document is stored under `<collection>:<_id>`, and the operations an application uses most have a direct counterpart.
+
+| MongoDB | KivaDB |
+| :--- | :--- |
+| `db.places.insertOne(doc)` | `add place: {...}`, or `set place:<id> {...}` to keep an identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
+| `ObjectId()` | The identifier `add` makes: the same 24-character format, sorted by time |
+| `findOne({_id})` | `get place:<id>` |
+| `find({type: "VILLE", parentId: p})` | `get where place:*.type = "VILLE" and parentId = "p"` ([11.2](#112-get-where--find-documents)) |
+| `$in`, `$nin` | `in [...]`, `not in [...]` |
+| `$ne`, `$gt`, `$gte`, `$lt`, `$lte` | `!=`, `>`, `>=`, `<`, `<=` |
+| `$or`, `$and`, `$not` | `or`, `and`, `not`, parentheses |
+| `$regex: /^kin/i` | `ilike "kin%"`; `$regex: /^Kin/` is `like "Kin%"`. Other regular expressions have no counterpart |
+| `countDocuments`, `$group` with `$sum`, `$avg`, `$min`, `$max` | `count`, `sum`, `avg`, `min`, `max`, `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)) |
+| `createIndex({type: 1})` | `create index on place: (type)` |
+| `createIndex({type: 1, parentId: 1, name: 1}, {unique: true, collation: {strength: 2}})` | `create unique index on place: (type, parentId, name) ignore case` ([11.7](#117-unique-indexes)) |
+| `updateOne({_id}, {$set: {name}})` | `json set place:<id> .name "..."` ([10.3](#103-changing-a-field)) |
+| `deleteOne({_id})`, `deleteMany({parentId: {$in: ids}})` | `del place:<id>`; for many, read the keys with `get where ... in [...]`, then `del a and b ...` in one transaction ([13](#chapter-13--transactions)) |
+| Sessions and transactions | `begin` ... `commit` ([13](#chapter-13--transactions)) |
+| `sort`, `skip`, `$lookup` | Not part of the language: keys come back in key order, and related data is read by name ([11.6](#116-what-a-query-does-not-do)) |
+
+**Copying a collection.** Export it as one JSON document per line, then write each one under its `_id` in a `.kva` file and run it with `kivadb run` ([3.10](#310-command-files-kva)):
+
+```bash
+mongoexport --db app --collection places --jsonFormat=relaxed --out places.json
+node -e '
+  const lines = require("fs").readFileSync("places.json", "utf8").split("\n").filter(Boolean);
+  for (const line of lines) {
+    // {"$oid": "..."} and {"$date": "..."} become their text.
+    const { _id, ...doc } = JSON.parse(line, (k, v) => (v && v.$oid) || (v && v.$date) || v);
+    console.log(`set place:${_id} ${JSON.stringify(doc)}`);
+  }' > places.kva
+kivadb run places.kva
+```
+
+```text
+OK: place:66f1c2a0e4b0a1b2c3d4e5f6 saved.
+OK: place:66f1c2a0e4b0a1b2c3d4e5f7 saved.
+```
+
+The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"`, which `>` and `<` compare correctly as long as they all have this form. Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
 
 ---
 

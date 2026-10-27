@@ -89,12 +89,16 @@ impl Session {
                 }
                 let has_vectors = !vectors.is_empty();
                 for i in list {
-                    let how = match (i.unique, i.kind) {
-                        (true, IndexKind::Hash) => "unique, hash, ",
-                        (true, _) => "unique, ",
-                        (false, IndexKind::Hash) => "hash, ",
-                        (false, _) => "",
-                    };
+                    let mut how = String::new();
+                    if i.unique {
+                        how.push_str("unique, ");
+                    }
+                    if i.ignore_case {
+                        how.push_str("ignore case, ");
+                    }
+                    if i.kind == IndexKind::Hash {
+                        how.push_str("hash, ");
+                    }
                     out.say(format!(
                         "{} ({}) - {how}{} documents indexed, {} distinct values",
                         i.pattern, i.field, i.documents, i.values
@@ -297,7 +301,8 @@ impl Session {
             }
             Ok(())
         } else if c.peek().is_some_and(|t| t.is_kw("index") || t.is_kw("unique")) {
-            const USAGE: &str = "create [unique] index on <pattern> (<field>[, <field>...]) [using btree|hash]";
+            const USAGE: &str =
+                "create [unique] index on <pattern> (<field>[, <field>...]) [using btree|hash] [ignore case]";
             let unique = c.eat("unique");
             if !c.eat("index") {
                 return Err(format!("Usage: {USAGE}"));
@@ -308,12 +313,17 @@ impl Session {
             } else {
                 IndexKind::BTree
             };
+            let ignore_case = c.eat("ignore");
+            if ignore_case && !c.eat("case") {
+                return Err(format!("Usage: {USAGE}"));
+            }
             c.finish(USAGE)?;
             let fields: Vec<&str> = field.split(", ").collect();
-            let n = self.engine.create_index_on(&pattern, &fields, kind, unique)?;
+            let n = self.engine.create_unique_index(&pattern, &fields, kind, unique, ignore_case)?;
             let how = if kind == IndexKind::Hash { " using hash" } else { "" };
+            let case = if ignore_case { " ignore case" } else { "" };
             let what = if unique { "Unique index" } else { "Index" };
-            out.say(format!("{what} created on {pattern} ({field}){how}: {n} documents indexed."));
+            out.say(format!("{what} created on {pattern} ({field}){how}{case}: {n} documents indexed."));
             Ok(())
         } else if c.eat("trigger") {
             const USAGE: &str = "create trigger [name] on set|update|del \"<pattern>\" run \"<script>\"";
