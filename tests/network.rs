@@ -579,6 +579,7 @@ fn structured_api() {
         (&me["user"], &me["role"], &me["workspace"], &me["can_write"]),
         (&json!("kiva"), &json!("admin"), &json!("default"), &json!(true))
     );
+    assert_eq!(me["can_compact"], true);
 
     // Typed writes: no quoting rules to worry about.
     let put = |db: &mut Client, key: &str, ty: &str, value: Json, extra: Json| {
@@ -653,7 +654,7 @@ fn structured_api() {
     db.auth("eve", "evepw").unwrap();
     db.exec("workspace switch default").unwrap();
     let me = db.api(&json!({"op": "whoami"})).unwrap();
-    assert_eq!((&me["role"], &me["can_write"]), (&json!("viewer"), &json!(false)));
+    assert_eq!((&me["role"], &me["can_write"], &me["can_compact"]), (&json!("viewer"), &json!(false), &json!(false)));
     assert_eq!(db.api(&json!({"op": "get", "key": "quote"})).unwrap()["found"], true);
     assert!(put(&mut db, "x", "null", Json::Null, json!({})).unwrap_err().to_string().contains("read-only"));
     assert!(db.api(&json!({"op": "del", "key": "quote"})).unwrap_err().to_string().contains("read-only"));

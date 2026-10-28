@@ -382,3 +382,97 @@ fn a_backup_of_a_home_holding_dates_restores_them() {
     the_values_of_1_7_1_are_all_there(&mut s);
     assert!(ok(&mut s, "explain get where user:*.role = \"dev\"").contains("INDEX SCAN"));
 }
+
+/// A server of KivaDB 1.7.1 in its own process, stopped when dropped.
+struct V1Server(std::process::Child);
+
+impl V1Server {
+    fn start(bin: &Path, home: &Path, port: u16) -> V1Server {
+        let child = std::process::Command::new(bin)
+            .arg("--home")
+            .arg(home)
+            .args(["serve", "--port", &port.to_string(), "--no-http", "--no-resp"])
+            .env("KIVADB_NO_UPDATE_CHECK", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let server = V1Server(child);
+        wait_until("1.7.1 to listen", || std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+        server
+    }
+}
+
+impl Drop for V1Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !cond() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// What a master answers to a replica that says `hello`.
+fn answer_to_replica(port: u16, hello: &str) -> (u16, String) {
+    use kivadb::proto::*;
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write_frame(&mut s, CMD_HELLO, &[]).unwrap();
+    read_frame(&mut s).unwrap();
+    write_frame(&mut s, CMD_REPL_SYNC, hello.as_bytes()).unwrap();
+    let (code, payload) = read_frame(&mut s).unwrap();
+    (code, String::from_utf8_lossy(&payload).into_owned())
+}
+
+#[test]
+fn replication_never_crosses_major_versions() {
+    let dir = TempDir::new("compat_replication");
+    let inst = open(&dir.path().join("v2"));
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "set datetime seen '2026-10-27T13:30:00Z'");
+    let port = kivadb::server::start_tcp(&inst, "127.0.0.1", 0).unwrap();
+    // The hello of a replica of 1.x is refused, before any snapshot.
+    let (code, msg) = answer_to_replica(port, "127.0.0.1:1 node=old repl=2");
+    assert_eq!(code, kivadb::proto::ST_ERR);
+    assert!(msg.contains("a replica of KivaDB 1.x cannot follow it: upgrade the replica to KivaDB 2"), "{msg}");
+
+    let Some(bin) = v1_bin() else { return };
+    // A real 1.7.1 replica keeps its data and says why it does not follow.
+    let old = dir.path().join("v1");
+    assert!(run_v1(&bin, &old, &["set kept 1"]).status.success());
+    let old_port = free_port();
+    let v1 = V1Server::start(&bin, &old, old_port);
+    let cli = |cmd: &str| {
+        let o = std::process::Command::new(&bin)
+            .arg("--home")
+            .arg(&old)
+            .args(["--port", &old_port.to_string(), "-e", cmd])
+            .env("KIVADB_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    assert!(cli(&format!("replica of 127.0.0.1 {port}")).contains("Now replicating"));
+    wait_until("1.7.1 to be refused", || cli("replica status").contains("cannot follow it"));
+    assert_eq!(cli("get kept"), "kept: 1 [number]\n");
+    cli("replica stop");
+
+    // And a 2.0 replica of a 1.7.1 master keeps its own.
+    ok(&mut s, &format!("replica of 127.0.0.1 {old_port}"));
+    wait_until("2.0 to refuse 1.7.1", || ok(&mut s, "replica status").contains("upgrade the master to KivaDB 2 first"));
+    ok(&mut s, "timezone UTC");
+    assert_eq!(ok(&mut s, "get seen"), "seen: 2026-10-27 13:30:00 +00:00 [datetime]");
+    ok(&mut s, "replica stop");
+    drop(v1);
+    inst.shutdown();
+}

@@ -6,7 +6,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 
 ## Baseline
 
-* Version in `Cargo.toml`: 1.7.1 until the release; the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
+* Version in `Cargo.toml`: `2.0.0-rc.1`, the first release candidate, not tagged yet ([RELEASE.md](RELEASE.md)); the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
 * `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass on Windows, Linux and macOS (CI), with no known failure.
 * Storage in 1.7.1: an append-only log per workspace (`store.kiva`), file header `KIVA` + format version 1 (`src/format.rs`), CRC32 on every record, a hint file with its own version (`src/hint.rs`), index definitions in `store.kiva.meta`, HNSW graphs in `store.kiva.graphs`. Type codes 1 to 7 are those of 1.x and are never reused.
 
@@ -34,7 +34,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 18 | strengthen | authentication and permissions | done | 2.0 grants on scopes and projects, no implicit workspace ([16.4](../../DOCUMENTATION.md#164-workspaces-and-grants)), `tests/commands.rs` | |
 | 19 | strengthen | TLS and encryption at rest | existing | `tests/tls.rs`, `tests/encryption.rs`; an encrypted home of 1.7.1 opens with its key and not without (`tests/compat.rs`) | |
 | 20 | test | compatibility with 1.x | done | `tests/fixtures/v1.7.1*`, made by the 1.7.1 executable from `v1.7.1.kva`; `tests/compat.rs`, which also runs the real 1.7.1 in CI (Linux) to go back | a fixture per later release |
-| 39 | document | migration guide | partial | "Upgrading" in the changelog | a migration chapter in DOCUMENTATION.md before the release |
+| 39 | document | migration guide | done | [Chapter 33](../../DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20): one server, Docker, a replication group, applications, going back; the replication between 1.x and 2.x refused both ways (`replication_never_crosses_major_versions`, against the real 1.7.1 in CI) | |
 
 ## P1
 
@@ -54,10 +54,10 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 32 | strengthen | Redis compatibility | existing | `tests/redis-clients/check.mjs` (ioredis, node-redis, rate limiters) in CI | |
 | 33 | add | latency metrics | done | `kiva_request_duration_seconds` histogram, `GET /ready`, [27.2](../../DOCUMENTATION.md#272-prometheus) | |
 | 34 | add | reproducible benchmarks | done | `benches/versions.rs`: real servers of 1.7.1 and 2.0 given the same work through the binary protocol, in rounds taking turns, every answer checked; 2 000, 20 000 and 100 000 documents; median, p95, p99, throughput, memory, CPU, disk, compaction, start after a stop and after a crash; [results and method](benchmarks/versions.md), every round in [`benchmarks/runs`](benchmarks/runs). The planner on its own: [queries.md](benchmarks/queries.md) | one machine (a 2-core laptop, client and server together); the same run on a server, and on Linux, would add to it |
-| 35 | modify | Kiva Studio | planned | separate repository | projects, grants, dates, `doctor` |
+| 35 | modify | Kiva Studio | partial | [fomadev/kiva-studio](https://github.com/fomadev/kiva-studio): projects, grants on scopes, default workspaces, sessions in no workspace, `can_compact`, the types of 2.0 | `doctor` stays a command of the server's machine: Studio connects over the network and cannot read the home |
 | 36 | modify | CLI and shell | partial | `kivadb doctor` | |
 | 37 | strengthen | replication and failover | existing + done | `tests/failover.rs`; clock drift between nodes (2.0) | |
-| 38 | modify | CI and packaging | partial | `cargo fmt --check` added; Python driver in CI | |
+| 38 | modify | CI and packaging | done | `cargo fmt --check`; Python driver in CI; release candidates as pre-releases (notes from "Unreleased", own Docker tag, never `latest`), the tag checked against `Cargo.toml`; `kivadb update` orders a candidate before its release | |
 
 ## P2 and later
 

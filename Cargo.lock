@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "kivadb"
-version = "1.7.1"
+version = "2.0.0-rc.1"
 dependencies = [
  "chrono",
  "chrono-tz",

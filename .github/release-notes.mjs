@@ -3,6 +3,10 @@
 // requests merged since the previous version, and who contributed.
 //
 //   node .github/release-notes.mjs v2.0.0 > notes.md
+//   node .github/release-notes.mjs v2.0.0-rc.1 > notes.md
+//
+// A release candidate (`v2.0.0-rc.1`) takes the section "Unreleased (2.0.0)":
+// the changelog gets its dated section once, for the release itself.
 //
 // Needs the git history with its tags (actions/checkout with fetch-depth: 0)
 // and the GitHub CLI, logged in (GH_TOKEN in a workflow).
@@ -10,27 +14,42 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const tag = process.argv[2];
-if (!/^v\d+\.\d+\.\d+$/.test(tag ?? "")) {
-  console.error("usage: node .github/release-notes.mjs v<major>.<minor>.<patch>");
+const parsed = (tag ?? "").match(/^v(\d+\.\d+\.\d+)(?:-(rc\.\d+))?$/);
+if (!parsed) {
+  console.error("usage: node .github/release-notes.mjs v<major>.<minor>.<patch>[-rc.<n>]");
   process.exit(2);
 }
 const version = tag.slice(1);
+// The version it is a candidate of (or itself), and the candidate.
+const [, core, candidate] = parsed;
 const repo = process.env.GITHUB_REPOSITORY || "fomadev/kiva-db";
 const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }).trim();
 const gh = (path) => JSON.parse(run("gh", ["api", path]));
 
 // --- The section of the changelog --------------------------------------------
+// The tag must name the version the executables were built as.
+const cargo = readFileSync(new URL("../Cargo.toml", import.meta.url), "utf8").match(/^version = "([^"]+)"/m)?.[1];
+if (cargo !== version) {
+  console.error(`Cargo.toml says version ${cargo}, the tag ${tag}: set version = "${version}" there, then tag again.`);
+  process.exit(1);
+}
+
 const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8").replace(/\r\n/g, "\n");
-const heading = new RegExp(`^## ${version.replace(/\./g, "\\.")} - (\\d{4}-\\d{2}-\\d{2})\\s*$`, "m");
+const escaped = core.replace(/\./g, "\\.");
+const heading = candidate
+  ? new RegExp(`^## Unreleased \\(${escaped}\\)\\s*$`, "m")
+  : new RegExp(`^## ${escaped} - (\\d{4}-\\d{2}-\\d{2})\\s*$`, "m");
 const found = changelog.match(heading);
 if (!found) {
   console.error(
-    `CHANGELOG.md has no section "## ${version} - <date>": write what ${version} brings there ` +
-      `(rename "## Unreleased (${version})" once the version is ready), then tag again.`
+    candidate
+      ? `CHANGELOG.md has no section "## Unreleased (${core})" for the candidate ${version}.`
+      : `CHANGELOG.md has no section "## ${version} - <date>": write what ${version} brings there ` +
+          `(rename "## Unreleased (${version})" once the version is ready), then tag again.`
   );
   process.exit(1);
 }
-const date = found[1];
+const date = found[1] ?? new Date().toISOString().slice(0, 10);
 const start = found.index + found[0].length;
 const next = changelog.slice(start).search(/^## /m);
 const section = changelog.slice(start, next < 0 ? undefined : start + next).trim();
@@ -45,7 +64,9 @@ const subsections = parts.map((p) => {
 
 // --- Pull requests and contributors since the previous version --------------
 const tags = run("git", ["tag", "--list", "v*", "--sort=-v:refname"]).split("\n").filter(Boolean);
-const previous = tags.find((t) => t !== tag && compare(t.slice(1), version) < 0);
+// The previous release, never a candidate: the notes of 2.0.0 and of its
+// candidates all cover what came since 1.7.1.
+const previous = tags.find((t) => !t.includes("-") && compare(t.slice(1), core) < 0);
 const range = previous ? `${previous}...${tag}` : null;
 const isBot = (login) => !login || /\[bot\]$|-bot$/.test(login);
 
@@ -78,6 +99,16 @@ for (const pr of prs) {
 // --- The text -----------------------------------------------------------------
 const out = [];
 out.push(`KivaDB **${version}**, released on ${date}.`, "");
+if (candidate) {
+  out.push(
+    absolute(
+      `A release candidate of ${core}, to try before ${core} itself is released. ` +
+        "`kivadb update` does not install it, nor the install scripts unless asked (below). Read " +
+        "[the upgrade guide](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20) first."
+    ),
+    ""
+  );
+}
 if (summary.trim()) out.push(absolute(summary.trim()), "");
 out.push(...subsections.flatMap((s) => [s, ""]));
 if (prs.length) {
@@ -102,9 +133,13 @@ if (people.size) {
 out.push(
   "## Install or update",
   "",
-  "* Already installed: `kivadb update`, then restart KivaDB.",
-  `* Linux and macOS: \`curl -sSL https://raw.githubusercontent.com/${repo}/main/install.sh | bash\``,
-  `* Windows (PowerShell): \`irm https://raw.githubusercontent.com/${repo}/main/install.ps1 | iex\``,
+  ...(candidate ? [] : ["* Already installed: `kivadb update`, then restart KivaDB."]),
+  // The install scripts take the latest release unless told which version.
+  `* Linux and macOS: \`curl -sSL https://raw.githubusercontent.com/${repo}/main/install.sh | ` +
+    (candidate ? `KIVADB_VERSION=${version} bash\`` : "bash`"),
+  `* Windows (PowerShell): \`` +
+    (candidate ? `$env:KIVADB_VERSION="${version}"; ` : "") +
+    `irm https://raw.githubusercontent.com/${repo}/main/install.ps1 | iex\``,
   `* Docker: \`docker pull fomadev0/kiva-db:${version}\``,
   "* Or download the archive for your system below, and check it against `SHA256SUMS.txt`.",
   "",

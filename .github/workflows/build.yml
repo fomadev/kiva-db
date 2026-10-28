@@ -195,6 +195,10 @@ jobs:
           name: KivaDB ${{ github.ref_name }}
           files: dist/*
           body_path: release-notes.md
+          # A release candidate (v2.0.0-rc.1) is a pre-release, never the
+          # latest release that kivadb update and the install scripts take.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
 
   docker:
     name: Docker Hub image
@@ -215,11 +219,17 @@ jobs:
         # v1.0.0 -> 1.0.0, the usual form of Docker tags.
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
 
+      - name: Image tags
+        # A release candidate gets its own tag only: latest stays the release.
+        run: |
+          echo "TAGS<<EOF" >> $GITHUB_ENV
+          echo "${{ secrets.DOCKER_USERNAME }}/kiva-db:$VERSION" >> $GITHUB_ENV
+          case "$VERSION" in *-*) ;; *) echo "${{ secrets.DOCKER_USERNAME }}/kiva-db:latest" >> $GITHUB_ENV ;; esac
+          echo "EOF" >> $GITHUB_ENV
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/kiva-db:${{ env.VERSION }}
-            ${{ secrets.DOCKER_USERNAME }}/kiva-db:latest
+          tags: ${{ env.TAGS }}
