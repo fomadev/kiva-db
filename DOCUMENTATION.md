@@ -3560,6 +3560,7 @@ The command language answers with text written for people. A program that needs 
 | `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
 | `explain` | the same as `query`; `analyze`: `true` to run it | `plan`: strategy, index, candidates, total keys, order; `suggestion`: the index to create, if any; with `analyze`, `analyze`: the counts and times of [11.5](#115-explain--see-how-a-query-will-run) |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
+| `changes` | `cursor` (`beginning`, `now` or a cursor), `consumer`, `limit` (100), `pattern`, `wait` (milliseconds, at most 30 000) | As `GET /v1/changes` ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)): `cursor`, `more`, `changes`... |
 
 Notes on `query` and `aggregate`:
 
@@ -4349,15 +4350,15 @@ Start KivaDB (`kivadb start`), then pick the approach that suits your language.
 | Approach | Good for | Needs |
 | :--- | :--- | :--- |
 | REST API (port 8080) | Any language, web applications, quick integration | An HTTP library |
-| Official driver (port 2911) | Node.js and Rust applications | The driver ([24.3](#243-nodejs), [24.5](#245-rust)) |
+| Official driver (port 2911) | Node.js, Python and Rust applications | The driver ([24.3](#243-nodejs), [24.4](#244-python), [24.5](#245-rust)) |
 | Binary protocol (port 2911) | Lower overhead, long-lived connections, notifications, from any language | A few lines of socket code |
-| Redis protocol (port 6379) | Languages that have a Redis library but no KivaDB driver yet (Python, Go, PHP, Java...) | A Redis library |
+| Redis protocol (port 6379) | Languages that have a Redis library but no KivaDB driver yet (Go, PHP, Java...) | A Redis library |
 | Command line (`kivadb -e`) | Shell scripts, batch files | Nothing |
 
 | Language | Recommended | Section |
 | :--- | :--- | :--- |
 | JavaScript / TypeScript (Node.js) | The `kivadb` driver | [24.3](#243-nodejs) |
-| Python | The REST API, or the `redis` package | [24.4](#244-python), [24.6](#246-redis-libraries) |
+| Python | The `kivadb` driver | [24.4](#244-python) |
 | Rust | The client in the `kivadb` crate | [24.5](#245-rust) |
 | Go, Java, PHP, C#... | A Redis library, or the REST API | [24.6](#246-redis-libraries), [24.8](#248-any-other-language) |
 | Shell scripts | `kivadb -e` or curl | [24.1](#241-command-line), [24.2](#242-curl) |
@@ -4470,7 +4471,25 @@ event: del product:1
 
 ### 24.4 Python
 
-With the REST API and the standard library only:
+**With the official driver.** The package `kivadb` ([`drivers/python`](drivers/python)) speaks the binary protocol, needs only the standard library and is typed. It needs Python 3.10 or later. It is not on PyPI yet: `pip install path/to/kiva-db/drivers/python`. Its version numbers are its own, separate from the server's ([its README](drivers/python/README.md)):
+
+```python
+import datetime as dt
+import kivadb
+
+with kivadb.connect(host="localhost", port=2911, user="kiva", password="") as db:
+    db.set("user:1", {"name": "Ana", "role": "dev"}, ttl=3600)
+    db.set("user:1:seen", dt.datetime.now(dt.timezone.utc))      # a datetime
+    print(db.get("user:1"))
+    print(db.query("user:*", {"role": "dev"}, order_by="name", limit=20))
+    with db.transaction():
+        db.set("acct:a", 10)
+        db.set("acct:b", 20)
+```
+
+`datetime.datetime` (with a zone), `datetime.date` and `datetime.time` are stored as KivaDB's `datetime`, `date` and `time`, and come back as such. A datetime without a zone is refused rather than guessed. A lost connection fails the request that was being sent, which is never sent again, and the next request reconnects. The README lists the methods, the errors and these rules.
+
+**With the REST API** and the standard library only:
 
 ```python
 import json
@@ -4490,7 +4509,7 @@ print(call("POST", "/v1/exec", {"command": "keys limit 5"})["output"])
 call("DELETE", "/v1/key/city:1")
 ```
 
-When authentication is on, add the header `Authorization: Basic <base64 of "user:password">` to each request. Note that `urlopen` raises an exception for answers such as 404.
+When authentication is on, add the header `Authorization: Basic <base64 of "user:password">` to each request. Note that `urlopen` raises an exception for answers such as 404. The `redis` package works too, through the Redis protocol ([24.6](#246-redis-libraries)).
 
 ### 24.5 Rust
 
@@ -4535,7 +4554,7 @@ fn main() -> Result<(), kivadb::KivaError> {
 
 ### 24.6 Redis libraries
 
-Any Redis client library works for the commands of [Chapter 23](#chapter-23--redis-compatibility): point it at port 6379. This is often the fastest way to use KivaDB from a language that has no KivaDB driver yet (Python's `redis`, Go's `go-redis`, PHP's `phpredis`, Java's `Jedis`...).
+Any Redis client library works for the commands of [Chapter 23](#chapter-23--redis-compatibility): point it at port 6379. This is often the fastest way to use KivaDB from a language that has no KivaDB driver yet (Go's `go-redis`, PHP's `phpredis`, Java's `Jedis`...), or from Python with `redis`.
 
 ### 24.7 Kiva Studio, the graphical client
 

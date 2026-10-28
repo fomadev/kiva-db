@@ -182,6 +182,54 @@ fn ttl_of(expires_at: i64) -> Json {
     }
 }
 
+/// The changes of the workspace's journal after `cursor` (`beginning`,
+/// `now`, or a cursor; a named consumer's position without one), as JSON.
+/// With `wait` (milliseconds, at most 30 000), waits for a change when
+/// there is none yet; access is checked again at every look, so a grant
+/// revoked meanwhile ends the wait. Shared by `GET /v1/changes` and the
+/// `changes` request.
+pub fn read_changes(
+    sess: &mut Session,
+    cursor: Option<&str>,
+    consumer: Option<&str>,
+    limit: usize,
+    pattern: Option<&str>,
+    wait: u64,
+) -> Result<Json> {
+    use crate::engine::ChangesFrom;
+    let consumer = consumer.filter(|c| !c.is_empty());
+    let mut from = match (cursor, consumer) {
+        (Some("beginning"), _) => ChangesFrom::Beginning,
+        (Some("now"), _) => ChangesFrom::Now,
+        (Some(c), _) => ChangesFrom::Cursor(c.to_string()),
+        (None, Some(_)) => ChangesFrom::Consumer,
+        (None, None) => ChangesFrom::Beginning,
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(wait.min(30_000));
+    loop {
+        sess.check_reads_now()?;
+        let read = sess.engine.read_changes(from, limit, pattern, consumer)?;
+        if !read.changes.is_empty() || read.more || std::time::Instant::now() >= until {
+            let list: Vec<Json> =
+                read.changes.iter().map(|c| crate::changes::to_json(c, &read.cursor_of(c.seq))).collect();
+            return Ok(json!({
+                "workspace": sess.ws,
+                "cursor": read.cursor,
+                "more": read.more,
+                "first_seq": read.first_seq,
+                "last_seq": read.last_seq,
+                "changes": list,
+            }));
+        }
+        // Nothing yet: wait for the journal to move, from where this read ended.
+        let seen = read.last_seq;
+        from = ChangesFrom::Cursor(read.cursor);
+        while sess.engine.last_change() == Some(seen) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
 /// Runs one structured request.
 pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
     sess.use_zone();
@@ -283,6 +331,20 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             let key = sess.new_key(prefix).map_err(KivaError::Invalid)?;
             sess.kv_put(&key, value, expires_at, false)?;
             Ok(json!({ "key": key, "id": &key[prefix.len()..], "type": ty.name() }))
+        }
+        "changes" => {
+            let text = |name: &str| match &req[name] {
+                Json::Null => Ok(None),
+                Json::String(s) => Ok(Some(s.as_str())),
+                _ => Err(invalid(format!("\"{name}\" is a text"))),
+            };
+            let cursor = match text("cursor")? {
+                Some(c) => Some(c),
+                None => text("from")?,
+            };
+            let limit = req["limit"].as_u64().unwrap_or(100) as usize;
+            let wait = req["wait"].as_u64().unwrap_or(0);
+            read_changes(sess, cursor, text("consumer")?, limit, text("pattern")?, wait)
         }
         "del" => {
             let key = str_field(req, "key")?;

@@ -1,0 +1,152 @@
+# Copyright (c) 2026 Fordima Inc. All rights reserved.
+# Licensed under the Fordima Public License (FPL) v1.0.
+# See the LICENSE file in the project root for full license information.
+#
+# The Python driver (drivers/python), tested against a real KivaDB built from
+# the same commit, on Windows, Linux and macOS, with the oldest and newest
+# Python versions it supports ("requires-python" in pyproject.toml). Runs when
+# the driver or the server changes.
+#
+# Nothing is published: putting the driver on PyPI needs the maintainer's
+# decision on the package name and a PyPI token or trusted publisher, and is a
+# job to add then.
+
+name: Python driver
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'drivers/python/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/python-driver.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'drivers/python/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/python-driver.yml'
+  workflow_dispatch:
+
+jobs:
+  server:
+    name: KivaDB for ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-driver-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build KivaDB
+        run: cargo build
+
+      - name: Pack the executable
+        # A tar keeps the executable bit, which artifacts lose.
+        shell: bash
+        run: tar -cf kivadb.tar -C target/debug $([[ "$RUNNER_OS" == "Windows" ]] && echo kivadb.exe || echo kivadb)
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: kivadb-py-${{ matrix.os }}
+          path: kivadb.tar
+          retention-days: 1
+
+  test:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    needs: server
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        python: [ '3.10', '3.12', '3.14' ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download KivaDB
+        uses: actions/download-artifact@v4
+        with:
+          name: kivadb-py-${{ matrix.os }}
+
+      - name: Unpack KivaDB
+        # A relative path: on Windows, tar reads "D:" in an absolute one as
+        # the name of a remote machine.
+        shell: bash
+        run: mkdir -p kivadb-bin && tar -xf kivadb.tar -C kivadb-bin
+
+      - name: Test the driver
+        shell: bash
+        working-directory: drivers/python
+        timeout-minutes: 10
+        run: |
+          BIN="$GITHUB_WORKSPACE/kivadb-bin/kivadb"
+          [[ "$RUNNER_OS" == "Windows" ]] && BIN="$BIN.exe"
+          KIVADB_BIN="$BIN" python -m unittest discover -s tests -v
+
+  package:
+    name: Python package and types
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check the types
+        working-directory: drivers/python
+        run: |
+          python -m pip install --quiet mypy==1.13.0
+          python -m mypy --strict src tests
+
+      - name: Check what a wheel would hold
+        # The package and its marker of types, nothing else (no tests).
+        working-directory: drivers/python
+        run: |
+          python -m pip wheel --quiet --no-deps --wheel-dir "$RUNNER_TEMP/dist" .
+          python - "$RUNNER_TEMP/dist" <<'PY'
+          import glob, sys, zipfile
+          import tomllib
+          [wheel] = glob.glob(sys.argv[1] + "/kivadb-*.whl")
+          names = sorted(n for n in zipfile.ZipFile(wheel).namelist() if not n.startswith("kivadb-"))
+          want = ["kivadb/__init__.py", "kivadb/client.py", "kivadb/errors.py", "kivadb/py.typed", "kivadb/values.py"]
+          print("\n".join(names))
+          if names != want:
+              sys.exit("expected " + ", ".join(want))
+          version = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          sys.path.insert(0, "src")
+          import kivadb
+          if kivadb.__version__ != version:
+              sys.exit(f"kivadb.__version__ is {kivadb.__version__}, pyproject.toml says {version}")
+          PY
