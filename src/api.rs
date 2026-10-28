@@ -245,6 +245,9 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "workspace": if sess.ws_priv.is_some() { json!(sess.ws) } else { Json::Null },
                 "access": sess.ws_priv.map(|p| p.name()),
                 "can_write": sess.writable().is_ok(),
+                // The same check as the command, so that a tool offers it
+                // exactly when the server would run it.
+                "can_compact": sess.check(Need::Owner).is_ok(),
                 "auth_required": sess.inst.auth_required(),
                 "replica": sess.inst.repl.is_replica(),
             }))

@@ -6,6 +6,11 @@ use kivadb::session::Session;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// What `whoami` tells tools about `compact` in the current workspace.
+fn can_compact(s: &mut Session) -> bool {
+    kivadb::api::handle(s, &serde_json::json!({"op": "whoami"})).unwrap()["can_compact"] == true
+}
+
 fn kiva(dir: &TempDir) -> Session {
     Session::new(instance(dir), true, None)
 }
@@ -666,6 +671,8 @@ fn users_roles_and_workspaces() {
     assert_eq!(ok(&mut s, "get shared"), "shared: (nil)");
     ok(&mut s, r#"set mine "private""#);
     // The project's maintenance is allowed, and new workspaces in it; the server's, not.
+    // Tools are told so beforehand.
+    assert!(can_compact(&mut s));
     assert!(ok(&mut s, "compact").contains("compacted successfully"));
     ok(&mut s, "workspace create travel.logs");
     assert!(fails(&mut s, "workspace create logs").contains("outside a project requires the admin role"));
@@ -687,6 +694,7 @@ fn users_roles_and_workspaces() {
     ok(&mut s, "workspace switch default");
     ok(&mut s, "set yes 1");
     // Writing somewhere outside a project does not make it one's own: compacting it stays an admin task.
+    assert!(!can_compact(&mut s));
     assert!(fails(&mut s, "compact").contains("requires the admin role"));
     ok(&mut admin, r#"revoke write on *.* from "fordi""#);
     ok(&mut s, "workspace switch default");

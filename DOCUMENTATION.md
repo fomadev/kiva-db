@@ -57,6 +57,7 @@ The complete manual for KivaDB 1.7.1. It starts from zero: if you have never use
 * [Chapter 30 — Troubleshooting](#chapter-30--troubleshooting)
 * [Chapter 31 — Command cheat sheet](#chapter-31--command-cheat-sheet)
 * [Chapter 32 — Limits and scope](#chapter-32--limits-and-scope)
+* [Chapter 33 — Upgrading from KivaDB 1.x to 2.0](#chapter-33--upgrading-from-kivadb-1x-to-20)
 * [Glossary](#glossary)
 
 ---
@@ -332,7 +333,7 @@ Run 'kivadb update' to install the latest release.
 
 The check never slows a command down and never runs for scripts, services, `kivadb serve` or containers (only when a person is at the terminal). Its result is kept in `version_check.json` in the home directory. Set `KIVADB_NO_UPDATE_CHECK=1` to turn it off.
 
-**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.7.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert. Since 1.6.0, the files hold expiry times in milliseconds: 1.6.0 reads the files of earlier versions and converts their expiry times in seconds, but an earlier version must not be put back on files written by 1.6.0, whose keys with a TTL would no longer expire. An earlier version does not know the unique indexes of 1.7.0: it does not check them, and it may forget them when it saves its index definitions; if you go back and forth, check `indexes` and create them again. Make a backup before upgrading if you may need to go back ([17.7](#177-backups)).
+**By hand.** Stop KivaDB, replace the `kivadb` file with the new one, start again. Either way, the data, the users and the configuration live in the home directory, not in the executable, so they are kept. KivaDB 1.7.0 writes storage format `1`; if a later version ever changes the format, its release notes will say how to convert. Since 1.6.0, the files hold expiry times in milliseconds: 1.6.0 reads the files of earlier versions and converts their expiry times in seconds, but an earlier version must not be put back on files written by 1.6.0, whose keys with a TTL would no longer expire. An earlier version does not know the unique indexes of 1.7.0: it does not check them, and it may forget them when it saves its index definitions; if you go back and forth, check `indexes` and create them again. Make a backup before upgrading if you may need to go back ([17.7](#177-backups)). To move from 1.x to 2.0, follow [Chapter 33](#chapter-33--upgrading-from-kivadb-1x-to-20).
 
 ### 1.7 Uninstalling
 
@@ -3547,7 +3548,7 @@ The command language answers with text written for people. A program that needs 
 
 | `op` | Other fields | Answer |
 | :--- | :--- | :--- |
-| `whoami` | - | `user`, `role`, `workspace`, `access`, `can_write`, `auth_required`, `replica`, `version` |
+| `whoami` | - | `user`, `role`, `workspace`, `access`, `can_write`, `can_compact` (whether `compact` is allowed in this workspace), `auth_required`, `replica`, `version` |
 | `workspaces` | - | `workspaces`: name, path, access and whether it is the current one |
 | `scan` | `pattern` (default `*`), `limit` (default 500) | `keys`: key, type, size, modified, ttl, compression, msgpack; `truncated`; `total` |
 | `get` | `key` | `found`, `type`, `value`, `ttl`, `modified`, `msgpack` |
@@ -4826,7 +4827,7 @@ KivaDB keeps its group state in `[failover]` too (`node_id`, `epoch`, `voted`, `
 
 * **Users.** A replica has the master's accounts: an account created, changed or removed on the master is the same on its replicas. That is what lets applications log in to the new master after a failover. The replica's own accounts are replaced when it starts following: keep the master's administrator password at hand.
 * **One stream.** Every workspace travels on the same connection and the same sequence, in the order the master committed the operations. A replica therefore never sees a workspace further ahead than another.
-* **Versions.** A master refuses a replica of an older version, which knew only the default workspace: it would apply every workspace's changes to its default one. Upgrade the replicas first, then the master. A replica following an older master receives the default workspace only, as before.
+* **Versions.** A node of KivaDB 2.x and a node of 1.x never follow each other: upgrade a group as a whole ([33.5](#335-a-replication-group)). Within 1.x, a master refuses a replica of a version older than 1.6.0, which knew only the default workspace: it would apply every workspace's changes to its default one.
 
 ---
 
@@ -5721,6 +5722,109 @@ KivaDB 1.7.1 keeps the whole database on each node, with replicas and automatic 
 * Changes to grants reach a connected user at their next login or workspace switch.
 
 What is planned next, and what was considered and set aside with the reasons, is in the [roadmap](ROADMAP.md).
+
+---
+
+## Chapter 33 — Upgrading from KivaDB 1.x to 2.0
+
+KivaDB 2.0 opens the homes of 1.x as they are: there is no conversion to run and no command to learn. What changes is the access model of accounts, which affects scripts that create users, and the replication between versions. This chapter goes through it in the order of an upgrade. The full list of changes is in the [changelog](CHANGELOG.md).
+
+### 33.1 What changes, what stays
+
+| | In 2.0 |
+| :--- | :--- |
+| Data files, compression, encryption at rest | Read as they are. Nothing is rewritten at the upgrade |
+| Indexes (B-tree, unique, vector), HNSW graphs, hint files | Read as they are |
+| Configuration (`kiva.conf`), TLS certificate, audit log | Kept |
+| Accounts | Migrated at the first start: each personal workspace `u_<name>` becomes a write grant and the account's default workspace ([16.4](#164-workspaces-and-grants)) |
+| New accounts | Reach **no workspace** until an admin grants them some ([16.3](#163-managing-accounts)) |
+| `compact` by an editor | Needs write access to every workspace of the project (`grant write on travel.*`), instead of the personal workspace |
+| Storage format | Stays `1`, until the first `date`, `datetime` or `time` is written to a workspace: that file moves to format `2`, which 1.x refuses ([19.4](#194-the-data-file-byte-by-byte)) |
+| Replication | A 2.x node and a 1.x node never follow each other ([33.5](#335-a-replication-group)) |
+
+These homes are kept in the repository and opened by every test run of 2.0 (`tests/compat.rs`): plain, compressed, encrypted, with indexes, a unique index, expiry, an HNSW graph, workspaces and accounts, all written by the 1.7.1 executable.
+
+### 33.2 Before you start
+
+1. **Read what your applications rely on** in [33.6](#336-what-applications-may-have-to-change). Most need no change; scripts that create accounts do.
+2. **Make a backup**, KivaDB running or not ([17.7](#177-backups)):
+
+   ```bash
+   kivadb backup --output /backups/kivadb-before-2.0.tar.gz
+   ```
+
+   It is the only way back once a workspace holds a date ([33.7](#337-going-back-to-1x)).
+3. **Check the home** with `kivadb doctor` after the upgrade ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)); 1.7.1 has no `doctor`, but `check` verifies every record ([17.4](#174-integrity-check)). Fix what it reports first: an upgrade is not the moment to discover a full disk.
+
+### 33.3 Upgrading one server
+
+1. Stop KivaDB: `kivadb stop` (or stop the service, [Chapter 29](#chapter-29--deploying-kivadb-on-a-server)).
+2. Replace the executable with the one of 2.0 ([1.1](#11-download-the-ready-made-executable)). `kivadb update` does it too, but it installs the latest release, whatever it is: run it when you mean to move to 2.0, not out of habit.
+3. Start KivaDB. At this first start, the accounts are migrated; nothing else is written.
+4. Look at the accounts:
+
+   ```text
+   kiva> users
+    USER                 | ROLE    | CREATED             | GRANTS
+   ------------------------------------------------------------------------------
+    app                  | editor  | 2026-10-12 09:44:55 | u_app=write (default: u_app)
+    kiva                 | admin   | 2026-10-12 09:44:53 | all (admin)
+   ```
+
+   Each account that had a personal workspace now holds a grant on it and lands in it at login, as before. An account whose personal workspace no longer existed (removed with `workspace remove`) gets nothing: give it what it needs with `grant`.
+5. Run `kivadb doctor`, then let your applications connect.
+
+To give the personal workspaces clearer names, move them into a project afterwards, applications stopped: `workspace move u_app to travel.places` (admin, once `project create travel` is done) ([14.7](#147-renaming-or-moving-a-workspace)). Their grants and the default workspaces follow; applications that named `u_app` must then use the new name.
+
+**With Docker**, change the tag of the image (`fomadev0/kiva-db:1.7.1` to the 2.0 tag) and start a new container on the same volume ([29.6](#296-docker)). The volume holds the home; the image holds only the executable.
+
+### 33.4 Checking that it went well
+
+* `kivadb doctor`: every line `OK`, or a reason you know.
+* `check` in each workspace: `CORRUPTED: 0`.
+* `indexes`: the same indexes as before, with the same counts.
+* Each application: one read and one write with its own account.
+
+### 33.5 A replication group
+
+A node of 2.x and a node of 1.x **never follow each other**, in either direction, and say so in `replica status`:
+
+* a 1.7.1 replica of a 2.0 master: `this master runs KivaDB 2.0.0, and a replica of KivaDB 1.x cannot follow it: upgrade the replica to KivaDB 2`;
+* a 2.0 replica of a 1.7.1 master: `the master runs KivaDB 1.x, and a replica of KivaDB 2.0.0 cannot follow it: upgrade the master to KivaDB 2 first`.
+
+The refusal comes before the snapshot, so the replica keeps its data. Without it, a 1.x replica stopped at the first date it received, after emptying its data for the snapshot; and a 2.0 replica received accounts of 1.x that it never migrated, so that they reached nothing on it, nor on it after a failover. `tests/compat.rs` checks both directions against the real 1.7.1 executable.
+
+So a group is upgraded as a whole, in one maintenance window, during which it does not answer.
+
+1. On every node, turn automatic failover off, so that a stopped master is not replaced: `config set failover.auto false`.
+2. Back up the master (`kivadb backup`).
+3. Stop the replicas, then the master.
+4. Upgrade the master ([33.3](#333-upgrading-one-server)), start it and check it ([33.4](#334-checking-that-it-went-well)).
+5. Upgrade and start each replica. It follows the master again by itself (the choice is in its configuration) and copies it whole: a full snapshot, then the stream. `replica status` shows `Link: connected`.
+6. Turn automatic failover back on, on every node.
+
+
+### 33.6 What applications may have to change
+
+| If your application... | In 2.0 |
+| :--- | :--- |
+| Creates accounts, then writes with them | Give access in the same command: `create user "app" identified by "..." grant write on travel.* default workspace travel.places`. A new account otherwise reaches nothing |
+| Logs in with an account of 1.x | Nothing: it lands in its personal workspace, as before |
+| Reads the `users` structured request | The field `home` is now `default_workspace`, and may be `null` |
+| Reads `whoami` | `workspace` and `access` are `null` for a session in no workspace; `can_compact` is new |
+| Lets editors run `compact` | They need `grant write on <project>.*`; outside a project, only an admin compacts |
+| Stores dates as text (`"2026-10-27"`) | Nothing: a text stays a text, and conditions already compare ISO dates as moments. Use the new types for new data if you want them checked and shown in a time zone ([5.8](#58-date-datetime-time)) |
+| Shows the creation dates of accounts | They are in the server's time zone (`time.zone`), not always the machine's |
+| Uses the Node.js driver | From 1.2.0, a JavaScript `Date` is stored as a `datetime` and comes back as a `Date` ([24.3](#243-nodejs)) |
+| Uses Kiva Studio | A version that knows 2.0 shows projects, grants on scopes, default workspaces and the new types; an older one connects, but shows the personal workspace model of 1.x ([24.7](#247-kiva-studio-the-graphical-client)) |
+
+Everything else (the command language of 1.x, the REST API, the binary protocol, the Redis commands) answers as before.
+
+### 33.7 Going back to 1.x
+
+Going back is possible for a workspace that holds no `date`, `datetime` or `time`: its file is still at format 1, and 1.7.1 reads it. A workspace that received one is at format 2: 1.7.1 refuses it (`unsupported storage format 2`) and leaves it untouched, rather than cutting those records off. For those, restore the backup made before the upgrade: the writes made since are lost.
+
+The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each user back a `u_<name>` workspace reached without a grant, and ignores the grants on scopes such as `travel.*`. Check `users` after going back.
 
 ---
 

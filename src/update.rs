@@ -38,9 +38,12 @@ pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(v)
 }
 
-/// Whether `candidate` is a later version than `current`.
+/// Whether `candidate` is a later version than `current`. A pre-release
+/// comes before its version: `2.0.0` is newer than `2.0.0-rc.1`, so that a
+/// release candidate updates to the release.
 pub fn is_newer(candidate: &str, current: &str) -> bool {
-    match (parse_version(candidate), parse_version(current)) {
+    let rank = |s: &str| parse_version(s).map(|v| (v, !s.trim().contains('-')));
+    match (rank(candidate), rank(current)) {
         (Some(a), Some(b)) => a > b,
         _ => false,
     }
@@ -427,6 +430,11 @@ mod tests {
         assert!(!is_newer("1.0.1", "1.0.1"));
         assert!(!is_newer("1.0.0", "1.0.1"));
         assert!(!is_newer("garbage", "1.0.1"));
+        // A release candidate updates to its release, never the other way.
+        assert!(is_newer("2.0.0", "2.0.0-rc.1"));
+        assert!(!is_newer("2.0.0-rc.1", "2.0.0"));
+        assert!(is_newer("2.0.0-rc.1", "1.7.1"));
+        assert!(!is_newer("2.0.0-rc.1", "2.0.0-rc.1"));
     }
 
     #[test]

@@ -14,8 +14,16 @@
 //! it changes. Operations of all workspaces share one sequence, numbered in
 //! the order they are queued, so an acknowledgement covers everything before
 //! it whatever the workspace. A replica says it understands this with
-//! `repl=2` in its hello; the master refuses one that does not, since it
+//! `repl=3` in its hello; the master refuses one that does not, since it
 //! would apply every workspace's operations to its default one.
+//!
+//! `repl=3` is the stream of KivaDB 2.x, `repl=2` that of 1.x, and the two
+//! never follow each other. A 1.x replica cannot store the types of 2.0
+//! (`date`, `datetime`, `time`): it stopped at the first one, after
+//! emptying its data for the snapshot. A 2.0 replica of a 1.x master received
+//! accounts with personal workspaces, which 2.0 migrates only at its own
+//! first start: they reached nothing on it, and after a failover nothing at
+//! all. Each side refuses the other in the hello, before any data is replaced.
 //!
 //! The system database (users, stored scripts, triggers) travels the same
 //! way, under the name [`SYSTEM`], so that a replica promoted by a
@@ -48,7 +56,10 @@ enum ReplMsg {
 }
 
 /// What a replica puts in its hello to receive every workspace.
-const ALL_WORKSPACES: &str = "repl=2";
+const ALL_WORKSPACES: &str = "repl=3";
+
+/// What a replica of KivaDB 1.x puts there instead.
+const ALL_WORKSPACES_1X: &str = "repl=2";
 
 /// The name the system database goes by in the stream; no workspace can
 /// have it, since workspace names hold letters, digits, `_` and `-` only.
@@ -448,18 +459,29 @@ fn reachable(listen: &str, peer: &str) -> String {
 pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, hello: String) {
     let mut words = hello.split_whitespace();
     let listen = words.next().unwrap_or_default().to_string();
-    let (mut node, mut all) = (String::new(), false);
+    let (mut node, mut all, mut v1) = (String::new(), false, false);
     for w in words {
         match w.strip_prefix("node=") {
             Some(n) => node = n.to_string(),
-            None => all |= w == ALL_WORKSPACES,
+            None => {
+                all |= w == ALL_WORKSPACES;
+                v1 |= w == ALL_WORKSPACES_1X;
+            }
         }
     }
     if !all {
-        let msg = format!(
-            "this master replicates every workspace: upgrade the replica to KivaDB {} or later",
-            crate::instance::VERSION
-        );
+        let msg = if v1 {
+            format!(
+                "this master runs KivaDB {}, and a replica of KivaDB 1.x cannot follow it: upgrade the replica \
+                 to KivaDB 2",
+                crate::instance::VERSION
+            )
+        } else {
+            format!(
+                "this master replicates every workspace: upgrade the replica to KivaDB {} or later",
+                crate::instance::VERSION
+            )
+        };
         let _ = write_frame(&mut stream, ST_ERR, msg.as_bytes());
         return;
     }
@@ -777,9 +799,22 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
                 return Ok(());
             }
             ST_ERR => {
-                return Err(KivaError::Other(String::from_utf8_lossy(&payload).into_owned()));
+                return Err(KivaError::Other(refusal(&String::from_utf8_lossy(&payload))));
             }
             _ => {}
         }
     }
+}
+
+/// A master's refusal, said for this replica: a master of KivaDB 1.x refuses
+/// `repl=3` as a replica too old, when it is the master that is.
+fn refusal(msg: &str) -> String {
+    if msg.contains("upgrade the replica to KivaDB 1.") {
+        return format!(
+            "the master runs KivaDB 1.x, and a replica of KivaDB {} cannot follow it: upgrade the master \
+             to KivaDB 2 first",
+            crate::instance::VERSION
+        );
+    }
+    msg.to_string()
 }
