@@ -47,5 +47,11 @@ tests/test_runner
 # --- Node.js ---
 node_modules/
 
+# --- Python ---
+__pycache__/
+*.egg-info/
+# The package of the Python driver, not the executable above.
+!drivers/python/src/kivadb/
+
 # Homes written by earlier versions, opened by tests/compat.rs.
 !tests/fixtures/**

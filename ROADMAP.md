@@ -32,7 +32,7 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 
 | Item | What it brings | What it takes |
 | :--- | :--- | :--- |
-| **Python driver** (PyPI) | Python is the language of AI work, where vector search matters most | A port of the Node.js driver (~300 lines) and a test environment with Python, which was not available when 1.0.0 was built. Meanwhile, Python's `redis` package works through the Redis protocol, and the REST API works with `requests` |
+| **Python driver on PyPI** | `pip install kivadb` | The driver is in `drivers/python` and tested in CI (2.0); publishing needs the package name on PyPI and a token or a trusted publisher |
 | **Vector indexes larger than memory** | Collections of vectors that do not fit in RAM even at one byte per number (`quantize sq8`) | Product quantisation (codebooks trained on the data, retrained as it changes) to shrink vectors further, or a disk-based graph (DiskANN, which needs another kind of graph and fast SSDs). The HNSW graph and its codes stay in memory |
 | **Go and Java drivers** | Reach backend teams in those languages | Same protocol work as the Node.js driver, per language |
 | **Very large Redis collections** | Sets, sorted sets, lists and streams of millions of members in one key | Today each one is a single KivaDB object, rewritten by every command (bounded by `resp.max_collection_members`). Millions of members need a structure of their own: one record per member in the log, an in-memory skip list or B-tree of the members, and compaction that understands them |

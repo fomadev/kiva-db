@@ -475,3 +475,25 @@ fn copy_dir(from: &Path, to: &Path) {
         }
     }
 }
+
+#[test]
+fn the_structured_request_reads_the_journal_like_rest() {
+    let dir = TempDir::new("cdc_api");
+    let mut s = Session::new(instance(&dir), true, None);
+    ok(&mut s, "changes enable");
+    ok(&mut s, "set a 1");
+    ok(&mut s, "set b 2");
+    let r = kivadb::api::handle(&mut s, &json!({"op": "changes", "cursor": "beginning", "limit": 1})).unwrap();
+    assert_eq!(r["changes"][0]["key"], "a");
+    assert_eq!(r["more"], true);
+    let next = kivadb::api::handle(&mut s, &json!({"op": "changes", "cursor": r["cursor"]})).unwrap();
+    assert_eq!(next["changes"][0]["key"], "b");
+    // A named consumer resumes after what it acknowledged.
+    kivadb::api::handle(&mut s, &json!({"op": "changes", "cursor": r["cursor"], "consumer": "app"})).unwrap();
+    let again = kivadb::api::handle(&mut s, &json!({"op": "changes", "consumer": "app"})).unwrap();
+    assert_eq!(again["changes"][0]["key"], "b");
+    let err = kivadb::api::handle(&mut s, &json!({"op": "changes", "cursor": 3})).unwrap_err().to_string();
+    assert!(err.contains("is a text"), "{err}");
+    let err = kivadb::api::handle(&mut s, &json!({"op": "changes", "cursor": "0".repeat(32)})).unwrap_err().to_string();
+    assert!(err.starts_with("CURSOR_INVALID"), "{err}");
+}

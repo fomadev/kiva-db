@@ -1,0 +1,65 @@
+Fordima Public License (FPL)
+Version 1.0
+
+Copyright (c) 2026 Fordima Inc. All rights reserved.
+
+This license protects the innovation behind KivaDB while encouraging open
+collaboration. The source code is public, free to use, and open to
+contributions.
+
+1. Free Use (Individuals, Education, and Companies)
+You may use, run, study, and integrate KivaDB, including its compiled CLI
+program, free of charge, for personal, educational, and commercial purposes.
+This includes use within a company, inside commercial projects, and in
+projects that generate revenue. You may use the tool to manage your data
+without any payment to Fordima. No fee, royalty, or registration is owed to
+Fordima for such use.
+
+2. Fork, Modify, and Contribute
+You may fork this repository, study the source code, and modify it. Forks are
+authorized for the purpose of contributing improvements, bug fixes, or new
+features back to the official project through a Pull Request to the original
+repository. By submitting a contribution, you agree that it is released under
+this same license and that Fordima Inc. may integrate it into the official
+project.
+
+3. Internal Integration
+You may incorporate portions of this source code into your own systems,
+applications, or internal tools, and use them in your business, provided that
+the result is not a product or service covered by Section 4.
+
+4. Restricted Use (Paid License Required)
+A paid commercial license from Fordima Inc. is MANDATORY if you use this
+source code, in whole or in part, to:
+  a) Create, publish, or distribute a database, database engine, or tool that
+     is similar to, or competes with, KivaDB;
+  b) Build a derivative product or database based on this source code,
+     whether open source or proprietary;
+  c) Keep a private copy of this code in order to produce the same
+     functionality or the same kind of product for your own commercial
+     offering;
+  d) Sell or distribute a modified version of the source code, or integrate
+     the KivaDB source code directly into another commercial software;
+  e) Offer a paid hosted, cloud, or "as a service" database based on the
+     KivaDB engine.
+
+5. Prohibition of Independent Forks
+Maintaining a separate, permanent fork of this project in order to bypass the
+authority of Fordima Inc. is strictly prohibited.
+
+6. Attribution
+You must keep this license and the copyright notice with any copy of the
+source code you use or redistribute.
+
+7. No Warranty
+This software is provided "as is", without warranty of any kind, express or
+implied. Fordima Inc. shall not be liable for any claim, damages, data loss,
+or other liability arising from the use of this software.
+
+8. Termination
+Any use in violation of Section 4 or Section 5 automatically terminates your
+rights under this license until a commercial license is obtained.
+
+9. Commercial Licensing
+To obtain a commercial license or negotiate an exploitation agreement, please
+contact the management of Fordima Inc.

@@ -48,7 +48,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 26 | modify | cache invalidation | existing | `the_value_cache_serves_hot_keys_and_never_returns_stale_data`, `the_value_cache_stays_within_its_budget` | |
 | 27 | strengthen | HNSW | existing | recall and `tune` tests in `tests/power.rs`, graph of 1.7.1 read back (`tests/compat.rs`) | |
 | 28 | strengthen | semantic cache | existing | `tests/semantic_cache.rs`, `depends` invalidation | |
-| 29 | add | Python driver | planned | | `drivers/python`, tested in CI against a real server |
+| 29 | add | Python driver | done | `drivers/python` (1.0.0, standard library only, typed), `tests/test_driver.py` against a real server, `.github/workflows/python-driver.yml` (Windows, Linux, macOS; Python 3.10, 3.12, 3.14; `mypy --strict`; wheel contents), [24.4](../../DOCUMENTATION.md#244-python); the `changes` structured request (`the_structured_request_reads_the_journal_like_rest`) | publishing on PyPI: the maintainer's decision (package name, token) |
 | 30 | modify | Node.js driver | done | 1.2.0, `Date` as `datetime` | |
 | 31 | modify | REST and binary protocol | existing | dates as ISO 8601 in UTC on every interface | |
 | 32 | strengthen | Redis compatibility | existing | `tests/redis-clients/check.mjs` (ioredis, node-redis, rate limiters) in CI | |
@@ -57,7 +57,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 35 | modify | Kiva Studio | planned | separate repository | projects, grants, dates, `doctor` |
 | 36 | modify | CLI and shell | partial | `kivadb doctor` | |
 | 37 | strengthen | replication and failover | existing + done | `tests/failover.rs`; clock drift between nodes (2.0) | |
-| 38 | modify | CI and packaging | partial | `cargo fmt --check` added | Python driver in CI |
+| 38 | modify | CI and packaging | partial | `cargo fmt --check` added; Python driver in CI | |
 
 ## P2 and later
 
