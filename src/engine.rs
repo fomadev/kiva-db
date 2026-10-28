@@ -1094,9 +1094,6 @@ pub struct Engine {
     /// (see [`Engine::let_waiters_in`]).
     lock_waiters: AtomicU64,
     lock_granted: AtomicU64,
-    /// Long tasks waiting for `inner` ([`Engine::lock_for_task`]): the
-    /// other threads let them have it first.
-    tasks_waiting: AtomicU64,
     /// Sections of tuning run under the lock, one search each.
     tune_sections: AtomicU64,
     _lock: File,
@@ -2226,7 +2223,6 @@ impl Engine {
             disk_syncs: AtomicU64::new(0),
             tuning: AtomicBool::new(false),
             lock_waiters: AtomicU64::new(0),
-            tasks_waiting: AtomicU64::new(0),
             lock_granted: AtomicU64::new(0),
             tune_sections: AtomicU64::new(0),
             _lock: lock_file,
@@ -2240,40 +2236,25 @@ impl Engine {
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        let sections = self.tune_sections.load(Ordering::Acquire);
-        let waited = |inner| {
-            SECTIONS_WAITED.with(|w| w.set(self.tune_sections.load(Ordering::Acquire) - sections));
-            inner
-        };
-        if self.tasks_waiting.load(Ordering::Acquire) == 0 {
-            match self.inner.try_lock() {
-                Ok(inner) => return waited(inner),
-                Err(std::sync::TryLockError::Poisoned(e)) => return waited(e.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {}
+        match self.inner.try_lock() {
+            Ok(inner) => {
+                SECTIONS_WAITED.with(|w| w.set(0));
+                inner
+            }
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let sections = self.tune_sections.load(Ordering::SeqCst);
+                self.lock_waiters.fetch_add(1, Ordering::SeqCst);
+                let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                // No longer waiting, then granted: in that order, a thread is
+                // never counted both as granted and as waiting by
+                // [`Engine::let_waiters_in`].
+                self.lock_waiters.fetch_sub(1, Ordering::SeqCst);
+                self.lock_granted.fetch_add(1, Ordering::SeqCst);
+                SECTIONS_WAITED.with(|w| w.set(self.tune_sections.load(Ordering::SeqCst) - sections));
+                inner
             }
         }
-        self.lock_waiters.fetch_add(1, Ordering::AcqRel);
-        // A long task waiting for the lock gets it first. The lock is not
-        // fair: on Windows, a thread that releases it and asks again takes
-        // it back first, and a thread writing in a loop kept a tuning out
-        // for ever. The task lets the waiters in before each of its
-        // sections, so they wait one section at most.
-        while self.tasks_waiting.load(Ordering::Acquire) > 0 {
-            std::thread::yield_now();
-        }
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        self.lock_granted.fetch_add(1, Ordering::AcqRel);
-        self.lock_waiters.fetch_sub(1, Ordering::AcqRel);
-        waited(inner)
-    }
-
-    /// The lock, for a long task that takes it again and again (tuning):
-    /// threads that ask meanwhile wait until the task has it.
-    fn lock_for_task(&self) -> MutexGuard<'_, Inner> {
-        self.tasks_waiting.fetch_add(1, Ordering::AcqRel);
-        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        self.tasks_waiting.fetch_sub(1, Ordering::AcqRel);
-        inner
     }
 
     /// For a long task that takes the lock again and again (tuning): lets
@@ -2283,12 +2264,19 @@ impl Engine {
     /// have had it: the lock is free meanwhile, so each of them gets it, and
     /// those who arrive later do not hold the task back.
     fn let_waiters_in(&self) {
-        let waiting = self.lock_waiters.load(Ordering::Acquire);
+        // Granted first, then waiting: a thread counted as waiting has not
+        // been granted yet (see [`Engine::lock`]). Read the other way round,
+        // a thread granted in between counted twice, and the task waited for
+        // a grant that never came while that thread, no longer waiting, took
+        // the lock again and again.
+        let granted = self.lock_granted.load(Ordering::SeqCst);
+        let waiting = self.lock_waiters.load(Ordering::SeqCst);
         if waiting == 0 {
             return;
         }
-        let target = self.lock_granted.load(Ordering::Acquire) + waiting;
-        while self.lock_granted.load(Ordering::Acquire) < target {
+        // Bounded all the same: a count off by one never stops the task.
+        let until = Instant::now() + Duration::from_millis(100);
+        while self.lock_granted.load(Ordering::SeqCst) < granted + waiting && Instant::now() < until {
             std::thread::yield_now();
         }
     }
@@ -4166,7 +4154,7 @@ impl Engine {
         let mut truth: Vec<Vec<String>> = Vec::with_capacity(queries.len());
         for (own, q) in &queries {
             self.let_waiters_in();
-            let inner = self.lock_for_task();
+            let inner = self.lock();
             self.tune_sections.fetch_add(1, Ordering::AcqRel);
             let index = &inner.vecs[Self::tunable(&inner, pattern, field)?];
             let started = Instant::now();
@@ -4181,7 +4169,7 @@ impl Engine {
             let (mut hits, mut compared, mut spent) = (0, 0, Duration::ZERO);
             for ((own, q), truth) in queries.iter().zip(&truth) {
                 self.let_waiters_in();
-                let inner = self.lock_for_task();
+                let inner = self.lock();
                 self.tune_sections.fetch_add(1, Ordering::AcqRel);
                 let g = inner.vecs[Self::tunable(&inner, pattern, field)?].graph().expect("graph index");
                 let started = Instant::now();
