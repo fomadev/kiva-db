@@ -50,6 +50,15 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 * `kivadb update` ignored the suffix of a pre-release, so that a release candidate never saw its release as newer. `2.0.0` is now newer than `2.0.0-rc.1`.
 * `CHANGELOG.md` held the markers of an unresolved merge in the section of 2.0.
 
+### Known limits
+
+* Replication does not cross major versions: a 2.0 replica refuses a 1.x master, and the other way round. Upgrade the master first ([Chapter 33](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20)).
+* Going back to 1.x: 1.7.1 refuses a workspace that received a `date`, `datetime` or `time` (storage format 2), which then comes back only from a backup made before the upgrade; it reads the accounts of 2.0 with the rules of 1.x ([33.7](DOCUMENTATION.md#337-going-back-to-1x)).
+* The change journal does not record expirations, each node keeps its own journal and cursors, and a restored backup starts a new one ([22.5](DOCUMENTATION.md#225-the-change-journal-changes-kept-read-again-from-a-cursor)).
+* Schemas, like indexes, are defined per node: set them on each replica, so that a replica promoted to master keeps them ([11.8](DOCUMENTATION.md#118-schemas-rules-for-the-documents-of-a-pattern)).
+* `$time` comparisons and the date functions other than `year()` read every document of the pattern; composite indexes are unique indexes only ([11.1](DOCUMENTATION.md#111-the-condition), [11.7](DOCUMENTATION.md#117-unique-indexes)).
+* The benchmarks of 1.7.1 and 2.0 were run on one machine, a 2-core Windows laptop with client and server together; they do not promise a gain elsewhere ([docs/v2/benchmarks/versions.md](docs/v2/benchmarks/versions.md)).
+
 ## 1.7.1 - 2026-10-27
 
 A fix release: command files saved on Windows run as they are.
