@@ -53,7 +53,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 31 | modify | REST and binary protocol | existing | dates as ISO 8601 in UTC on every interface | |
 | 32 | strengthen | Redis compatibility | existing | `tests/redis-clients/check.mjs` (ioredis, node-redis, rate limiters) in CI | |
 | 33 | add | latency metrics | done | `kiva_request_duration_seconds` histogram, `GET /ready`, [27.2](../../DOCUMENTATION.md#272-prometheus) | |
-| 34 | add | reproducible benchmarks | partial | `bench`, `group_commit_speed`, `hnsw_speed` | a suite with documented hardware, comparing 1.7.1 and 2.0 |
+| 34 | add | reproducible benchmarks | done | `benches/versions.rs`: real servers of 1.7.1 and 2.0 given the same work through the binary protocol, in rounds taking turns, every answer checked; 2 000, 20 000 and 100 000 documents; median, p95, p99, throughput, memory, CPU, disk, compaction, start after a stop and after a crash; [results and method](benchmarks/versions.md), every round in [`benchmarks/runs`](benchmarks/runs). The planner on its own: [queries.md](benchmarks/queries.md) | one machine (a 2-core laptop, client and server together); the same run on a server, and on Linux, would add to it |
 | 35 | modify | Kiva Studio | planned | separate repository | projects, grants, dates, `doctor` |
 | 36 | modify | CLI and shell | partial | `kivadb doctor` | |
 | 37 | strengthen | replication and failover | existing + done | `tests/failover.rs`; clock drift between nodes (2.0) | |
