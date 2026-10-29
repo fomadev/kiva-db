@@ -6,7 +6,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 
 ## Baseline
 
-* Version in `Cargo.toml`: `2.0.0-rc.1`, the first release candidate, not tagged yet ([RELEASE.md](RELEASE.md)); the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
+* Version in `Cargo.toml`: `2.0.0-rc.2`, the second release candidate, not tagged yet; `v2.0.0-rc.1` was published without its Docker image ([RELEASE.md](RELEASE.md)); the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
 * `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass on Windows, Linux and macOS (CI), with no known failure.
 * Storage in 1.7.1: an append-only log per workspace (`store.kiva`), file header `KIVA` + format version 1 (`src/format.rs`), CRC32 on every record, a hint file with its own version (`src/hint.rs`), index definitions in `store.kiva.meta`, HNSW graphs in `store.kiva.graphs`. Type codes 1 to 7 are those of 1.x and are never reused.
 
