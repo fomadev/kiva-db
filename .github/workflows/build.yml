@@ -98,7 +98,7 @@ jobs:
             -e 'project create shop' -e 'workspace create shop.places'
           "$BIN" --home "$DATA" start --port 2990 --no-http --resp-port 6390
           cd tests/redis-clients
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
           node check.mjs 6390 ci-pw
           "$BIN" --home "$DATA" stop -u kiva -p ci-pw
 
