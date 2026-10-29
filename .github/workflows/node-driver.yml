@@ -7,8 +7,9 @@
 # supports ("engines" in package.json). Runs when the driver or the server
 # changes.
 #
-# On a version tag (git tag v1.6.0 && git push origin v1.6.0), once every
-# test passed, it publishes the driver on npm as @fomadev/kivadb, unless its
+# On a version tag (git tag v1.6.0 && git push origin v1.6.0), not a release
+# candidate (v2.0.0-rc.1), once every test passed, it publishes the driver
+# on npm as @fomadev/kivadb, unless its
 # version (drivers/node/package.json, numbered apart from the server) is
 # already there. It needs one repository secret (Settings > Secrets and
 # variables > Actions): NPM_TOKEN, a granular access token of the npm
@@ -152,7 +153,10 @@ jobs:
 
   publish:
     name: Publish on npm
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Not for a release candidate (v2.0.0-rc.1): npm would make the driver
+    # the latest version for every user, and the version could not be
+    # published again once the release is out.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     needs: [ test, package ]
     runs-on: ubuntu-latest
     permissions:
