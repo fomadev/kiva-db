@@ -49,6 +49,7 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 * `kivadb update` ignored the suffix of a pre-release, so that a release candidate never saw its release as newer. `2.0.0` is now newer than `2.0.0-rc.1`.
 * `CHANGELOG.md` held the markers of an unresolved merge in the section of 2.0.
+* The Docker image of 2.0 did not build: its `Dockerfile` left out the benchmarks that `Cargo.toml` names, and cargo refused the manifest. The image of every pull request is now built and started.
 * `kivadb update` could trust a certificate signed through the emSign intermediates whose private keys are now known (RUSTSEC-2026-0381, RUSTSEC-2026-0382): rustls-webpki 0.103.16 and webpki-roots 1.0.11 refuse them.
 
 ### Known limits

@@ -145,6 +145,26 @@ jobs:
           name: kivadb-${{ matrix.os-name }}-${{ matrix.arch }}
           path: ${{ env.ASSET }}
 
+  image:
+    name: Docker image
+    # The image of every pull request and of main, built and started but not
+    # pushed: a Dockerfile that no longer builds is found before a tag.
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: kivadb:ci
+
+      - name: Start it
+        run: docker run --rm kivadb:ci --version
+
   notes:
     name: Release notes
     # From the changelog, as soon as the tag is pushed: a version missing
