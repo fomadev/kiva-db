@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# Not built here, but Cargo.toml names them: cargo refuses a manifest whose
+# benches are missing.
+COPY benches ./benches
 COPY LICENSE README.md ./
 RUN cargo build --release --locked && strip target/release/kivadb
 
