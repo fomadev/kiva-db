@@ -554,6 +554,83 @@ fn hash_indexes_and_the_dotted_index_syntax() {
 }
 
 #[test]
+fn date_formats_follow_the_session_then_the_account_then_the_server() {
+    let dir = TempDir::new("date-formats");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "timezone UTC");
+    // ISO by default, as in 2.0.
+    ok(&mut admin, r#"set date born "2000-12-25""#);
+    assert_eq!(ok(&mut admin, "get born"), "born: 2000-12-25 [date]");
+    assert!(fails(&mut admin, r#"set date b2 "25-12-2000""#).contains("is not a date"));
+
+    // The session's format, ISO always accepted, nothing guessed.
+    ok(&mut admin, r#"format date "DD-MM-YYYY""#);
+    ok(&mut admin, r#"set date b2 "24-12-2000""#);
+    ok(&mut admin, r#"set date b3 "2000-12-23""#);
+    let e = fails(&mut admin, r#"set date b4 "12/25/2000""#);
+    assert!(e.contains("under the format DD-MM-YYYY of this session"), "{e}");
+    assert!(fails(&mut admin, r#"set date b4 "29-02-2027""#).contains("is not a date"));
+    ok(&mut admin, r#"set date leap "29-02-2028""#);
+    assert_eq!(
+        ok(&mut admin, "get born and b2 and b3"),
+        "born: 25-12-2000 [date]\nb2: 24-12-2000 [date]\nb3: 23-12-2000 [date]"
+    );
+    ok(&mut admin, r#"format datetime "DD/MM/YYYY HH:mm XXX""#);
+    ok(&mut admin, r#"set datetime at "31/10/2026 16:18 +01:00""#);
+    ok(&mut admin, r#"set datetime at2 "31/10/2026 15:18""#);
+    assert_eq!(
+        ok(&mut admin, "get at and at2"),
+        "at: 31/10/2026 15:18 Z [datetime]\nat2: 31/10/2026 15:18 Z [datetime]"
+    );
+    ok(&mut admin, r#"set ev:1 {"at": "2026-10-31T15:18:00Z"}"#);
+    assert!(ok(&mut admin, r#"get where ev:*.at > datetime "31/10/2026 15:00 Z""#).ends_with("(1 matches)"));
+    assert!(ok(&mut admin, r#"get where ev:*.at > datetime "31/10/2026 15:30""#).ends_with("(0 matches)"));
+    ok(&mut admin, r#"format time "HH:mm""#);
+    ok(&mut admin, r#"set time opens "08:30""#);
+    assert!(ok(&mut admin, "format").contains("date:     DD-MM-YYYY (from this session)"));
+    assert!(fails(&mut admin, r#"format date "YYYY-DD-MM""#).contains("month comes before the day"));
+
+    // What is stored and what programs get does not change.
+    let get = |s: &mut Session, k: &str| kivadb::api::handle(s, &serde_json::json!({"op": "get", "key": k})).unwrap();
+    assert_eq!(get(&mut admin, "b2")["value"], "2000-12-24");
+    assert_eq!(get(&mut admin, "at")["value"], "2026-10-31T15:18:00.000Z");
+    assert_eq!(get(&mut admin, "opens")["value"], "08:30:00");
+    ok(&mut admin, r#"set doc:1 {"a": 1}"#);
+    ok(&mut admin, r#"json set doc:1 .day date "01-01-2027""#);
+    assert_eq!(ok(&mut admin, "get doc:1"), "doc:1: {\"a\":1,\"day\":\"2027-01-01\"} [object]");
+
+    // `format iso` and `format default`.
+    ok(&mut admin, "format iso");
+    assert_eq!(ok(&mut admin, "get born and at"), "born: 2000-12-25 [date]\nat: 2026-10-31 15:18:00 +00:00 [datetime]");
+    ok(&mut admin, "format default");
+    assert!(ok(&mut admin, "format").contains("date:     iso (from the server's time.date_format)"));
+
+    // The server's format, then an account's, from its next login.
+    ok(&mut admin, r#"config set time.date_format "MM/DD/YYYY""#);
+    assert_eq!(ok(&mut admin, "get born"), "born: 12/25/2000 [date]");
+    assert!(fails(&mut admin, r#"config set time.date_format "DD-MM""#).contains("YYYY is missing"));
+    ok(&mut admin, r#"create user "ana" identified by "pw""#);
+    ok(&mut admin, "grant write on default to \"ana\"");
+    ok(&mut admin, r#"modify user "ana" date format "DD.MM.YYYY""#);
+    assert!(fails(&mut admin, r#"modify user "ana" time format "mm:HH""#).contains("HH, mm"));
+    let mut ana = Session::new(inst.clone(), true, None);
+    ok(&mut ana, "auth ana pw");
+    assert_eq!(ok(&mut ana, "get born"), "born: 25.12.2000 [date]");
+    assert!(ok(&mut ana, "format").contains("date:     DD.MM.YYYY (from the account)"));
+    // Two sessions of one process keep their own formats.
+    assert_eq!(ok(&mut admin, "get born"), "born: 12/25/2000 [date]");
+    ok(&mut ana, "format date iso");
+    assert_eq!(ok(&mut ana, "get born"), "born: 2000-12-25 [date]");
+    ok(&mut ana, "format date default");
+    assert_eq!(ok(&mut ana, "get born"), "born: 25.12.2000 [date]");
+    ok(&mut admin, r#"modify user "ana" date format none"#);
+    let mut ana = Session::new(inst, true, None);
+    ok(&mut ana, "auth ana pw");
+    assert_eq!(ok(&mut ana, "get born"), "born: 12/25/2000 [date]");
+}
+
+#[test]
 fn numbers_are_compared_and_added_exactly() {
     let dir = TempDir::new("exact-numbers");
     let mut s = kiva(&dir);

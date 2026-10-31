@@ -167,3 +167,31 @@ fn commands_go_on_over_several_lines_until_their_document_closes() {
     assert_eq!(o.status.code(), Some(1));
     assert!(out(&o).contains("OK: from_file saved.\nfrom_file[1]: 2 [number]"), "{}", out(&o));
 }
+
+#[test]
+fn a_kva_file_reads_and_shows_dates_in_iso_whatever_the_formats_of_its_session() {
+    let dir = TempDir::new("kva_formats");
+    let home = dir.path().join("home");
+    let o = kivadb(&home, &["-e", r#"config set time.date_format "DD-MM-YYYY""#], None);
+    assert!(o.status.success(), "{}", err(&o));
+    let o = kivadb(&home, &["-e", r#"set date shell "25-12-2000""#, "-e", "get shell"], None);
+    assert_eq!(out(&o), "OK: shell saved.\nshell: 25-12-2000 [date]\n", "{}", err(&o));
+
+    // The same file gives the same result for everyone: ISO, unless it sets a format itself.
+    let file = dir.path().join("dates.kva");
+    std::fs::write(
+        &file,
+        "set date d \"2026-10-31\"\nget d\nformat date \"MM/DD/YYYY\"\nset date e \"12/24/2026\"\nget e\n",
+    )
+    .unwrap();
+    let o = kivadb(&home, &["run", file.to_str().unwrap()], None);
+    assert!(o.status.success(), "{}", err(&o));
+    let text = out(&o);
+    assert!(text.starts_with("OK: d saved.\nd: 2026-10-31 [date]\ndate:     MM/DD/YYYY (from this session)"), "{text}");
+    assert!(text.ends_with("OK: e saved.\ne: 12/24/2026 [date]\n"), "{text}");
+    assert_eq!(text.lines().count(), 5, "only the format changed is shown: {text}");
+
+    // `source` in the shell, then the session's formats come back.
+    let o = kivadb(&home, &[], Some(&format!("source \"{}\"\nget shell\n", file.display())));
+    assert!(out(&o).ends_with("shell: 25-12-2000 [date]\n"), "{}", out(&o));
+}

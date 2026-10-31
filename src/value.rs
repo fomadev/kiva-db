@@ -202,10 +202,10 @@ impl Value {
                     format!("0x{}", hex_encode(b))
                 }
             }
-            Value::Date(d) => time::date_text(*d),
+            Value::Date(d) => time::shown_date(*d),
             // In the zone of the session.
-            Value::DateTime(t) => time::show(*t),
-            Value::Time(t) => time::time_text(*t),
+            Value::DateTime(t) => time::shown_instant(*t),
+            Value::Time(t) => time::shown_time(*t),
         }
     }
 
