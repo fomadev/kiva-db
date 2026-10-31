@@ -38,9 +38,22 @@ pub struct ShellOpts {
     pub keep_going: bool,
 }
 
-/// Runs the commands of a `.kva` file. A failing command is reported with
-/// its file and line; the run stops there unless `keep_going`.
+/// Runs the commands of a `.kva` file. Its dates are read and shown in ISO,
+/// unless the file sets a format itself: a file gives the same result
+/// whoever runs it. The session's formats come back afterwards (those of
+/// the account and the server; one set with `format` in the session is not
+/// kept).
 fn run_file(backend: &mut dyn Backend, name: &str, statements: &[Statement], keep_going: bool) -> i32 {
+    // A server before 2.0.0 has no `format`: its answer is left out.
+    let _ = backend.exec("format iso");
+    let code = run_statements(backend, name, statements, keep_going);
+    let _ = backend.exec("format default");
+    code
+}
+
+/// A failing command is reported with its file and line; the run stops
+/// there unless `keep_going`.
+fn run_statements(backend: &mut dyn Backend, name: &str, statements: &[Statement], keep_going: bool) -> i32 {
     let mut failed = 0;
     for st in statements {
         let (lines, action) = backend.exec(&st.text);

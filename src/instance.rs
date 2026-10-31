@@ -342,6 +342,12 @@ impl Instance {
         crate::time::Zone::parse(&self.cfg().get("time", "zone")).unwrap_or(crate::time::Zone::Local)
     }
 
+    /// The server's format of a kind of date (`time.date_format`...); ISO
+    /// (`None`) when it is not set or not valid.
+    pub fn format(&self, kind: crate::time::FormatKind) -> Option<crate::time::Pattern> {
+        crate::time::parse_format(kind, &self.cfg().get("time", kind.config_key())).ok().flatten()
+    }
+
     pub fn auth_required(&self) -> bool {
         !self.opts.skip_auth && self.cfg().get_bool("security", "auth_required")
     }

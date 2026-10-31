@@ -928,6 +928,26 @@ kiva> timezone default
 * `timezone <name>` changes it for the session only; `timezone default` goes back to the account's, else the server's.
 * A server in another country is not "late": its clock is right, only its zone differs, and `time.zone` settles that. A clock that is really wrong is set by the system's time synchronization (NTP: `timedatectl set-ntp true` on Linux, automatic on Windows and macOS), not by KivaDB. `stats` shows the server's time in UTC and in its zone, and a replica warns when its clock is more than a second away from its master's ([25.4](#254-watching-it)).
 
+**Date formats.** The shell writes and reads dates in ISO by default (`2026-10-27`). Each person may use the form of their country instead, set like the time zone:
+
+```text
+kiva> format date "DD-MM-YYYY"
+date:     DD-MM-YYYY (from this session), now: 27-10-2026
+kiva> set date born "25-12-2000"
+OK: born saved.
+kiva> get born
+born: 25-12-2000 [date]
+kiva> format datetime "DD/MM/YYYY HH:mm XXX"
+kiva> set datetime at "27/10/2026 14:30 +01:00"
+```
+
+* **A format** is made of `YYYY` (year, four digits), `MM` (month), `DD` (day), `HH` (hour, 00 to 23), `mm` (minutes), `ss` (seconds), `SSS` (milliseconds) and `XXX` (offset: `Z` or `+01:00`), separated by `-`, `/`, `.`, `:`, a space or `T`. Each field has its exact number of digits: `1-1-2026` is not read as `01-01-2026`. A date format holds `YYYY`, `MM` and `DD`; a time format `HH` and `mm`, then optionally `ss` and `SSS`; a datetime format both, and optionally `XXX` last. A format is checked when it is set, and refused with the reason: two-digit years, a field twice, a time without hours.
+* **Nothing is guessed.** `05/06/2026` is 5 June under `DD/MM/YYYY` and 6 May under `MM/DD/YYYY`; KivaDB reads the format in force and nothing else. **ISO is always accepted** besides it, so a command written in ISO works in every session. That is also why `YYYY-DD-MM` is refused: under it, `2026-03-04` would be two different days.
+* **A datetime** without an offset (a format without `XXX`, or the offset left out) is a wall clock of your time zone; the hour skipped when the clocks go forward is refused, and the hour repeated when they go back is read as the first, as for every datetime ([5.8](#58-date-datetime-time)).
+* **Where it comes from**: `format date "..."` (or `time`, `datetime`) sets it for the session; `format date iso` uses ISO; `format date default` goes back to the account's, else the server's. `format iso` and `format default` do it for the three at once, and `format` alone shows them. `modify user "app" date format "DD-MM-YYYY"` gives an account its own, from its next login (`... date format none` to go back to the server's; anyone for themselves, an admin for anyone). `config set time.date_format "DD-MM-YYYY"`, `time.time_format`, `time.datetime_format` set the server's; their default is `iso`.
+* **What it never changes**: the stored value, which stays ISO; what programs send and receive (REST, the binary protocol, Redis, the drivers, the changes stream, all in ISO); exports and backups; the texts inside documents, which `json set .day date "01-01-2027"` writes as `"2027-01-01"`.
+* **Files**: `kivadb run file.kva` and `source` read and show dates in ISO, whatever the formats of the session, so a file gives the same result for everyone; a file that wants another form says so with `format ...` at its top. After the file, the session takes back the formats of its account and the server (one set with `format` in the session before is not kept). Triggers run in ISO too.
+
 ### 5.10 Types are enforced
 
 `update` never changes the type of a key:

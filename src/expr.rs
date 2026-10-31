@@ -214,8 +214,8 @@ impl<'a, 'r> Parser<'a, 'r> {
         }
         self.pos += 1;
         match (lower.as_str(), arg) {
-            ("now", _) => Ok(EVal::Str(time::show(time::now()))),
-            ("today", _) => Ok(EVal::Str(time::date_text(time::today()))),
+            ("now", _) => Ok(EVal::Str(time::shown_instant(time::now()))),
+            ("today", _) => Ok(EVal::Str(time::shown_date(time::today()))),
             (f, Some(v)) => {
                 let func = TimeFn::parse(f).expect("a time function");
                 let part = match &v {

@@ -80,6 +80,9 @@ pub struct Session {
     /// The time zone of this session (`timezone ...`), or of its user;
     /// `None`: the server's (`time.zone`).
     pub tz: Option<crate::time::Zone>,
+    /// The date formats set by this session (`format ...`) or by its user,
+    /// with where each comes from; a kind left out follows the server's.
+    pub formats: std::collections::BTreeMap<crate::time::FormatKind, (Option<crate::time::Pattern>, &'static str)>,
 }
 
 impl Session {
@@ -99,6 +102,7 @@ impl Session {
             wrote: false,
             watch: None,
             tz: None,
+            formats: Default::default(),
         };
         if !s.inst.auth_required() {
             s.become_root();
@@ -110,6 +114,10 @@ impl Session {
     pub fn system(inst: Arc<Instance>) -> Session {
         let mut s = Session::new(inst, true, None);
         s.become_root();
+        // Triggers and tools read and write ISO, whatever the server's formats.
+        for kind in crate::time::FormatKind::ALL {
+            s.formats.insert(kind, (None, "this session"));
+        }
         s
     }
 
@@ -127,6 +135,28 @@ impl Session {
     /// end calls it before a command.
     pub fn use_zone(&self) {
         crate::time::set_session_zone(Some(self.zone()));
+        crate::time::set_session_formats(self.date_formats());
+    }
+
+    /// The formats dates are written and read in: the session's, else its
+    /// user's, else the server's.
+    pub fn date_formats(&self) -> crate::time::Formats {
+        let mut f = crate::time::Formats::default();
+        for kind in crate::time::FormatKind::ALL {
+            f.set(kind, self.formats.get(&kind).map_or_else(|| self.inst.format(kind), |(p, _)| p.clone()));
+        }
+        f
+    }
+
+    /// Takes the formats of an account, for the kinds it sets; the others
+    /// follow the server's.
+    pub fn take_account_formats(&mut self, user: &User) {
+        self.formats.clear();
+        for kind in crate::time::FormatKind::ALL {
+            if let Some(Ok(p)) = user.formats.get(kind.name()).map(|t| crate::time::parse_format(kind, t)) {
+                self.formats.insert(kind, (p, "the account"));
+            }
+        }
     }
 
     pub fn user_name(&self) -> &str {
@@ -175,6 +205,7 @@ impl Session {
         }
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
+        self.take_account_formats(&user);
         self.use_zone();
         match user.arrival(&self.inst.workspace_names()) {
             Some(w) => {
