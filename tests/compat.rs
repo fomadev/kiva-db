@@ -502,3 +502,35 @@ fn replication_never_crosses_major_versions() {
     drop(v1);
     inst.shutdown();
 }
+
+/// 0 and -0.0 were two values for a unique index before 2.0.0, and are one
+/// now: the documents already there are named when the workspace opens,
+/// kept as they are, and a new duplicate is refused.
+#[test]
+fn a_unique_index_holding_values_now_equal_is_reported_at_opening() {
+    let dir = TempDir::new("compat_equal_values");
+    let home = dir.path().join("home");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+            .arg("--home")
+            .arg(&home)
+            .arg("--no-listen")
+            .args(args.iter().flat_map(|a| ["-e", a]))
+            .env("KIVADB_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    run(&[r#"set z:1 {"v": 0}"#, r#"set z:2 {"v": -0.0}"#, "create index on z:*.v"]);
+    // As an earlier version left it: the same index, unique.
+    let meta = home.join("data").join("store.kiva.meta");
+    let text = std::fs::read_to_string(&meta).unwrap();
+    let mut j: serde_json::Value = serde_json::from_str(&text).unwrap();
+    j["indexes"][0]["unique"] = serde_json::json!(true);
+    std::fs::write(&meta, j.to_string()).unwrap();
+
+    let (out, err) = run(&["get z:1 and z:2", r#"set z:3 {"v": 0}"#]);
+    assert!(err.contains("[WARN] the unique index on z:* (v)") && err.contains("(z:1 and z:2)"), "{err}");
+    assert!(out.contains("z:1: {\"v\":0}") && out.contains("z:2: {\"v\":-0.0}"), "kept as they are: {out}");
+    assert!(err.contains("UNIQUE: 'z:3' not written"), "{err}");
+}

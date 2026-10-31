@@ -504,6 +504,20 @@ impl SecIndex {
         format!("{} ({}){case}", self.pattern, self.field)
     }
 
+    /// Two keys that hold the same value, and that value, if there are some.
+    fn first_duplicate(&self) -> Option<(String, String, Json)> {
+        let mut twice = None;
+        self.map.for_each(|sk, keys| {
+            if twice.is_none() && keys.len() > 1 {
+                let mut k = keys.iter();
+                if let (Some(a), Some(b)) = (k.next(), k.next()) {
+                    twice = Some((a.clone(), b.clone(), sk.to_json()));
+                }
+            }
+        });
+        twice
+    }
+
     fn remove(&mut self, key: &str) {
         if let Some(sk) = self.rev.remove(key) {
             self.map.take(&sk, key);
@@ -2170,6 +2184,17 @@ impl Engine {
                         inner.sec.push(SecIndex::new(p, f, paths, kind, unique).folding(fold));
                         let i = inner.sec.len() - 1;
                         inner.rebuild_sec(i);
+                        // Values an earlier version told apart may be one value now (0 and
+                        // -0.0, compared exactly since 2.0.0): the index still guards new
+                        // writes, and the documents already there are named, not changed.
+                        if let Some((a, b, value)) = unique.then(|| inner.sec[i].first_duplicate()).flatten() {
+                            eprintln!(
+                                "[WARN] the unique index on {} in {} holds {value} twice ({a} and {b}), written by \
+                                 an earlier version: change one of them; new duplicates are refused",
+                                inner.sec[i].describe(),
+                                path.display()
+                            );
+                        }
                     }
                 }
             }
@@ -3852,22 +3877,12 @@ impl Engine {
         let i = inner.sec.len() - 1;
         inner.rebuild_sec(i);
         if unique {
-            let s = &inner.sec[i];
-            let mut twice = None;
-            s.map.for_each(|sk, keys| {
-                if twice.is_none() && keys.len() > 1 {
-                    let mut k = keys.iter();
-                    twice = Some((k.next().cloned(), k.next().cloned(), sk.to_json()));
-                }
-            });
-            if let Some((a, b, value)) = twice {
-                let what = s.describe();
+            if let Some((a, b, value)) = inner.sec[i].first_duplicate() {
+                let what = inner.sec[i].describe();
                 inner.sec.pop();
                 return Err(KivaError::Exists(format!(
-                    "cannot create the unique index on {what}: {} and {} both hold {value}. \
-                     Change one of them, then create the index again.",
-                    a.unwrap_or_default(),
-                    b.unwrap_or_default()
+                    "cannot create the unique index on {what}: {a} and {b} both hold {value}. \
+                     Change one of them, then create the index again."
                 )));
             }
         }
