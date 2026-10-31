@@ -80,6 +80,14 @@ fn is_call(word: &str) -> bool {
     matches!(word.to_ascii_lowercase().as_str(), "now" | "today") || TimeFn::parse(word).is_some()
 }
 
+/// A number for arithmetic, which is done with 64-bit floats: refused when
+/// such a float would round it, rather than printing another number.
+fn exact_number(text: &str) -> Result<f64, String> {
+    crate::num::exact_f64(text).ok_or_else(|| {
+        format!("ValueError: {text} cannot be held exactly by a 64-bit float; use get to read it as stored")
+    })
+}
+
 fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '$' | '@' | '#' | '[' | ']')
 }
@@ -190,7 +198,7 @@ impl<'a, 'r> Parser<'a, 'r> {
                 }
                 let word: String = self.src[start..self.pos].iter().collect();
                 if is_valid_number(&word) {
-                    Ok(EVal::Num(word.parse::<f64>().map_err(|_| "SyntaxError: bad number".to_string())?))
+                    Ok(EVal::Num(exact_number(&word)?))
                 } else if self.peek() == Some('(') && is_call(&word) {
                     self.call(&word)
                 } else {
@@ -232,7 +240,7 @@ impl<'a, 'r> Parser<'a, 'r> {
     fn lookup(&mut self, name: &str) -> Result<EVal, String> {
         match (self.resolve)(name)? {
             None => Err(format!("NameError: '{name}' is not defined")),
-            Some(Value::Num(n)) => Ok(EVal::Num(n.parse::<f64>().unwrap_or(0.0))),
+            Some(Value::Num(n)) => Ok(EVal::Num(exact_number(&n)?)),
             Some(v) => Ok(EVal::Str(v.display())),
         }
     }

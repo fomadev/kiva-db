@@ -1311,8 +1311,7 @@ impl Session {
         match sub.as_str() {
             "set" => {
                 let spec = c.next().filter(|t| t.kind == Kind::Json).ok_or(USAGE)?;
-                let spec: serde_json::Value =
-                    serde_json::from_str(&spec.text).map_err(|e| format!("Invalid JSON literal: {e}"))?;
+                let spec: serde_json::Value = crate::exec::json_literal(&spec.text)?;
                 c.finish(USAGE)?;
                 let r = self.engine.set_schema(&pattern, &spec)?;
                 let fields = spec.as_object().map(|m| m.len()).unwrap_or(0);
@@ -1890,7 +1889,7 @@ impl Session {
                     } else if c.eat("answer") {
                         let t = c.next().ok_or("answer needs a value")?;
                         answer = Some(match t.kind {
-                            Kind::Json => serde_json::from_str(&t.text).map_err(|e| e.to_string())?,
+                            Kind::Json => crate::exec::json_literal(&t.text)?,
                             _ if t.is_quoted() => serde_json::Value::String(t.text.clone()),
                             _ => serde_json::from_str(&t.text).unwrap_or(serde_json::Value::String(t.text.clone())),
                         });

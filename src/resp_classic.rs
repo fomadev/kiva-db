@@ -214,7 +214,9 @@ impl Conn {
                 let (mut obj, exp) = self.hash(&k)?;
                 let cur = match obj.get(&f) {
                     None => 0.0,
-                    Some(Json::Number(n)) => n.as_f64().unwrap_or(0.0),
+                    Some(Json::Number(n)) => {
+                        crate::num::exact_f64(&n.to_string()).ok_or_else(|| Reply::err("hash value is not a float"))?
+                    }
                     Some(Json::String(s)) => {
                         float(s.as_bytes()).map_err(|_| Reply::err("hash value is not a float"))?
                     }

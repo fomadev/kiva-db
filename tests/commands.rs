@@ -554,6 +554,72 @@ fn hash_indexes_and_the_dotted_index_syntax() {
 }
 
 #[test]
+fn numbers_are_compared_and_added_exactly() {
+    let dir = TempDir::new("exact-numbers");
+    let mut s = kiva(&dir);
+    // 2^53 and the integers around it are one float, but distinct values.
+    let values =
+        ["9007199254740991", "9007199254740992", "9007199254740993", "9007199254740992.0", "-9007199254740993"];
+    for (i, v) in values.iter().enumerate() {
+        ok(&mut s, &format!(r#"set n:{i} {{"v": {v}}}"#));
+    }
+    let queries = [
+        "n:*.v = 9007199254740993",
+        "n:*.v > 9007199254740992",
+        "n:*.v >= 9007199254740992",
+        "n:*.v < -9007199254740992",
+        "n:*.v in [9007199254740991, 9007199254740993]",
+    ];
+    let scan: Vec<String> = queries.iter().map(|q| ok(&mut s, &format!("get where {q}"))).collect();
+    assert_eq!(scan[0], "n:2: {\"v\":9007199254740993}\n(1 matches)");
+    assert_eq!(scan[1], "n:2: {\"v\":9007199254740993}\n(1 matches)");
+    assert!(scan[2].ends_with("(3 matches)"), "2^53 twice, and 2^53 + 1: {}", scan[2]);
+    assert_eq!(scan[3], "n:4: {\"v\":-9007199254740993}\n(1 matches)");
+    assert!(scan[4].ends_with("(2 matches)"));
+    // An index answers as the scan does.
+    ok(&mut s, "create index on n:*.v");
+    for (q, before) in queries.iter().zip(&scan) {
+        assert_eq!(&ok(&mut s, &format!("get where {q}")), before, "{q}");
+    }
+    let sorted = ok(&mut s, "get where n:*.v > 0 order by v desc limit 1");
+    assert!(sorted.starts_with("n:2:"), "{sorted}");
+    assert_eq!(ok(&mut s, "sum n:*.v where v > 0"), "Sum: 36028797018963968 (4 matches)");
+    assert_eq!(ok(&mut s, "json incr n:1 .v 1"), "n:1.v: 9007199254740993 [number]");
+
+    // A unique index tells them apart, and still takes 1 and 1.0 for one value.
+    ok(&mut s, "create unique index on u:*.v");
+    ok(&mut s, r#"set u:1 {"v": 9007199254740992}"#);
+    ok(&mut s, r#"set u:2 {"v": 9007199254740993}"#);
+    ok(&mut s, r#"set u:3 {"v": 1.0}"#);
+    assert!(fails(&mut s, r#"set u:4 {"v": 1}"#).contains("UNIQUE"));
+
+    // An integer that would be rounded is refused, not rounded.
+    let big = "12345678901234567890123";
+    assert!(fails(&mut s, &format!(r#"set b:1 {{"v": {big}}}"#)).contains("beyond the 64-bit integers"));
+    assert!(fails(&mut s, &format!("get where n:*.v = {big}")).contains("would be rounded"));
+    ok(&mut s, &format!(r#"set b:2 {{"v": "{big}", "f": 1e30}}"#));
+    ok(&mut s, r#"set r:1 {"v": 9223372036854775807}"#);
+    ok(&mut s, r#"set r:2 {"v": 9223372036854775807}"#);
+    assert_eq!(ok(&mut s, "sum r:*.v"), "Sum: 18446744073709551614 (2 matches)");
+    ok(&mut s, r#"set r:3 {"v": 9223372036854775807}"#);
+    assert!(fails(&mut s, "sum r:*.v").contains("beyond the 64-bit integers"));
+
+    // A key keeps its text; programs get it exactly, as a number or as that text.
+    ok(&mut s, &format!("set big {big}"));
+    ok(&mut s, "set price 1250.50");
+    let get = |s: &mut Session, k: &str| kivadb::api::handle(s, &serde_json::json!({"op": "get", "key": k})).unwrap();
+    assert_eq!(get(&mut s, "big")["value"], serde_json::json!(big));
+    assert_eq!(get(&mut s, "price")["value"], serde_json::json!(1250.5));
+    assert!(fails(&mut s, "print big").contains("cannot be held exactly"));
+    assert_eq!(ok(&mut s, "print price + 1"), "1251.5");
+
+    // A schema's maximum is checked exactly.
+    ok(&mut s, r#"schema set m: {"v": {"type": "integer", "max": 9007199254740992}}"#);
+    ok(&mut s, r#"set m:1 {"v": 9007199254740992}"#);
+    assert!(fails(&mut s, r#"set m:2 {"v": 9007199254740993}"#).contains("above the maximum"));
+}
+
+#[test]
 fn transactions() {
     let dir = TempDir::new("txn");
     let inst = instance(&dir);
