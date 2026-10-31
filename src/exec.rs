@@ -168,8 +168,15 @@ fn parse_bytes(text: &str) -> Option<Vec<u8>> {
     text.strip_prefix("b64:").and_then(b64_decode)
 }
 
+/// Reads a JSON literal of a command, refusing an integer that would be rounded.
+pub(crate) fn json_literal(text: &str) -> Result<Json, String> {
+    let j = serde_json::from_str(text).map_err(|e| format!("Invalid JSON literal: {e}"))?;
+    crate::num::check_integers(text.as_bytes()).map_err(|e| format!("Invalid JSON literal: {e}"))?;
+    Ok(j)
+}
+
 fn parse_doc(text: &str, want: Option<Type>) -> Result<Value, String> {
-    let j: Json = serde_json::from_str(text).map_err(|e| format!("Invalid JSON literal: {e}"))?;
+    let j = json_literal(text)?;
     match (&j, want) {
         (Json::Array(_), None | Some(Type::Array)) | (Json::Object(_), None | Some(Type::Object)) => Ok(Value::Doc(j)),
         (_, Some(t)) => Err(format!("Value is not a JSON {}.", t.name())),
@@ -696,7 +703,12 @@ fn literal_json(text: &str, quoted: bool) -> Result<Json, String> {
         "true" => Ok(Json::Bool(true)),
         "false" => Ok(Json::Bool(false)),
         "null" => Ok(Json::Null),
-        t if is_valid_number(t) => Ok(crate::value::num_to_json(t)),
+        t if is_valid_number(t) => crate::num::exact_json(t).ok_or_else(|| {
+            format!(
+                "{t} cannot be held exactly by a 64-bit integer or float, and would be rounded: quote it to use it \
+                 as a text"
+            )
+        }),
         t => Err(format!("String values like '{t}' must be quoted (\"\" or '').")),
     }
 }
@@ -894,9 +906,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
             match t.kind {
                 Kind::Bare => condition_value(&t.text)?,
                 Kind::DQuote | Kind::SQuote => literal_json(&t.text, true)?,
-                Kind::Json => {
-                    serde_json::from_str::<Json>(&t.text).map_err(|e| format!("Invalid JSON literal: {e}"))?
-                }
+                Kind::Json => json_literal(&t.text)?,
                 _ => return Err(USAGE.into()),
             }
         }
@@ -1704,7 +1714,7 @@ impl Session {
         let agg = Agg::new(verb, func, field.as_deref())?;
         let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
         self.engine.find(&q, &ReadOpts { limit, ..ReadOpts::default() }, |_, doc| acc.add(&doc))?;
-        let r = acc.finish();
+        let r = acc.finish()?;
         let name = {
             let mut n = verb[..1].to_uppercase() + &verb[1..];
             if let (Some(f), Some(_)) = (&field, &group_by) {
@@ -1720,7 +1730,8 @@ impl Session {
             _ => format!(" ({v} values, {matches} matches)"),
         };
         let show = |v: &Json| match v {
-            Json::Number(n) => n.as_f64().map(fmt_f64).unwrap_or_else(|| n.to_string()),
+            // An integer as it is: an f64 would round one beyond 2^53.
+            Json::Number(n) if n.is_f64() => n.as_f64().map(fmt_f64).unwrap_or_else(|| n.to_string()),
             v => v.to_string(),
         };
         match &group_by {
@@ -1751,7 +1762,7 @@ impl Session {
         }
         let vt = c.next().ok_or_else(|| format!("Missing the query vector.\nUsage: {USAGE}"))?;
         let json = match vt.kind {
-            Kind::Json => serde_json::from_str::<Json>(&vt.text).map_err(|e| format!("Invalid JSON literal: {e}"))?,
+            Kind::Json => json_literal(&vt.text)?,
             // "similar to this document": the vector stored in another key.
             Kind::Bare | Kind::Backtick => match self.lookup(&vt.text)? {
                 Some((v, _)) => v.to_json(),
@@ -1878,7 +1889,7 @@ impl Session {
                         let agg = Agg::new(f.name(), *f, field.as_deref())?;
                         let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
                         let (plan, m) = self.engine.read_query(&q, &opts, |_, doc| acc.add(&doc))?;
-                        (plan, m, Some(acc.finish().groups.len()))
+                        (plan, m, Some(acc.finish()?.groups.len()))
                     }
                     None => {
                         let (plan, m) = self.engine.read_query(&q, &opts, |_, _| Ok(()))?;

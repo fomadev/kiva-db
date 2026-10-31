@@ -280,7 +280,10 @@ fn value_json(key: &str, v: &Value, expires_at: i64) -> Json {
 fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
     validate_key_name(key).map_err(KivaError::Invalid)?;
     let body: Json = match serde_json::from_slice(&req.body) {
-        Ok(j) => j,
+        Ok(j) => {
+            crate::num::check_integers(&req.body).map_err(KivaError::Invalid)?;
+            j
+        }
         // Anything that is not JSON is stored as a plain string.
         Err(_) => Json::String(String::from_utf8_lossy(&req.body).into_owned()),
     };
@@ -350,7 +353,7 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
 
     match (method, path) {
         ("POST", "/set") => {
-            let body: Json = serde_json::from_slice(&req.body)?;
+            let body: Json = crate::num::from_slice(&req.body).map_err(KivaError::Invalid)?;
             let key = body["key"].as_str().ok_or_else(|| KivaError::Invalid("body needs a \"key\"".into()))?;
             put_key(sess, key, req)
         }
@@ -417,13 +420,13 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
         }
         ("GET", "/v1/changes") => changes(sess, req),
         ("POST", "/v1/api") => {
-            let body: Json = serde_json::from_slice(&req.body)?;
+            let body: Json = crate::num::from_slice(&req.body).map_err(KivaError::Invalid)?;
             let mut answer = crate::api::handle(sess, &body)?;
             answer["status"] = json!("ok");
             Ok(Response::json(200, answer))
         }
         ("POST", "/v1/exec") => {
-            let body: Json = serde_json::from_slice(&req.body)?;
+            let body: Json = crate::num::from_slice(&req.body).map_err(KivaError::Invalid)?;
             let cmd = body["command"].as_str().ok_or_else(|| KivaError::Invalid("body needs a \"command\"".into()))?;
             let out = sess.execute(cmd);
             let lines: Vec<&str> = out.lines.iter().map(|(_, l)| l.as_str()).collect();

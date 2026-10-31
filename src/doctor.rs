@@ -352,6 +352,8 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
     spaces.extend(cfg.workspaces().into_iter().map(|(n, d)| (n, PathBuf::from(d))));
     spaces.push(("system".into(), home.join("system")));
     let (mut records, mut checked, mut empty, mut damaged) = (0u64, 0usize, 0usize, false);
+    // Without its key, an encrypted workspace's documents are not read here.
+    let keys = crate::crypt::Keys::load(cfg).ok().flatten();
     for (name, dir) in spaces {
         let file = if name == "system" { dir.join("system.kiva") } else { dir.join("store.kiva") };
         // A workspace nothing was written to has no file yet.
@@ -363,14 +365,21 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
         // workspace whose file of definitions is damaged.
         let mut meta = file.clone().into_os_string();
         meta.push(".meta");
-        if let Err(e) = crate::engine::read_meta(Path::new(&meta)) {
-            damaged = true;
-            r.add(Level::Fail, "Data", format!("workspace '{name}': {e}"), None);
-        }
+        let meta_ok = match crate::engine::read_meta(Path::new(&meta)) {
+            Ok(_) => true,
+            Err(e) => {
+                damaged = true;
+                r.add(Level::Fail, "Data", format!("workspace '{name}': {e}"), None);
+                false
+            }
+        };
         match crate::backup::check_log(&file) {
             Ok(n) => {
                 records += n;
                 checked += 1;
+                if meta_ok {
+                    unique(r, &name, &file, keys.as_deref());
+                }
             }
             // A last record cut short is a write interrupted by a crash: the
             // engine drops it when it opens the file, nothing else is lost.
@@ -404,6 +413,34 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
             format!("{checked} file(s), {records} record(s), every checksum matches{empty}"),
             None,
         );
+    }
+}
+
+/// Unique indexes whose documents hold a value twice: written by a version
+/// before 2.0.0, which told `0` and `-0.0` apart. KivaDB keeps them and
+/// refuses new duplicates; the doctor names them and changes nothing.
+fn unique(r: &mut Report, name: &str, file: &Path, keys: Option<&crate::crypt::Keys>) {
+    if name == "system" {
+        return;
+    }
+    match crate::engine::unique_conflicts(file, keys) {
+        Ok(found) => {
+            for f in found {
+                r.add(
+                    Level::Warn,
+                    "Data",
+                    format!("workspace '{name}': the unique index on {f}"),
+                    Some(
+                        "two values an earlier version told apart (0 and -0.0) are one now; change or delete one \
+                         of the two documents. KivaDB keeps both and refuses new duplicates"
+                            .into(),
+                    ),
+                );
+            }
+        }
+        Err(e) => {
+            r.add(Level::Warn, "Data", format!("workspace '{name}': its unique indexes were not checked: {e}"), None)
+        }
     }
 }
 
