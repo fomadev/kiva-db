@@ -796,6 +796,13 @@ OK: big saved.
 OK: debt saved.
 ```
 
+**Precision.** Numbers are compared by their value, exactly: `9007199254740993` and `9007199254740992` are two values, though a 64-bit float holds them as one, and `1` and `1.0` are one value. This holds in conditions, indexes, unique indexes, `order by`, `group by`, `min` and `max`, and in the bounds of a schema.
+
+* **In a document**, a number is a 64-bit integer (−9 223 372 036 854 775 808 to 18 446 744 073 709 551 615) or a 64-bit float. An integer beyond that range is refused, with the ways out: quote it to keep its digits as text, or add `.0` to store it as a rounded float. A number with a fraction or an exponent is a float.
+* **A key** keeps the text you wrote, whatever its size. Programs (REST, the drivers, the changes stream) receive it as a JSON number when one holds it exactly, and as that text otherwise (`"12345678901234567890123"`). Lua scripts get it the same way. `print` computes with 64-bit floats, so it refuses a number that one would round.
+* **Sums** of integers are exact (`sum` refuses a total beyond the 64-bit integers); a value with a fraction makes the sum a float. `json incr` stays exact on integers, and refuses to go beyond 64 bits.
+* **Data written before 2.0.0** keeps what it held. Integers beyond 64 bits were rounded when they were written into a document, without an error; those lost digits cannot be read back. Such values are written with an exponent (`1.2345678901234568e+22`), and `get where <pattern>.<field> >= 18446744073709551616.0 or <field> < -9223372036854775808.0` lists them. Keys and integers within 64 bits were kept exactly. Indexes are rebuilt each time a workspace opens, so they follow the new rules at once.
+
 ### 5.3 boolean
 
 `true` or `false`.

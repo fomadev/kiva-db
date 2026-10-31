@@ -208,8 +208,8 @@ fn binary_loop(
                 }
             }
             CMD_API => {
-                let res = serde_json::from_slice::<serde_json::Value>(&payload)
-                    .map_err(KivaError::from)
+                let res = crate::num::from_slice(&payload)
+                    .map_err(KivaError::Invalid)
                     .and_then(|req| crate::api::handle(&mut sess, &req));
                 match res {
                     Ok(j) => reply(ST_OK, j.to_string().as_bytes()),

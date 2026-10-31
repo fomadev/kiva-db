@@ -687,7 +687,7 @@ impl Conn {
                 "FILTER" => {
                     let (field, cmp, raw) = (value()?, value()?, value()?);
                     // A number, true, false or null as such; anything else is a string.
-                    let v = serde_json::from_str::<Json>(&raw)
+                    let v = crate::num::from_slice(raw.as_bytes())
                         .ok()
                         .filter(|j| !j.is_object() && !j.is_array())
                         .unwrap_or(Json::String(raw));
@@ -733,7 +733,7 @@ impl Conn {
                 if args.len() != 2 {
                     return Err(Reply::err("wrong number of arguments for 'kiva.api' command"));
                 }
-                let req: Json = serde_json::from_slice(&args[1])
+                let req: Json = crate::num::from_slice(&args[1])
                     .map_err(|e| Reply::err(format!("the request must be a JSON object: {e}")))?;
                 Ok(Reply::bulk(crate::api::handle(&mut self.sess, &req)?.to_string()))
             }
@@ -1067,7 +1067,9 @@ impl Conn {
                     None => (0.0, 0),
                     Some((v, m)) => {
                         let b = bytes_of(&v).ok_or_else(Reply::wrong_type)?;
-                        (float(&b).map_err(|_| Reply::err("value is not a valid float"))?, m.expires_at)
+                        // A stored number a float would round is not added to as one.
+                        let exact = std::str::from_utf8(&b).ok().and_then(crate::num::exact_f64);
+                        (exact.ok_or_else(|| Reply::err("value is not a valid float"))?, m.expires_at)
                     }
                 };
                 let next = cur + step;

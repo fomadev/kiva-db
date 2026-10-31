@@ -454,11 +454,13 @@ fn check_value(rule: &Rule, v: &Json, path: &str) -> Result<(), String> {
             return Err(format!("{path}: expected {want}, got {}{null}", short(v)));
         }
     }
-    if let Some(n) = v.as_f64() {
-        if rule.min.is_some_and(|m| n < m) {
+    if let Json::Number(n) = v {
+        // Exactly: 9007199254740993 is above a maximum of 9007199254740992.
+        let vs = |m: f64| serde_json::Number::from_f64(m).map(|m| crate::num::cmp(n, &m));
+        if rule.min.and_then(vs) == Some(std::cmp::Ordering::Less) {
             return Err(format!("{path}: {n} is below the minimum {}", rule.min.unwrap_or_default()));
         }
-        if rule.max.is_some_and(|m| n > m) {
+        if rule.max.and_then(vs) == Some(std::cmp::Ordering::Greater) {
             return Err(format!("{path}: {n} is above the maximum {}", rule.max.unwrap_or_default()));
         }
     }

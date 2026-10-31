@@ -248,13 +248,9 @@ pub fn insert(doc: &mut Json, path: &[Seg], value: Json) -> Result<usize, String
 pub fn incr(doc: &mut Json, path: &[Seg], by: &serde_json::Number) -> Result<Json, String> {
     let next = match get(doc, path) {
         None => Json::Number(by.clone()),
-        Some(Json::Number(cur)) => match (cur.as_i64(), by.as_i64()) {
-            (Some(a), Some(b)) => Json::from(a.checked_add(b).ok_or("the increment would overflow")?),
-            _ => {
-                let f = cur.as_f64().unwrap_or(0.0) + by.as_f64().unwrap_or(0.0);
-                Json::Number(serde_json::Number::from_f64(f).ok_or("the increment would produce NaN or Infinity")?)
-            }
-        },
+        Some(Json::Number(cur)) => {
+            Json::Number(crate::num::add(cur, by).map_err(|e| format!("the increment cannot be made: {e}"))?)
+        }
         Some(_) => return Err("the value at this path is not a number".into()),
     };
     set(doc, path, next.clone())?;
@@ -317,7 +313,9 @@ mod tests {
         let half = serde_json::Number::from_f64(0.5).unwrap();
         assert_eq!(incr(&mut d, &p(".n"), &half).unwrap(), json!(6.5));
         assert!(incr(&mut d, &p(".tags"), &1.into()).is_err());
-        let mut big = json!({"n": i64::MAX});
+        let mut big = json!({"n": 9007199254740992u64});
+        assert_eq!(incr(&mut big, &p(".n"), &1.into()).unwrap(), json!(9007199254740993u64), "exact past 2^53");
+        let mut big = json!({"n": u64::MAX});
         assert!(incr(&mut big, &p(".n"), &1.into()).is_err());
     }
 }

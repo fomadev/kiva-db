@@ -240,14 +240,10 @@ impl Value {
     }
 }
 
+/// A stored number as JSON: a JSON number when one holds it exactly, else
+/// its text, rather than a rounded float (a 23-digit integer, 20 decimals).
 pub fn num_to_json(s: &str) -> Json {
-    if let Ok(i) = s.parse::<i64>() {
-        return Json::Number(i.into());
-    }
-    match s.parse::<f64>().ok().and_then(serde_json::Number::from_f64) {
-        Some(n) => Json::Number(n),
-        None => Json::String(s.to_string()),
-    }
+    crate::num::exact_json(s).unwrap_or_else(|| Json::String(s.to_string()))
 }
 
 /// `-12`, `3.14`, `1e9`, `2.5E-3`. No leading `+`, no bare `.5`.

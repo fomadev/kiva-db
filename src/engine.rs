@@ -303,38 +303,13 @@ pub struct HintInfo {
 // Secondary indexes and queries
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-pub struct OrdF64(pub f64);
-
-impl PartialEq for OrdF64 {
-    fn eq(&self, o: &Self) -> bool {
-        self.0.total_cmp(&o.0).is_eq()
-    }
-}
-impl Eq for OrdF64 {}
-impl PartialOrd for OrdF64 {
-    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(o))
-    }
-}
-impl Ord for OrdF64 {
-    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&o.0)
-    }
-}
-// Equal under `total_cmp` means the same bits, so hashing the bits agrees with `eq`.
-impl std::hash::Hash for OrdF64 {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        self.0.to_bits().hash(h);
-    }
-}
-
 /// Sortable form of a scalar JSON value. Variant order groups values by kind.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SKey {
     Null,
     Bool(bool),
-    Num(OrdF64),
+    /// By value, exactly: `9007199254740993` is not `9007199254740992`.
+    Num(crate::num::NumKey),
     Str(String),
     /// The values of the fields of an index on several fields.
     Tuple(Vec<SKey>),
@@ -345,7 +320,7 @@ impl SKey {
         match j {
             Json::Null => Some(SKey::Null),
             Json::Bool(b) => Some(SKey::Bool(*b)),
-            Json::Number(n) => n.as_f64().map(|f| SKey::Num(OrdF64(f))),
+            Json::Number(n) => Some(SKey::Num(crate::num::NumKey(n.clone()))),
             Json::String(s) => Some(SKey::Str(s.clone())),
             _ => None,
         }
@@ -359,7 +334,7 @@ impl SKey {
         match self {
             SKey::Null => Json::Null,
             SKey::Bool(b) => Json::Bool(*b),
-            SKey::Num(n) => crate::query::num(n.0),
+            SKey::Num(n) => Json::Number(n.0.clone()),
             SKey::Str(s) => Json::String(s.clone()),
             SKey::Tuple(parts) => Json::Array(parts.iter().map(SKey::to_json).collect()),
         }
@@ -808,10 +783,7 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
 fn plain_order(a: &Json, b: &Json, op: CmpOp) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering::*;
     match (a, b) {
-        (Json::Number(x), Json::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => x.partial_cmp(&y),
-            _ => None,
-        },
+        (Json::Number(x), Json::Number(y)) => Some(crate::num::cmp(x, y)),
         (Json::String(x), Json::String(y)) => Some(x.cmp(y)),
         (Json::Bool(x), Json::Bool(y)) => match op {
             CmpOp::Eq | CmpOp::Ne => Some(if x == y { Equal } else { Less }),
@@ -4732,7 +4704,7 @@ impl Engine {
         let order = |v: &Json| match (sk, v) {
             (SKey::Null, Json::Null) => Some(Equal),
             (SKey::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
-            (SKey::Num(a), Json::Number(n)) => n.as_f64().map(|b| a.cmp(&OrdF64(b))),
+            (SKey::Num(a), Json::Number(n)) => Some(crate::num::cmp(&a.0, n)),
             (SKey::Str(a), Json::String(b)) => Some(a.as_str().cmp(b.as_str())),
             _ => None,
         };
