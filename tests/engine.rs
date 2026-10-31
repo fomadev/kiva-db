@@ -698,7 +698,10 @@ fn a_damaged_file_of_definitions_stops_the_opening_instead_of_dropping_the_uniqu
         e.create_unique_index("user:*", &["email"], kivadb::engine::IndexKind::BTree, true, false).unwrap();
         // Written whole, through a temporary file that is gone afterwards.
         assert!(serde_json::from_slice::<serde_json::Value>(&fs::read(&meta).unwrap()).is_ok());
-        assert!(!dir.path().join("store.kiva.meta.tmp").exists());
+        assert!(fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
     }
 
     // Cut short, as fs::write left it when a crash came in the middle.

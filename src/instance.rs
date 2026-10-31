@@ -271,6 +271,9 @@ impl Instance {
         )?;
         auth::ensure_admin(&system)?;
         auth::migrate_personal_workspaces(&system, |w| config.workspace_dir(w).is_some())?;
+        for done in recover_moves(&system, &config)? {
+            eprintln!("[WARN] {done}.");
+        }
         let nowhere = Engine::open(
             home.join("system").join("nowhere.kiva"),
             EngineOptions { keys: keys.clone(), require_encryption, ..Default::default() },
@@ -485,17 +488,26 @@ impl Instance {
         if self.cfg().workspace_dir(to).is_some() {
             return Err(KivaError::Exists(format!("workspace '{to}' already exists")));
         }
-        // In three steps, so that a crash between two of them never takes a
-        // workspace away from its users. First, each grant on the old name is
-        // given on the new one too.
+        // In three steps, so that a stop between two of them never takes a
+        // workspace away from its users, nor leaves them a grant on a name
+        // that is not the workspace's. The move is recorded first, and the
+        // grants on the old name are given on the new one too; both reach
+        // the disk before kiva.conf changes. A start after a stop finishes
+        // the move or takes it back (recover_moves).
         let mut doubled = Vec::new();
         for mut user in auth::list_users(&self.system)? {
             if let Some(p) = user.grants.get(from).copied() {
                 user.grants.insert(to.to_string(), p);
-                auth::save_user(&self.system, &user)?;
-                doubled.push(user.name.clone());
+                doubled.push(user);
             }
         }
+        let names: Vec<String> = doubled.iter().map(|u| u.name.clone()).collect();
+        let record = serde_json::json!({ "from": from, "to": to, "doubled": names });
+        self.system.put(&move_record(from), &Value::Doc(record), 0, false)?;
+        for user in &doubled {
+            auth::save_user(&self.system, user)?;
+        }
+        self.system.sync()?;
         let renamed = {
             let mut map = self.engines.lock().unwrap_or_else(|e| e.into_inner());
             match map.get(from) {
@@ -514,26 +526,12 @@ impl Instance {
         };
         if let Err(e) = renamed {
             // Nothing moved: the grants given on the new name go away.
-            for name in doubled {
-                if let Some(mut user) = auth::get_user(&self.system, &name)? {
-                    user.grants.remove(to);
-                    auth::save_user(&self.system, &user)?;
-                }
-            }
+            undo_move(&self.system, from, to, &names)?;
             return Err(e);
         }
         // Last, the old name leaves the accounts.
         self.semantic.reset(from);
-        for mut user in auth::list_users(&self.system)? {
-            let granted = user.grants.remove(from).is_some();
-            let default = user.default_workspace.as_deref() == Some(from);
-            if default {
-                user.default_workspace = Some(to.to_string());
-            }
-            if granted || default {
-                auth::save_user(&self.system, &user)?;
-            }
-        }
+        finish_move(&self.system, from, to)?;
         // Replicas copy the workspaces again under their new names.
         self.repl.drop_replicas();
         Ok(())
@@ -693,6 +691,79 @@ impl Instance {
         let _ = fs::remove_file(self.home.join("instance.port"));
         let _ = fs::remove_file(self.home.join("instance.pid"));
     }
+}
+
+/// The record of a workspace move under way, kept in the system database
+/// until the move is done.
+fn move_record(from: &str) -> String {
+    format!("moving:{from}")
+}
+
+/// Takes back a move that did not happen: the grants it gave on the new name
+/// go, and so does its record.
+fn undo_move(system: &Engine, from: &str, to: &str, doubled: &[String]) -> Result<()> {
+    for name in doubled {
+        if let Some(mut user) = auth::get_user(system, name)? {
+            if user.grants.remove(to).is_some() {
+                auth::save_user(system, &user)?;
+            }
+        }
+    }
+    system.delete(&move_record(from))?;
+    system.sync()
+}
+
+/// Ends a move once kiva.conf names the workspace `to`: the old name leaves
+/// the grants and the default workspaces, then the record goes. Running it
+/// again changes nothing.
+fn finish_move(system: &Engine, from: &str, to: &str) -> Result<()> {
+    for mut user in auth::list_users(system)? {
+        let old = user.grants.remove(from);
+        if let Some(p) = old {
+            let kept = user.grants.entry(to.to_string()).or_insert(p);
+            *kept = (*kept).max(p);
+        }
+        let default = user.default_workspace.as_deref() == Some(from);
+        if default {
+            user.default_workspace = Some(to.to_string());
+        }
+        if old.is_some() || default {
+            auth::save_user(system, &user)?;
+        }
+    }
+    system.delete(&move_record(from))?;
+    system.sync()
+}
+
+/// Finishes or takes back the workspace moves that a stop interrupted, from
+/// what kiva.conf says: the workspace under its new name, the move is
+/// finished; under its old one, it is taken back. Returns what was done.
+pub(crate) fn recover_moves(system: &Engine, cfg: &Config) -> Result<Vec<String>> {
+    let mut done = Vec::new();
+    for (key, _) in system.keys_matching("moving:*", 0) {
+        let record = match system.get(&key)? {
+            Some((Value::Doc(j), _)) => j,
+            _ => continue,
+        };
+        let (Some(from), Some(to)) = (record["from"].as_str(), record["to"].as_str()) else {
+            system.delete(&key)?;
+            continue;
+        };
+        if cfg.workspace_dir(to).is_some() && cfg.workspace_dir(from).is_none() {
+            finish_move(system, from, to)?;
+            done.push(format!("the move of workspace '{from}' to '{to}', stopped in the middle, was finished"));
+        } else {
+            let doubled: Vec<String> = record["doubled"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n.as_str().map(String::from))
+                .collect();
+            undo_move(system, from, to, &doubled)?;
+            done.push(format!("the move of workspace '{from}' to '{to}', stopped before it happened, was taken back"));
+        }
+    }
+    Ok(done)
 }
 
 /// Refuses a name that is not `<workspace>` or `<project>.<workspace>`.
