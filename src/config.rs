@@ -224,7 +224,8 @@ impl Config {
                 out.push_str(&format!("{k} = {v}\n"));
             }
         }
-        fs::write(&self.path, out)?;
+        // It lists the workspaces: a file cut by a crash would forget them.
+        crate::util::write_atomic(&self.path, out.as_bytes())?;
         Ok(())
     }
 
@@ -297,6 +298,17 @@ impl Config {
             self.save()?;
         }
         Ok(removed)
+    }
+
+    /// Gives a key of a section another name, in one write of the file: never
+    /// both names, never neither.
+    pub fn rename(&mut self, section: &str, from: &str, to: &str) -> Result<()> {
+        let s = self.sections.entry(section.to_string()).or_default();
+        if let Some(v) = s.remove(from) {
+            s.insert(to.to_string(), v);
+            self.save()?;
+        }
+        Ok(())
     }
 
     /// Every setting as `(section.key, value)`, defaults included.
