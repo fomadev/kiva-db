@@ -529,8 +529,52 @@ fn a_unique_index_holding_values_now_equal_is_reported_at_opening() {
     j["indexes"][0]["unique"] = serde_json::json!(true);
     std::fs::write(&meta, j.to_string()).unwrap();
 
-    let (out, err) = run(&["get z:1 and z:2", r#"set z:3 {"v": 0}"#]);
+    // The doctor names them, and changes nothing.
+    let files = |dir: &Path| {
+        let mut all: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.display().to_string(), std::fs::read(&p).unwrap()))
+            .collect();
+        all.sort();
+        all
+    };
+    let before = files(&home.join("data"));
+    let doctor = || {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+            .args(["doctor", "--home"])
+            .arg(&home)
+            .env("KIVADB_NO_UPDATE_CHECK", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let report = doctor();
+    assert!(
+        report.contains("WARN  Data        workspace 'default': the unique index on z:* (v): z:1 and z:2 both hold 0"),
+        "{report}"
+    );
+    assert_eq!(files(&home.join("data")), before, "the doctor wrote nothing");
+
+    let (out, err) = run(&[
+        "get z:1 and z:2",
+        r#"set z:3 {"v": 0}"#,
+        "count z:* where v = 0",
+        "drop index on z:* (v)",
+        "create unique index on z:* (v)",
+    ]);
     assert!(err.contains("[WARN] the unique index on z:* (v)") && err.contains("(z:1 and z:2)"), "{err}");
     assert!(out.contains("z:1: {\"v\":0}") && out.contains("z:2: {\"v\":-0.0}"), "kept as they are: {out}");
     assert!(err.contains("UNIQUE: 'z:3' not written"), "{err}");
+    // An equality finds both: they are one value.
+    assert!(out.contains("Count: 2"), "{out}");
+    // Created again, the index is refused while the two documents share the value.
+    assert!(err.contains("cannot create the unique index on z:* (v): z:1 and z:2 both hold 0"), "{err}");
+
+    // Repaired: one of them changed, the index created again, nothing left to report.
+    let (_, err) = run(&[r#"json set z:2 .v 2"#, "create unique index on z:* (v)", r#"set z:3 {"v": 0}"#]);
+    assert!(err.contains("UNIQUE: 'z:3' not written") && !err.contains("cannot create"), "{err}");
+    assert!(!doctor().contains("both hold"), "repaired");
+    let (_, err) = run(&["get z:1"]);
+    assert!(!err.contains("[WARN]"), "{err}");
 }

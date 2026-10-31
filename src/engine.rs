@@ -1145,6 +1145,66 @@ fn sidecar(path: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// The unique indexes of a data file whose documents hold a value twice,
+/// each as `<index>: <key> and <key> both hold <value>`. Reads the file and
+/// its definitions without opening the workspace and without writing
+/// anything, for `kivadb doctor`: a workspace written before 2.0.0 may hold
+/// `0` and `-0.0`, two values then, one now.
+pub fn unique_conflicts(path: &Path, keys: Option<&Keys>) -> Result<Vec<String>> {
+    let Some(meta) = read_meta(&sidecar(path, "meta"))? else { return Ok(Vec::new()) };
+    let mut indexes: Vec<SecIndex> = Vec::new();
+    for def in meta["indexes"].as_array().into_iter().flatten() {
+        let (Some(p), Some(f), true) = (def["pattern"].as_str(), def["field"].as_str(), def["unique"] == true) else {
+            continue;
+        };
+        let paths: std::result::Result<Vec<_>, String> = match def["fields"].as_array() {
+            Some(fields) => fields.iter().map(|f| jsonpath::parse_path(f.as_str().unwrap_or_default())).collect(),
+            None => jsonpath::parse_path(f).map(|segs| vec![segs]),
+        };
+        if let Ok(paths) = paths {
+            let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
+            let fold = def["ignore_case"].as_bool().unwrap_or(false);
+            indexes.push(SecIndex::new(p, f, paths, kind, true).folding(fold));
+        }
+    }
+    if indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut head = [0u8; FILE_HEADER_LEN as usize];
+    file.read_exact(&mut head)?;
+    parse_file_header(&head).map_err(KivaError::Corrupted)?;
+    let mut index = BTreeMap::new();
+    let mut seq = 0;
+    scan_log(&file, FILE_HEADER_LEN, len, &mut index, &mut seq, keys, false)?;
+    let now = now_ms();
+    for (key, e) in &index {
+        if !e.ty.is_doc() || e.is_expired(now) || !indexes.iter().any(|s| crate::util::glob_match(&s.pattern, key)) {
+            continue;
+        }
+        let mut rec = vec![0u8; e.rec_len() as usize];
+        file.seek(SeekFrom::Start(e.offset))?;
+        file.read_exact(&mut rec)?;
+        if !verify_record(&rec) {
+            continue;
+        }
+        let Ok((_, stored)) = crypt::open_record(keys, &rec) else { continue };
+        let Ok(Value::Doc(doc)) =
+            compress::unpack(&stored, e.compression()).and_then(|raw| Value::decode(e.ty, &raw, e.is_msgpack()))
+        else {
+            continue;
+        };
+        for s in indexes.iter_mut().filter(|s| crate::util::glob_match(&s.pattern, key)) {
+            s.update(key, Some(&doc));
+        }
+    }
+    Ok(indexes
+        .iter()
+        .filter_map(|s| s.first_duplicate().map(|(a, b, v)| format!("{}: {a} and {b} both hold {v}", s.describe())))
+        .collect())
+}
+
 fn validate_key(key: &str) -> Result<()> {
     if key.is_empty() {
         return Err(KivaError::Invalid("key cannot be empty".into()));
