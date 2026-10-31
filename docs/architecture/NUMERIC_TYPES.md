@@ -156,6 +156,8 @@ Today, an amount in a document is safe as an **integer number of the smallest un
 
 ### 6.3 Recommendation
 
+**Decided**: option C, native values in documents. Its design is [NATIVE_DOCUMENTS.md](NATIVE_DOCUMENTS.md); lot N1 is #93.
+
 1. **Whatever the decision**: the exact comparisons and index keys of 4.2, and the refusal of rounded integers of 4.1. They fix wrong results of 2.0 and change no storage. They are a fix worth its own PR first.
 2. **Keys**: `int`, `float`, `decimal` with format 3 (6.1).
 3. **Documents**: the choice between A and C, taken once for decimals and dates together (it is the decision of [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) section 6). E is not recommended: it costs nearly as much as C and keeps the collision problem.

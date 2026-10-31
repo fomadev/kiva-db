@@ -252,6 +252,8 @@ Typed input converts to a text. Once written, `"2026-10-10"` in a document is a 
 
 ### 6.3 Recommendation
 
+**Decided**: option C, native values in documents. Its design is [NATIVE_DOCUMENTS.md](NATIVE_DOCUMENTS.md); lot T1 is #94. Under C, the typed literal of section 5 writes native leaves, and section 5.3's column "Written (option A)" no longer applies.
+
 The grammar (section 5) is the same under A and C, and so is the parser up to the tree it produces. The formats (sections 3 and 4) do not depend on the choice either. So lots T1 to T3 (section 9) can start before it is taken.
 
 - **Option A for dates** meets the request on its own: write and read in one's own format, type any value in a literal, and new datetimes in documents get a fixed instant.
