@@ -303,38 +303,13 @@ pub struct HintInfo {
 // Secondary indexes and queries
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug)]
-pub struct OrdF64(pub f64);
-
-impl PartialEq for OrdF64 {
-    fn eq(&self, o: &Self) -> bool {
-        self.0.total_cmp(&o.0).is_eq()
-    }
-}
-impl Eq for OrdF64 {}
-impl PartialOrd for OrdF64 {
-    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(o))
-    }
-}
-impl Ord for OrdF64 {
-    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&o.0)
-    }
-}
-// Equal under `total_cmp` means the same bits, so hashing the bits agrees with `eq`.
-impl std::hash::Hash for OrdF64 {
-    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        self.0.to_bits().hash(h);
-    }
-}
-
 /// Sortable form of a scalar JSON value. Variant order groups values by kind.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SKey {
     Null,
     Bool(bool),
-    Num(OrdF64),
+    /// By value, exactly: `9007199254740993` is not `9007199254740992`.
+    Num(crate::num::NumKey),
     Str(String),
     /// The values of the fields of an index on several fields.
     Tuple(Vec<SKey>),
@@ -345,7 +320,7 @@ impl SKey {
         match j {
             Json::Null => Some(SKey::Null),
             Json::Bool(b) => Some(SKey::Bool(*b)),
-            Json::Number(n) => n.as_f64().map(|f| SKey::Num(OrdF64(f))),
+            Json::Number(n) => Some(SKey::Num(crate::num::NumKey(n.clone()))),
             Json::String(s) => Some(SKey::Str(s.clone())),
             _ => None,
         }
@@ -359,7 +334,7 @@ impl SKey {
         match self {
             SKey::Null => Json::Null,
             SKey::Bool(b) => Json::Bool(*b),
-            SKey::Num(n) => crate::query::num(n.0),
+            SKey::Num(n) => Json::Number(n.0.clone()),
             SKey::Str(s) => Json::String(s.clone()),
             SKey::Tuple(parts) => Json::Array(parts.iter().map(SKey::to_json).collect()),
         }
@@ -527,6 +502,20 @@ impl SecIndex {
     fn describe(&self) -> String {
         let case = if self.fold { " ignore case" } else { "" };
         format!("{} ({}){case}", self.pattern, self.field)
+    }
+
+    /// Two keys that hold the same value, and that value, if there are some.
+    fn first_duplicate(&self) -> Option<(String, String, Json)> {
+        let mut twice = None;
+        self.map.for_each(|sk, keys| {
+            if twice.is_none() && keys.len() > 1 {
+                let mut k = keys.iter();
+                if let (Some(a), Some(b)) = (k.next(), k.next()) {
+                    twice = Some((a.clone(), b.clone(), sk.to_json()));
+                }
+            }
+        });
+        twice
     }
 
     fn remove(&mut self, key: &str) {
@@ -808,10 +797,7 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
 fn plain_order(a: &Json, b: &Json, op: CmpOp) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering::*;
     match (a, b) {
-        (Json::Number(x), Json::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => x.partial_cmp(&y),
-            _ => None,
-        },
+        (Json::Number(x), Json::Number(y)) => Some(crate::num::cmp(x, y)),
         (Json::String(x), Json::String(y)) => Some(x.cmp(y)),
         (Json::Bool(x), Json::Bool(y)) => match op {
             CmpOp::Eq | CmpOp::Ne => Some(if x == y { Equal } else { Less }),
@@ -1157,6 +1143,66 @@ fn sidecar(path: &Path, ext: &str) -> PathBuf {
     s.push(".");
     s.push(ext);
     PathBuf::from(s)
+}
+
+/// The unique indexes of a data file whose documents hold a value twice,
+/// each as `<index>: <key> and <key> both hold <value>`. Reads the file and
+/// its definitions without opening the workspace and without writing
+/// anything, for `kivadb doctor`: a workspace written before 2.0.0 may hold
+/// `0` and `-0.0`, two values then, one now.
+pub fn unique_conflicts(path: &Path, keys: Option<&Keys>) -> Result<Vec<String>> {
+    let Some(meta) = read_meta(&sidecar(path, "meta"))? else { return Ok(Vec::new()) };
+    let mut indexes: Vec<SecIndex> = Vec::new();
+    for def in meta["indexes"].as_array().into_iter().flatten() {
+        let (Some(p), Some(f), true) = (def["pattern"].as_str(), def["field"].as_str(), def["unique"] == true) else {
+            continue;
+        };
+        let paths: std::result::Result<Vec<_>, String> = match def["fields"].as_array() {
+            Some(fields) => fields.iter().map(|f| jsonpath::parse_path(f.as_str().unwrap_or_default())).collect(),
+            None => jsonpath::parse_path(f).map(|segs| vec![segs]),
+        };
+        if let Ok(paths) = paths {
+            let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
+            let fold = def["ignore_case"].as_bool().unwrap_or(false);
+            indexes.push(SecIndex::new(p, f, paths, kind, true).folding(fold));
+        }
+    }
+    if indexes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut file = File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut head = [0u8; FILE_HEADER_LEN as usize];
+    file.read_exact(&mut head)?;
+    parse_file_header(&head).map_err(KivaError::Corrupted)?;
+    let mut index = BTreeMap::new();
+    let mut seq = 0;
+    scan_log(&file, FILE_HEADER_LEN, len, &mut index, &mut seq, keys, false)?;
+    let now = now_ms();
+    for (key, e) in &index {
+        if !e.ty.is_doc() || e.is_expired(now) || !indexes.iter().any(|s| crate::util::glob_match(&s.pattern, key)) {
+            continue;
+        }
+        let mut rec = vec![0u8; e.rec_len() as usize];
+        file.seek(SeekFrom::Start(e.offset))?;
+        file.read_exact(&mut rec)?;
+        if !verify_record(&rec) {
+            continue;
+        }
+        let Ok((_, stored)) = crypt::open_record(keys, &rec) else { continue };
+        let Ok(Value::Doc(doc)) =
+            compress::unpack(&stored, e.compression()).and_then(|raw| Value::decode(e.ty, &raw, e.is_msgpack()))
+        else {
+            continue;
+        };
+        for s in indexes.iter_mut().filter(|s| crate::util::glob_match(&s.pattern, key)) {
+            s.update(key, Some(&doc));
+        }
+    }
+    Ok(indexes
+        .iter()
+        .filter_map(|s| s.first_duplicate().map(|(a, b, v)| format!("{}: {a} and {b} both hold {v}", s.describe())))
+        .collect())
 }
 
 fn validate_key(key: &str) -> Result<()> {
@@ -2198,6 +2244,17 @@ impl Engine {
                         inner.sec.push(SecIndex::new(p, f, paths, kind, unique).folding(fold));
                         let i = inner.sec.len() - 1;
                         inner.rebuild_sec(i);
+                        // Values an earlier version told apart may be one value now (0 and
+                        // -0.0, compared exactly since 2.0.0): the index still guards new
+                        // writes, and the documents already there are named, not changed.
+                        if let Some((a, b, value)) = unique.then(|| inner.sec[i].first_duplicate()).flatten() {
+                            eprintln!(
+                                "[WARN] the unique index on {} in {} holds {value} twice ({a} and {b}), written by \
+                                 an earlier version: change one of them; new duplicates are refused",
+                                inner.sec[i].describe(),
+                                path.display()
+                            );
+                        }
                     }
                 }
             }
@@ -3880,22 +3937,12 @@ impl Engine {
         let i = inner.sec.len() - 1;
         inner.rebuild_sec(i);
         if unique {
-            let s = &inner.sec[i];
-            let mut twice = None;
-            s.map.for_each(|sk, keys| {
-                if twice.is_none() && keys.len() > 1 {
-                    let mut k = keys.iter();
-                    twice = Some((k.next().cloned(), k.next().cloned(), sk.to_json()));
-                }
-            });
-            if let Some((a, b, value)) = twice {
-                let what = s.describe();
+            if let Some((a, b, value)) = inner.sec[i].first_duplicate() {
+                let what = inner.sec[i].describe();
                 inner.sec.pop();
                 return Err(KivaError::Exists(format!(
-                    "cannot create the unique index on {what}: {} and {} both hold {value}. \
-                     Change one of them, then create the index again.",
-                    a.unwrap_or_default(),
-                    b.unwrap_or_default()
+                    "cannot create the unique index on {what}: {a} and {b} both hold {value}. \
+                     Change one of them, then create the index again."
                 )));
             }
         }
@@ -4732,7 +4779,7 @@ impl Engine {
         let order = |v: &Json| match (sk, v) {
             (SKey::Null, Json::Null) => Some(Equal),
             (SKey::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
-            (SKey::Num(a), Json::Number(n)) => n.as_f64().map(|b| a.cmp(&OrdF64(b))),
+            (SKey::Num(a), Json::Number(n)) => Some(crate::num::cmp(&a.0, n)),
             (SKey::Str(a), Json::String(b)) => Some(a.as_str().cmp(b.as_str())),
             _ => None,
         };

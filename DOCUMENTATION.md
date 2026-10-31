@@ -796,6 +796,13 @@ OK: big saved.
 OK: debt saved.
 ```
 
+**Precision.** Numbers are compared by their value, exactly: `9007199254740993` and `9007199254740992` are two values, though a 64-bit float holds them as one, and `1` and `1.0` are one value. This holds in conditions, indexes, unique indexes, `order by`, `group by`, `min` and `max`, and in the bounds of a schema.
+
+* **In a document**, a number is a 64-bit integer (−9 223 372 036 854 775 808 to 18 446 744 073 709 551 615) or a 64-bit float. An integer beyond that range is refused, with the ways out: quote it to keep its digits as text, or add `.0` to store it as a rounded float. A number with a fraction or an exponent is a float.
+* **A key** keeps the text you wrote, whatever its size. Programs (REST, the drivers, the changes stream) receive it as a JSON number when one holds it exactly, and as that text otherwise (`"12345678901234567890123"`). Lua scripts get it the same way. `print` computes with 64-bit floats, so it refuses a number that one would round.
+* **Sums** of integers are exact (`sum` refuses a total beyond the 64-bit integers); a value with a fraction makes the sum a float. `json incr` stays exact on integers, and refuses to go beyond 64 bits.
+* **Data written before 2.0.0** keeps what it held. Integers beyond 64 bits were rounded when they were written into a document, without an error; those lost digits cannot be read back. Such values are written with an exponent (`1.2345678901234568e+22`), and `get where <pattern>.<field> >= 18446744073709551616.0 or <field> < -9223372036854775808.0` lists them. Keys and integers within 64 bits were kept exactly. Indexes are rebuilt each time a workspace opens, so they follow the new rules at once. One case changes a unique index: `0` and `-0.0` were two values for earlier versions and are one now, so a unique index may hold both. Nothing is lost, and KivaDB keeps working: the two documents stay as they are, an equality (`v = 0`) finds both, the index still refuses any new duplicate, and the workspace opens with `[WARN] the unique index on ... holds 0 twice (z:1 and z:2)` in the log. `kivadb doctor` lists such indexes without changing anything (`WARN  Data  ... z:1 and z:2 both hold 0`). **To repair**: change or delete one of the two documents (`json set z:2 .v 1`, or `del z:2`); the warning is gone at the next opening and from the doctor. Until then, `create unique index` on that field is refused, naming both documents, so drop the index only after the repair.
+
 ### 5.3 boolean
 
 `true` or `false`.
@@ -3208,7 +3215,7 @@ KivaDB 2.0.0 doctor, home /home/ana/.local/share/kivadb
 | Encryption | The key is given when the data needs one ([16.12](#1612-encryption-at-rest)) |
 | Time zone | `time.zone` is a zone KivaDB knows ([5.9](#59-time-zones)) |
 | Replication | A replica has a master, reached with TLS when it is on another machine |
-| Data | Every record of every workspace and of `system`, against its checksum, read from the files |
+| Data | Every record of every workspace and of `system`, against its checksum, read from the files; the unique indexes of each workspace, whose documents must not hold a value twice ([5.2](#52-number)) |
 | Server log | Errors among the last 500 lines of `server.log` |
 
 A last record cut short is a warning, not a problem: a write was interrupted by a crash or a power cut, and KivaDB drops it the next time it opens the file. A checksum that does not match is a problem: `check` and `check repair` ([17.4](#174-integrity-check)) deal with it.

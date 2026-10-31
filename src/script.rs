@@ -36,7 +36,12 @@ fn json_to_lua(lua: &Lua, j: &Json) -> mlua::Result<LVal> {
         Json::Bool(b) => LVal::Boolean(*b),
         Json::Number(n) => match n.as_i64() {
             Some(i) => LVal::Integer(i),
-            None => LVal::Number(n.as_f64().unwrap_or(0.0)),
+            None if n.is_f64() => LVal::Number(n.as_f64().unwrap_or(0.0)),
+            // An integer beyond a Lua integer: a float when it holds it exactly, else its text.
+            None => match crate::num::exact_f64(&n.to_string()) {
+                Some(f) => LVal::Number(f),
+                None => LVal::String(lua.create_string(n.to_string())?),
+            },
         },
         Json::String(s) => LVal::String(lua.create_string(s)?),
         Json::Array(a) => {
@@ -59,9 +64,11 @@ fn json_to_lua(lua: &Lua, j: &Json) -> mlua::Result<LVal> {
 fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
     Ok(match v {
         Value::Str(s) => LVal::String(lua.create_string(s)?),
-        Value::Num(n) => match n.parse::<i64>() {
-            Ok(i) => LVal::Integer(i),
-            Err(_) => LVal::Number(n.parse::<f64>().unwrap_or(0.0)),
+        // A number no Lua number holds exactly comes as its text, not rounded.
+        Value::Num(n) => match (n.parse::<i64>(), crate::num::exact_f64(n)) {
+            (Ok(i), _) => LVal::Integer(i),
+            (Err(_), Some(f)) => LVal::Number(f),
+            (Err(_), None) => LVal::String(lua.create_string(n)?),
         },
         Value::Bool(b) => LVal::Boolean(*b),
         Value::Null => LVal::Nil,
@@ -221,16 +228,36 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
             }
             Ok(t)
         })?;
-        let incr = scope.create_function(|_, (key, delta): (String, Option<f64>)| {
+        // Integers stay exact integers; a fraction on either side makes it a float.
+        let incr = scope.create_function(|_, (key, delta): (String, Option<LVal>)| {
             crate::exec::validate_key_name(&key).map_err(lerr)?;
             let mut s = cell.borrow_mut();
             let (cur, meta) = match s.kv_get(&key).map_err(lerr)? {
-                Some((Value::Num(n), m)) => (n.parse::<f64>().unwrap_or(0.0), m),
+                Some((Value::Num(n), m)) => (n, m),
                 Some(_) => return Err(lerr(format!("key '{key}' is not a number"))),
-                None => (0.0, Default::default()),
+                None => ("0".to_string(), Default::default()),
             };
-            let next = cur + delta.unwrap_or(1.0);
-            s.kv_put(&key, Value::Num(fmt_f64(next)), meta.expires_at, false).map_err(lerr)?;
+            let (text, next) = match (cur.parse::<i64>(), delta.unwrap_or(LVal::Integer(1))) {
+                (Ok(a), LVal::Integer(b)) => {
+                    let n = a.checked_add(b).ok_or_else(|| lerr(format!("incrementing '{key}' would overflow")))?;
+                    (n.to_string(), LVal::Integer(n))
+                }
+                (_, d) => {
+                    let d = match d {
+                        LVal::Integer(i) => i as f64,
+                        LVal::Number(f) => f,
+                        _ => return Err(lerr("the increment must be a number")),
+                    };
+                    let a = crate::num::exact_f64(&cur)
+                        .ok_or_else(|| lerr(format!("'{key}' holds {cur}, which a float cannot hold exactly")))?;
+                    let n = a + d;
+                    if !n.is_finite() {
+                        return Err(lerr("the increment would produce NaN or Infinity"));
+                    }
+                    (fmt_f64(n), LVal::Number(n))
+                }
+            };
+            s.kv_put(&key, Value::Num(text), meta.expires_at, false).map_err(lerr)?;
             Ok(next)
         })?;
         kiva.set("get", get)?;

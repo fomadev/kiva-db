@@ -535,7 +535,7 @@ impl Ord for GroupKey {
         let (a, b) = (&self.0, &other.0);
         rank(a).cmp(&rank(b)).then_with(|| match (a, b) {
             (Json::Bool(x), Json::Bool(y)) => x.cmp(y),
-            (Json::Number(x), Json::Number(y)) => x.as_f64().unwrap_or(0.0).total_cmp(&y.as_f64().unwrap_or(0.0)),
+            (Json::Number(x), Json::Number(y)) => crate::num::cmp(x, y),
             (Json::String(x), Json::String(y)) => x.cmp(y),
             (Json::Null, Json::Null) => Ordering::Equal,
             _ => a.to_string().cmp(&b.to_string()),
@@ -561,7 +561,7 @@ impl Eq for GroupKey {}
 struct Acc {
     /// Values taken into account.
     n: u64,
-    sum: f64,
+    sum: crate::num::Sum,
     best: Option<Json>,
 }
 
@@ -668,9 +668,9 @@ impl Aggregation {
             match agg.func {
                 Func::Count => acc.n += 1,
                 Func::Sum | Func::Avg => {
-                    if let Some(x) = v.as_f64() {
+                    if let Json::Number(x) = v {
                         acc.n += 1;
-                        acc.sum += x;
+                        acc.sum.push(x);
                     }
                 }
                 Func::Min | Func::Max => {
@@ -695,32 +695,26 @@ impl Aggregation {
         Ok(())
     }
 
-    pub fn finish(self) -> Aggregated {
+    /// The results. A sum of integers is exact, and refused beyond the
+    /// 64-bit integers rather than rounded.
+    pub fn finish(self) -> Result<Aggregated, String> {
         let grouped = self.group_by.is_some();
-        let groups = self
-            .groups
-            .into_iter()
-            .map(|(key, b)| GroupResult {
-                key: grouped.then_some(key.0),
-                matches: b.matches,
-                values: self
-                    .aggs
-                    .iter()
-                    .zip(b.accs)
-                    .map(|(agg, acc)| {
-                        let v = match agg.func {
-                            Func::Count => Json::from(acc.n),
-                            Func::Sum => num(acc.sum),
-                            Func::Avg if acc.n == 0 => Json::Null,
-                            Func::Avg => num(acc.sum / acc.n as f64),
-                            Func::Min | Func::Max => acc.best.unwrap_or(Json::Null),
-                        };
-                        (agg.name.clone(), v, acc.n)
-                    })
-                    .collect(),
-            })
-            .collect();
-        Aggregated { matches: self.matches, groups }
+        let mut groups = Vec::with_capacity(self.groups.len());
+        for (key, b) in self.groups {
+            let mut values = Vec::with_capacity(self.aggs.len());
+            for (agg, acc) in self.aggs.iter().zip(b.accs) {
+                let v = match agg.func {
+                    Func::Count => Json::from(acc.n),
+                    Func::Sum => acc.sum.json().map_err(|e| format!("{}: {e}", agg.name))?,
+                    Func::Avg if acc.n == 0 => Json::Null,
+                    Func::Avg => num(acc.sum.total() / acc.n as f64),
+                    Func::Min | Func::Max => acc.best.unwrap_or(Json::Null),
+                };
+                values.push((agg.name.clone(), v, acc.n));
+            }
+            groups.push(GroupResult { key: grouped.then_some(key.0), matches: b.matches, values });
+        }
+        Ok(Aggregated { matches: self.matches, groups })
     }
 
     /// The aggregates of a structured request: `{"n": "count", "mean":
@@ -934,7 +928,7 @@ mod tests {
         ];
         let mut a = Aggregation::new(aggs.clone(), Some("city")).unwrap();
         docs.iter().for_each(|d| a.add(d).unwrap());
-        let r = a.finish();
+        let r = a.finish().unwrap();
         assert_eq!(r.matches, 4);
         let keys: Vec<Json> = r.groups.iter().map(|g| g.key.clone().unwrap()).collect();
         assert_eq!(keys, [json!(null), json!("Goma"), json!("Kinshasa")], "missing first, then in order");
@@ -946,10 +940,11 @@ mod tests {
 
         let mut all = Aggregation::new(aggs, None).unwrap();
         docs.iter().for_each(|d| all.add(d).unwrap());
-        let r = all.finish();
+        let r = all.finish().unwrap();
         assert_eq!(r.groups.len(), 1);
         assert_eq!(r.groups[0].values[1].1, json!(32), "(30 + 41 + 25) / 3");
-        let empty = Aggregation::new(vec![Agg::new("avg", Func::Avg, Some("x")).unwrap()], None).unwrap().finish();
+        let empty =
+            Aggregation::new(vec![Agg::new("avg", Func::Avg, Some("x")).unwrap()], None).unwrap().finish().unwrap();
         assert_eq!((empty.matches, &empty.groups[0].values[0].1), (0, &Json::Null));
         assert!(Agg::new("s", Func::Sum, None).is_err());
         assert_eq!(num(2.5), json!(2.5));

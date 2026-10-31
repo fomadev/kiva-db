@@ -290,7 +290,7 @@ mod tests {
             "-5",
         ];
         let mut raw: Vec<SKey> = texts.iter().map(|t| SKey::Str(t.to_string())).collect();
-        raw.extend([SKey::Num(super::super::OrdF64(3.0)), SKey::Bool(true)]);
+        raw.extend([SKey::Num(crate::num::NumKey(3.into())), SKey::Bool(true)]);
         raw.sort();
         let key = |v: &SKey| sort_key(Some(&v.to_json()));
         for (i, v) in raw.iter().enumerate() {

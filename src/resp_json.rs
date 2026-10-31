@@ -60,7 +60,7 @@ fn path_at(args: &[Vec<u8>], i: usize) -> std::result::Result<Path, Reply> {
 }
 
 fn json_arg(arg: &[u8]) -> std::result::Result<Json, Reply> {
-    serde_json::from_slice(arg).map_err(|e| Reply::err(format!("expected a JSON value: {e}")))
+    crate::num::from_slice(arg).map_err(|e| Reply::err(format!("expected a JSON value: {e}")))
 }
 
 /// A KivaDB value as JSON; strings stay strings.
@@ -89,9 +89,11 @@ fn to_value(j: Json) -> Value {
 
 /// A JSON number as a RESP3 number.
 fn number(n: &Json) -> Reply {
-    match n.as_i64() {
-        Some(i) => Reply::Int(i),
-        None => Reply::Double(n.as_f64().unwrap_or(0.0)),
+    match (n.as_i64(), n.as_u64()) {
+        (Some(i), _) => Reply::Int(i),
+        // Beyond a RESP integer: its digits, rather than a rounded double.
+        (None, Some(u)) => Reply::bulk(u.to_string()),
+        _ => Reply::Double(n.as_f64().unwrap_or(0.0)),
     }
 }
 
@@ -273,12 +275,19 @@ impl Conn {
                     let (Some(a), Some(b)) = (slot.as_f64(), by.as_f64()) else {
                         return Err(Reply::err("the value at this path is not a number"));
                     };
-                    let product = match (slot.as_i64(), by.as_i64()) {
-                        (Some(x), Some(y)) => x.checked_mul(y).map(Json::from),
-                        _ => None,
-                    }
-                    .or_else(|| serde_json::Number::from_f64(a * b).map(Json::Number))
-                    .ok_or_else(|| Reply::err("result is not a finite number"))?;
+                    let int = |j: &Json| j.as_i64().map(i128::from).or_else(|| j.as_u64().map(i128::from));
+                    let product =
+                        match (int(slot), by.as_i64().map(i128::from).or_else(|| by.as_u64().map(i128::from))) {
+                            // Integers stay exact, or are refused beyond 64 bits.
+                            (Some(x), Some(y)) => Some(
+                                x.checked_mul(y)
+                                    .and_then(crate::num::int_json)
+                                    .ok_or_else(|| Reply::err("result is beyond the 64-bit integers"))?,
+                            ),
+                            _ => None,
+                        }
+                        .or_else(|| serde_json::Number::from_f64(a * b).map(Json::Number))
+                        .ok_or_else(|| Reply::err("result is not a finite number"))?;
                     *slot = product.clone();
                     product
                 };
