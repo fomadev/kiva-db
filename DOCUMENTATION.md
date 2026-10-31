@@ -3354,7 +3354,7 @@ KivaDB/
 | :--- | :--- | :--- |
 | `store.kiva` | The data | The data is lost |
 | `store.kiva.hint` | Index snapshot for fast start | Rebuilt; the next start is slower |
-| `store.kiva.meta` | Definitions of secondary indexes | Indexes must be created again |
+| `store.kiva.meta` | Definitions of the secondary indexes, vector indexes and schemas, and the settings of the change journal | Indexes and schemas must be created again. A damaged file stops the opening of the workspace rather than open it without them ([30.1](#301-starting)) |
 | `store.kiva.lock` | Prevents two processes from opening the files | Recreated |
 | `store.kiva.bak` | Copy made before a repair | - |
 
@@ -5458,6 +5458,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | Docker: the container stops right away | `docker logs kivadb` gives the reason; usually `KIVADB_ADMIN_PASSWORD` is missing ([29.6](#296-docker)) |
 | `Error: refusing to listen on ... without authentication.` | You set a non-local `bind` without securing KivaDB. See [16.7](#167-opening-kivadb-to-the-network) |
 | `Error: database is locked by another process` | Another process has these files open. Check `kivadb status` |
+| `ERR_DATA_CORRUPTED: ...store.kiva.meta is damaged` | The file of index and schema definitions cannot be read (a disk error, or a copy cut short). KivaDB does not open the workspace without its unique indexes and schemas, which would no longer be enforced. Restore the file from a backup ([17.7](#177-backups)); or move it away, open the workspace, and create its indexes and schemas again. `kivadb doctor` reports it too |
 | `Error: invalid database file: missing KIVA signature` | The file is not a KivaDB data file. KivaDB does not touch it |
 | `Error: invalid database file: unsupported storage format N` | The file was written by a newer KivaDB (format 2: by 2.0, with dates in it). Use that version, or restore the backup made before upgrading |
 | `kivadb start` says the server stopped right away | The reason is in the last lines of `server.log`, which are displayed |

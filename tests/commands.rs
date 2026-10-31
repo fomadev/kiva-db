@@ -822,6 +822,9 @@ fn projects_group_workspaces_and_grants_name_them() {
     ok(&mut admin, "workspace switch default");
     ok(&mut r, "workspace switch old_places");
     assert!(fails(&mut admin, "workspace move old_places to travel.archive").contains("is in use"));
+    // A move refused leaves the grants as they were: none on the new name.
+    let users = ok(&mut admin, "users");
+    assert!(users.contains("old_places=read") && !users.contains("travel.archive"), "{users}");
     ok(&mut r, "workspace switch travel.places");
     assert!(fails(&mut admin, "workspace move old_places to shop.archive").contains("project 'shop' does not exist"));
     assert!(fails(&mut admin, "workspace move old_places to travel.places").contains("already exists"));

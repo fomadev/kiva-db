@@ -359,6 +359,14 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
             empty += 1;
             continue;
         }
+        // The definitions of its indexes and schemas: KivaDB does not open a
+        // workspace whose file of definitions is damaged.
+        let mut meta = file.clone().into_os_string();
+        meta.push(".meta");
+        if let Err(e) = crate::engine::read_meta(Path::new(&meta)) {
+            damaged = true;
+            r.add(Level::Fail, "Data", format!("workspace '{name}': {e}"), None);
+        }
         match crate::backup::check_log(&file) {
             Ok(n) => {
                 records += n;

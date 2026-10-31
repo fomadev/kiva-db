@@ -187,6 +187,32 @@ fn the_doctor_reads_a_home_of_1_7_1_without_changing_it() {
     assert!(text.contains("check repair"), "{text}");
 }
 
+#[test]
+fn the_doctor_finds_a_damaged_file_of_definitions() {
+    let dir = TempDir::new("compat_doctor_meta");
+    let home = home_from("v1.7.1", &dir);
+    let meta = home.join("data").join("store.kiva.meta");
+    let whole = std::fs::read(&meta).unwrap();
+    std::fs::write(&meta, &whole[..20]).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+        .args(["doctor", "--home"])
+        .arg(&home)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(text.contains("FAIL  Data        workspace 'default'") && text.contains("store.kiva.meta"), "{text}");
+    // And the server does not start on it.
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+        .args(["--no-listen", "-e", "indexes", "--home"])
+        .arg(&home)
+        .output()
+        .unwrap();
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success() || !all.contains("No secondary indexes"), "{all}");
+    assert!(all.contains("store.kiva.meta"), "{all}");
+}
+
 fn format_of(file: &Path) -> u32 {
     let h = std::fs::read(file).unwrap();
     u32::from_le_bytes([h[4], h[5], h[6], h[7]])

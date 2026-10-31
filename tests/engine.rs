@@ -686,3 +686,38 @@ fn group_commit_speed() {
         );
     }
 }
+
+#[test]
+fn a_damaged_file_of_definitions_stops_the_opening_instead_of_dropping_the_unique_indexes() {
+    let dir = TempDir::new("meta_damaged");
+    let path = dir.path().join("store.kiva");
+    let meta = dir.path().join("store.kiva.meta");
+    {
+        let e = Engine::open(&path, quiet()).unwrap();
+        e.put("user:1", &Value::Doc(json!({"email": "a@x"})), 0, false).unwrap();
+        e.create_unique_index("user:*", &["email"], kivadb::engine::IndexKind::BTree, true, false).unwrap();
+        // Written whole, through a temporary file that is gone afterwards.
+        assert!(serde_json::from_slice::<serde_json::Value>(&fs::read(&meta).unwrap()).is_ok());
+        assert!(!dir.path().join("store.kiva.meta.tmp").exists());
+    }
+
+    // Cut short, as fs::write left it when a crash came in the middle.
+    let whole = fs::read(&meta).unwrap();
+    fs::write(&meta, &whole[..20]).unwrap();
+    let err = Engine::open(&path, quiet()).err().expect("a damaged .meta must not open");
+    assert!(matches!(err, KivaError::Corrupted(_)), "{err}");
+    let text = err.to_string();
+    assert!(text.contains("store.kiva.meta") && text.contains("indexes and schemas"), "{text}");
+
+    // Put back, everything is there and enforced again.
+    fs::write(&meta, &whole).unwrap();
+    let e = Engine::open(&path, quiet()).unwrap();
+    assert!(e.put("user:2", &Value::Doc(json!({"email": "a@x"})), 0, false).is_err());
+
+    // Without the file at all, the workspace opens with no definitions: what
+    // the error message offers as the way out.
+    drop(e);
+    fs::remove_file(&meta).unwrap();
+    let e = Engine::open(&path, quiet()).unwrap();
+    assert!(e.put("user:2", &Value::Doc(json!({"email": "a@x"})), 0, false).is_ok());
+}

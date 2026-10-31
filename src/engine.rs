@@ -1131,6 +1131,27 @@ struct Durable {
     syncing: bool,
 }
 
+/// The definitions kept next to a data file (indexes, vector indexes,
+/// schemas, the journal's settings), or none for a file that has none yet.
+/// A file that is there but cannot be read stops the opening: going on would
+/// open the workspace without its unique indexes and schemas, and they would
+/// no longer be enforced.
+pub(crate) fn read_meta(path: &Path) -> Result<Option<Json>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(KivaError::Corrupted(format!("{} cannot be read: {e}", path.display()))),
+    };
+    serde_json::from_str(&text).map(Some).map_err(|e| {
+        KivaError::Corrupted(format!(
+            "{} is damaged ({e}). It holds the definitions of this workspace's indexes and schemas, so the \
+             workspace is not opened without them. Restore it from a backup; or move it away to open the \
+             workspace without its indexes and schemas, then create them again.",
+            path.display()
+        ))
+    })
+}
+
 fn sidecar(path: &Path, ext: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".");
@@ -2128,75 +2149,73 @@ impl Engine {
 
         // Secondary index definitions live in a small sidecar file.
         let mut changes_settings = None;
-        if let Ok(text) = fs::read_to_string(sidecar(&path, "meta")) {
-            if let Ok(meta) = serde_json::from_str::<Json>(&text) {
-                let mut saved =
-                    read_graphs(&sidecar(&path, "graphs"), inner.file_id, inner.file_len, inner.keys.as_deref());
-                for def in meta["vector_indexes"].as_array().cloned().unwrap_or_default() {
-                    if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
-                        if let Ok(segs) = jsonpath::parse_path(f) {
-                            let kind = kind_from_json(&def);
-                            inner.vecs.push(VecIndex::with_kind(p, f, segs, kind));
-                            let i = inner.vecs.len() - 1;
-                            inner.vecs[i].ef_search = def["ef_search"].as_u64().unwrap_or(0) as usize;
-                            inner.vecs[i].auto_tune = AutoTune::from_json(&def["auto_tune"]);
-                            let restored = saved.as_mut().and_then(|(since, list)| {
-                                let at = list.iter().position(|s| {
-                                    s.pattern == p && s.field == f && VectorIndexKind::Hnsw(s.graph.params) == kind
-                                })?;
-                                Some((*since, list.swap_remove(at)))
-                            });
-                            match restored {
-                                Some((since, s)) => {
-                                    inner.vecs[i].restore(s.graph, s.dims, s.rejected);
-                                    inner.catch_up_vec(i, since);
-                                }
-                                None => inner.rebuild_vec(i),
+        if let Some(meta) = read_meta(&sidecar(&path, "meta"))? {
+            let mut saved =
+                read_graphs(&sidecar(&path, "graphs"), inner.file_id, inner.file_len, inner.keys.as_deref());
+            for def in meta["vector_indexes"].as_array().cloned().unwrap_or_default() {
+                if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
+                    if let Ok(segs) = jsonpath::parse_path(f) {
+                        let kind = kind_from_json(&def);
+                        inner.vecs.push(VecIndex::with_kind(p, f, segs, kind));
+                        let i = inner.vecs.len() - 1;
+                        inner.vecs[i].ef_search = def["ef_search"].as_u64().unwrap_or(0) as usize;
+                        inner.vecs[i].auto_tune = AutoTune::from_json(&def["auto_tune"]);
+                        let restored = saved.as_mut().and_then(|(since, list)| {
+                            let at = list.iter().position(|s| {
+                                s.pattern == p && s.field == f && VectorIndexKind::Hnsw(s.graph.params) == kind
+                            })?;
+                            Some((*since, list.swap_remove(at)))
+                        });
+                        match restored {
+                            Some((since, s)) => {
+                                inner.vecs[i].restore(s.graph, s.dims, s.rejected);
+                                inner.catch_up_vec(i, since);
                             }
+                            None => inner.rebuild_vec(i),
                         }
                     }
                 }
-                for p in meta["pinned"].as_array().cloned().unwrap_or_default() {
-                    if let Some(p) = p.as_str() {
-                        inner.cache.pin(p);
-                        inner.warm_pinned(p);
-                    }
+            }
+            for p in meta["pinned"].as_array().cloned().unwrap_or_default() {
+                if let Some(p) = p.as_str() {
+                    inner.cache.pin(p);
+                    inner.warm_pinned(p);
                 }
-                for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
-                    if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
-                        // An index on several fields lists them in "fields".
-                        let paths: std::result::Result<Vec<_>, String> = match def["fields"].as_array() {
-                            Some(fields) => {
-                                fields.iter().map(|f| jsonpath::parse_path(f.as_str().unwrap_or_default())).collect()
-                            }
-                            None => jsonpath::parse_path(f).map(|segs| vec![segs]),
-                        };
-                        if let Ok(paths) = paths {
-                            let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
-                            let unique = def["unique"].as_bool().unwrap_or(false);
-                            let fold = def["ignore_case"].as_bool().unwrap_or(false);
-                            inner.sec.push(SecIndex::new(p, f, paths, kind, unique).folding(fold));
-                            let i = inner.sec.len() - 1;
-                            inner.rebuild_sec(i);
+            }
+            for def in meta["indexes"].as_array().cloned().unwrap_or_default() {
+                if let (Some(p), Some(f)) = (def["pattern"].as_str(), def["field"].as_str()) {
+                    // An index on several fields lists them in "fields".
+                    let paths: std::result::Result<Vec<_>, String> = match def["fields"].as_array() {
+                        Some(fields) => {
+                            fields.iter().map(|f| jsonpath::parse_path(f.as_str().unwrap_or_default())).collect()
                         }
+                        None => jsonpath::parse_path(f).map(|segs| vec![segs]),
+                    };
+                    if let Ok(paths) = paths {
+                        let kind = def["kind"].as_str().and_then(IndexKind::parse).unwrap_or_default();
+                        let unique = def["unique"].as_bool().unwrap_or(false);
+                        let fold = def["ignore_case"].as_bool().unwrap_or(false);
+                        inner.sec.push(SecIndex::new(p, f, paths, kind, unique).folding(fold));
+                        let i = inner.sec.len() - 1;
+                        inner.rebuild_sec(i);
                     }
                 }
-                if meta["changes"].is_object() {
-                    changes_settings = Some(changes::Settings::from_json(&meta["changes"]));
-                }
-                for def in meta["schemas"].as_array().cloned().unwrap_or_default() {
-                    let Some(p) = def["pattern"].as_str() else { continue };
-                    match Schema::parse(p, &def["spec"]) {
-                        Ok(s) => {
-                            let owned = def["indexes"]
-                                .as_array()
-                                .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
-                                .unwrap_or_default();
-                            inner.schemas.push((s, owned));
-                        }
-                        // Written by this engine, so readable; say it rather than drop it silently.
-                        Err(e) => eprintln!("[WARN] the schema on {p} in {} is ignored: {e}", path.display()),
+            }
+            if meta["changes"].is_object() {
+                changes_settings = Some(changes::Settings::from_json(&meta["changes"]));
+            }
+            for def in meta["schemas"].as_array().cloned().unwrap_or_default() {
+                let Some(p) = def["pattern"].as_str() else { continue };
+                match Schema::parse(p, &def["spec"]) {
+                    Ok(s) => {
+                        let owned = def["indexes"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        inner.schemas.push((s, owned));
                     }
+                    // Written by this engine, so readable; say it rather than drop it silently.
+                    Err(e) => eprintln!("[WARN] the schema on {p} in {} is ignored: {e}", path.display()),
                 }
             }
         }
@@ -3556,7 +3575,7 @@ impl Engine {
             meta["schemas"] = list.into();
         }
         let text = serde_json::to_string_pretty(&meta)?;
-        fs::write(sidecar(&self.path, "meta"), text)?;
+        crate::util::write_atomic(&sidecar(&self.path, "meta"), text.as_bytes())?;
         Ok(())
     }
 

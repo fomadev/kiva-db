@@ -5,6 +5,27 @@
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Replaces `path` with `bytes` whole or not at all: they are written to
+/// `<path>.tmp`, flushed to the disk, then renamed over `path`. A crash or a
+/// full disk leaves the previous file as it was.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    match written.and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 pub fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -384,6 +405,21 @@ pub fn drift_text(drift_ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_atomic_write_replaces_the_file_whole() {
+        let dir = std::env::temp_dir().join(format!("kivadb_atomic_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("kiva.conf");
+        write_atomic(&path, b"first").unwrap();
+        write_atomic(&path, b"second, longer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");
+        assert!(!dir.join("kiva.conf.tmp").exists());
+        // A write that cannot happen leaves the file as it was.
+        assert!(write_atomic(&dir.join("missing").join("x"), b"y").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn expiries_are_milliseconds_and_old_seconds_are_converted() {

@@ -479,39 +479,58 @@ impl Instance {
             return Err(KivaError::Invalid("the default workspace keeps its name".into()));
         }
         check_workspace_name(to)?;
-        let dir = self
-            .cfg()
-            .workspace_dir(from)
-            .ok_or_else(|| KivaError::NotFound(format!("workspace '{from}' does not exist")))?;
+        if self.cfg().workspace_dir(from).is_none() {
+            return Err(KivaError::NotFound(format!("workspace '{from}' does not exist")));
+        }
         if self.cfg().workspace_dir(to).is_some() {
             return Err(KivaError::Exists(format!("workspace '{to}' already exists")));
         }
-        {
+        // In three steps, so that a crash between two of them never takes a
+        // workspace away from its users. First, each grant on the old name is
+        // given on the new one too.
+        let mut doubled = Vec::new();
+        for mut user in auth::list_users(&self.system)? {
+            if let Some(p) = user.grants.get(from).copied() {
+                user.grants.insert(to.to_string(), p);
+                auth::save_user(&self.system, &user)?;
+                doubled.push(user.name.clone());
+            }
+        }
+        let renamed = {
             let mut map = self.engines.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(engine) = map.get(from) {
+            match map.get(from) {
                 // The map holds one reference; any other is a session in it.
-                if Arc::strong_count(engine) > 1 {
-                    return Err(KivaError::Invalid(format!(
-                        "workspace '{from}' is in use: try again when the sessions in it have left"
-                    )));
+                Some(engine) if Arc::strong_count(engine) > 1 => Err(KivaError::Invalid(format!(
+                    "workspace '{from}' is in use: try again when the sessions in it have left"
+                ))),
+                // Then the workspace takes its new name, in one write of
+                // kiva.conf. Closed now: its listeners report changes under
+                // the old name.
+                _ => {
+                    map.remove(from);
+                    self.cfg_mut().rename("workspaces", from, to)
                 }
             }
-            // Closed now: its listeners report changes under the old name.
-            map.remove(from);
-            let mut cfg = self.cfg_mut();
-            cfg.set("workspaces", to, &dir.display().to_string())?;
-            cfg.remove("workspaces", from)?;
+        };
+        if let Err(e) = renamed {
+            // Nothing moved: the grants given on the new name go away.
+            for name in doubled {
+                if let Some(mut user) = auth::get_user(&self.system, &name)? {
+                    user.grants.remove(to);
+                    auth::save_user(&self.system, &user)?;
+                }
+            }
+            return Err(e);
         }
+        // Last, the old name leaves the accounts.
         self.semantic.reset(from);
         for mut user in auth::list_users(&self.system)? {
-            if let Some(p) = user.grants.remove(from) {
-                user.grants.insert(to.to_string(), p);
-                if user.default_workspace.as_deref() == Some(from) {
-                    user.default_workspace = Some(to.to_string());
-                }
-                auth::save_user(&self.system, &user)?;
-            } else if user.default_workspace.as_deref() == Some(from) {
+            let granted = user.grants.remove(from).is_some();
+            let default = user.default_workspace.as_deref() == Some(from);
+            if default {
                 user.default_workspace = Some(to.to_string());
+            }
+            if granted || default {
                 auth::save_user(&self.system, &user)?;
             }
         }
