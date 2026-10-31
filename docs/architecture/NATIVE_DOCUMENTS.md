@@ -109,7 +109,7 @@ Each rule has a test, and the decoder is fuzzed (`cargo fuzz` target, run in CI 
 
 | Document holds | Written as | Format of the file |
 | :--- | :--- | :--- |
-| JSON types only (`int` and `float` included) | JSON or MessagePack, as chosen today | unchanged (1 or 2) |
+| JSON types only (`int` and `float` included), or a `decimal` with scale 0 above `i64::MAX` and up to `u64::MAX`, which JSON reads back as the same `decimal` (15.4) | JSON or MessagePack, as chosen today | unchanged (1 or 2) |
 | At least one `decimal`, `date`, `time` or `datetime` | `KDOC` | raised to 3 |
 
 The choice is made per write, on the document as it is. A document that loses its last native value goes back to JSON at its next write. `convert <key> to msgpack` keeps working for JSON-only documents and answers, for a document with native values, that it already is in the binary encoding.
@@ -123,7 +123,7 @@ Why not `KDOC` for every document: a file that never holds a native value stays 
 | `FORMAT_VERSION` becomes 3; `format_for_type` and `format_needed` return 3 for a record of type 11, 12, 13 (`int`, `float`, `decimal` keys, [NUMERIC_TYPES.md](NUMERIC_TYPES.md) 6.1) or with `FLAG_KDOC` | Change |
 | The raise rewrites the header's format before appending the record, then syncs, as `Engine::append` does for format 2 today; a crash in between leaves a file of format 3 holding only older records, which 2.0.0 reads | Exists for format 2; reused |
 | Compaction copies records with their type, flags and bytes, without decoding them, so it neither raises nor lowers a file's format | Exists |
-| `2.0.0-rc.2` and 1.7.1 refuse a file of format 3 at its header: "unsupported storage format 3 (this build reads formats 1 to 2): it was written by a newer KivaDB" | Exists (`parse_file_header`); a test runs the published `rc.2` binary on such a file |
+| `2.0.0-rc.2` and 1.7.1 refuse a file of format 3 at its header: "unsupported storage format 3 (this build reads formats 1 to 2): it was written by a newer KivaDB", and write nothing to it (15.5) | Exists (`parse_file_header`); a test runs the published `rc.2` binary on such a file |
 | `del all keys` resets a file to format 1, as today | Exists |
 
 ### 4.1 Replication
@@ -180,7 +180,7 @@ A document without the field, or holding an array or an object there, comes last
 | Equality | `int 1 = float 1.0 = decimal "1.00"`; a native `date` is not equal to the text `"2026-10-31"` (different types) |
 | A temporal literal in a condition | matches native values of its kind **and**, as 2.0 does, ISO texts that read as one: existing data keeps answering the same queries |
 | Indexes | key kinds `Num` (exact, from #93, with `decimal`), `Date`, `DateTime`, `Time`. A condition on a temporal literal walks two ranges of an index: the native kind and the canonical texts (`src/engine/ordering.rs`) |
-| Unique indexes | duplicates by value within the numeric kind; a `date` and a text are not duplicates |
+| Unique indexes | duplicates by value within the numeric kind; a `date` and a text are not duplicates, a risk for a field moving from texts to native dates that `schema check` and `doctor` report (15.2) |
 | `order by` | the order of 6.1 |
 | `group by` | groups by typed value; `month(created_at)` reads native values and ISO texts |
 | `sum`, `avg` | over numbers only, by the rules of 2.2 and of [NUMERIC_TYPES.md](NUMERIC_TYPES.md) 4.3 |
@@ -331,5 +331,97 @@ Order: C1 → C2 → C3 → C4 → N2 → C5 → C6, with C7 before any candidat
 ## 14. What was checked, and how
 
 - In the code of main: the record layout and the free flag bit 4 (`src/format.rs`); the raise to format 2 before the append (`Engine::append`); compaction copying records undecoded (`Engine::compact_impl`); the change journal storing type and value bytes (`src/changes.rs`); replication shipping type, flags and payload (`Op::Set`) and refusing 1.x replicas by a marker (`src/repl.rs`); the backup manifest format check (`src/backup.rs`); the document model in `serde_json::Value` and its uses (counted with `grep`).
-- #93 and #94: each passes the full test suite and its CI alone; merged together locally (one trivial conflict in `tests/commands.rs`), the `commands`, `kva` and unit tests pass.
+- #93 and #94: each passes the full test suite and its CI alone; merged together locally (one trivial conflict in `tests/commands.rs`), the full test suite passes and clippy is clean.
 - Not checked: the exact `rust_decimal` behaviours (serialization layout, multiplication and division rounding) beyond its documentation; the Node.js versions whose `JSON.parse` reviver gives the source text; every number of section 11, which are estimates until the benchmarks run.
+
+## 15. Invariants
+
+The properties C1 to C3 must hold, each with its tests. They come from a review of this note against #93, and from the historical data it has to coexist with.
+
+### 15.1 Numbers: one equality, one order, one hash
+
+For any two numeric leaves `a` and `b`, whatever their types among `int`, `float` and `decimal`:
+
+| Invariant | Statement |
+| :--- | :--- |
+| N-eq | `a = b` exactly when they are the same real number: `int 1 = float 1.0 = decimal "1.00"`, `float 0.5 = decimal "0.50"`, `float -0.0 = int 0` |
+| N-ord | the order is total, antisymmetric and transitive, and agrees with N-eq |
+| N-hash | `a = b` implies `hash(a) = hash(b)`, so hash indexes and unique checks agree with B-tree ones |
+| N-loss | no comparison, sort, hash or index turns one type into another with a loss: a `decimal` is never made a `float`, a large `int` never a `float` |
+
+**Hash.** Each number hashes its canonical class:
+
+1. An integral value within the 128-bit integers hashes as that integer (`int 1`, `float 1.0`, `decimal "1.00"`).
+2. Otherwise, a value a decimal holds exactly hashes as the normalized decimal, without trailing zeros (`decimal "0.50"`, `float 0.5`).
+3. Otherwise, the value is a float no decimal can equal (`0.1` as a float is 0.1000000000000000055511151231257827…, beyond 28 digits); it hashes as its bits.
+
+`#93`'s `NumKey` already follows rule 1 for `int` and `float`; C1 adds rules 2 and 3 for `decimal`.
+
+**Tests.**
+
+- Property tests over random mixed pairs (including the edges ±2^53, ±2^63, 2^64, `i64::MIN`, the largest decimal, tiny fractions, `-0.0`) check N-eq, N-ord and N-hash against a big-rational reference.
+- A unique index fed by a B-tree and by a hash index over the same values gives the same duplicates.
+
+### 15.2 Uniqueness
+
+| Invariant | Statement |
+| :--- | :--- |
+| U-num | values equal by N-eq are duplicates in a unique index, whatever their types and their encoding (JSON, MessagePack, `KDOC`) |
+| U-kind | values of different kinds are never duplicates: a native `date` and the text `"2026-10-31"`, `int 1` and `"1"` |
+| U-history | a unique index that holds duplicates written by an earlier version (`0` and `-0.0`, #93) is reported at opening and by `kivadb doctor`; the documents are kept; new duplicates are refused |
+
+**Risk of U-kind.** A field moving from ISO texts to native dates may hold `"2026-10-31"` in one document and `date "2026-10-31"` in another, and a unique index accepts both. To be found:
+
+- `schema check` and `kivadb doctor` report a unique field that mixes texts reading as dates with native dates (lot C7);
+- `convert <pattern>.<field> to date` unifies such a field.
+
+### 15.3 Types survive every path
+
+| Path | Invariant | Test |
+| :--- | :--- | :--- |
+| Write, read, reopen | same type and value | engine round trip |
+| Compaction | same bytes | file comparison |
+| Backup, restore | same type and value | `backup` then `restore --check`, then reads |
+| Replication | the replica reads the same type and value | master and replica in one test |
+| Change journal | a change carries the type | `/v1/changes?types=extended` |
+| Extended JSON | `Doc` → extended JSON → `Doc` is the identity | property test |
+| Drivers, extended mode | Node.js and Python give back the same value and an equivalent type | driver tests against a server |
+| Plain JSON | not type-preserving by design: `decimal` and temporal leaves come out as texts | documented, tested as such |
+
+### 15.4 Historical documents
+
+| Invariant | Statement |
+| :--- | :--- |
+| H-read | a document of 1.7.1 or a candidate reads as it was: integers within `i64` → `int`, floats → `float`, texts stay texts |
+| H-u64 | an integer between 2^63 and 2^64 in a JSON document reads as a `decimal` with scale 0, exactly |
+| H-format | a document read from JSON or MessagePack and written back without a new native value stays JSON or MessagePack, and its file keeps its format |
+
+H-u64 and H-format together need one rule in section 3.4. A `decimal` with scale 0 and a value above `i64::MAX` and up to `u64::MAX` counts as JSON-encodable: it is written as a JSON integer, and read back from JSON as the same `decimal` by H-u64. Without this rule, a historical document holding such an integer would be rewritten in `KDOC`, and its file raised to format 3, by an unrelated change (`json set` of another field). A `decimal` typed by a user with a value within `i64` (`decimal "5"`) is not JSON-encodable: JSON would read it back as an `int`, so it is written in `KDOC`.
+
+**Tests.**
+
+- The 1.7.1 fixture and an `rc.2` home are opened, queried, written to without native values, and checked to keep their formats.
+- A document holding `18446744073709551615` is changed in another field, and its file stays at format 2.
+
+### 15.5 Migration to format 3
+
+| Invariant | Statement |
+| :--- | :--- |
+| M-need | a file is raised only by a record that needs format 3 |
+| M-order | the header is raised and synced before that record is appended; a crash in between leaves a format-3 file of older records only |
+| M-never-lower | nothing lowers a file's format except `del all keys`, which empties it |
+| M-refuse | `rc.2` and 1.7.1 refuse a format-3 file at its header **and write nothing to it**: its bytes are the same after the attempt |
+| M-replica | an `rc.2` replica is refused at the handshake, before any record is sent |
+| M-backup | an `rc.2` restore refuses a format-3 archive before writing anything |
+
+M-refuse is checked by running the published `rc.2` and 1.7.1 binaries on a format-3 home, comparing every file before and after, in the way `a_format_from_a_newer_kivadb_is_refused` (`tests/compat.rs`) does today for a newer format.
+
+## 16. Review of this note
+
+Changes made after reviewing it:
+
+- **Section 3.4**: the JSON-encodable rule for `decimal` values in the `u64` range (15.4). Without it, a historical document would raise its file to format 3 through an unrelated change.
+- **Section 6.2**: uniqueness across kinds (15.2, U-kind) is a risk now named, with its check and its conversion.
+- **Section 4**: M-refuse requires the old versions to leave the file unchanged, not only to refuse it.
+
+Left open, to settle in C1 with tests: the exact `rust_decimal` behaviours this note relies on (the serialization layout, checked overflow, and rounding in division).
