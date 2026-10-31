@@ -843,6 +843,83 @@ fn projects_group_workspaces_and_grants_name_them() {
     assert!(audit.contains("project create travel") && audit.contains("workspace move old_places to travel.archive"));
 }
 
+/// Leaves a home as `workspace move old to travel.old` would leave it if the
+/// process stopped after `steps` of its steps: 1, the move recorded and the
+/// grants given on the new name too (on the disk); 2, kiva.conf renamed; 3,
+/// everything done but the record.
+fn move_stopped_after(dir: &TempDir, steps: u8) {
+    let inst = instance(dir);
+    let mut users = kivadb::auth::list_users(&inst.system).unwrap();
+    users.retain(|u| u.grants.contains_key("old"));
+    let names: Vec<String> = users.iter().map(|u| u.name.clone()).collect();
+    let record = serde_json::json!({ "from": "old", "to": "travel.old", "doubled": names });
+    inst.system.put("moving:old", &kivadb::value::Value::Doc(record), 0, false).unwrap();
+    for u in &mut users {
+        let p = u.grants["old"];
+        u.grants.insert("travel.old".into(), p);
+        kivadb::auth::save_user(&inst.system, u).unwrap();
+    }
+    if steps >= 2 {
+        inst.cfg_mut().rename("workspaces", "old", "travel.old").unwrap();
+    }
+    if steps >= 3 {
+        for mut u in kivadb::auth::list_users(&inst.system).unwrap() {
+            u.grants.remove("old");
+            if u.default_workspace.as_deref() == Some("old") {
+                u.default_workspace = Some("travel.old".into());
+            }
+            kivadb::auth::save_user(&inst.system, &u).unwrap();
+        }
+    }
+    inst.shutdown();
+}
+
+#[test]
+fn a_workspace_move_stopped_at_any_step_is_finished_or_taken_back_at_the_next_start() {
+    for steps in 1..=3u8 {
+        let dir = TempDir::new(&format!("move_stopped_{steps}"));
+        {
+            let inst = instance(&dir);
+            let mut admin = Session::new(inst.clone(), true, None);
+            ok(&mut admin, "project create travel");
+            ok(&mut admin, "workspace create old");
+            ok(&mut admin, "workspace switch old");
+            ok(&mut admin, "set kept 1");
+            ok(&mut admin, r#"create user "app" identified by "pw" grant read on old default workspace old"#);
+            ok(&mut admin, r#"create user "other" identified by "pw" grant write on *.places"#);
+            drop(admin);
+            inst.shutdown();
+        }
+        move_stopped_after(&dir, steps);
+
+        let inst = instance(&dir);
+        let mut admin = Session::new(inst.clone(), true, None);
+        let users = ok(&mut admin, "users");
+        let list = ok(&mut admin, "workspace list");
+        let mut app = Session::new(inst.clone(), false, None);
+        ok(&mut app, "auth app pw");
+        if steps == 1 {
+            // kiva.conf still says `old`: the move is taken back, with no
+            // grant left on a name that is not a workspace.
+            assert!(users.contains("old=read (default: old)") && !users.contains("travel.old"), "{steps}: {users}");
+            assert!(list.contains(" old ") && !list.contains("travel.old"), "{steps}: {list}");
+            assert_eq!(ok(&mut app, "whoami"), "app (editor) @ workspace 'old'");
+        } else {
+            // kiva.conf says `travel.old`: the move is finished, the old name
+            // is gone from the accounts.
+            assert!(users.contains("travel.old=read (default: travel.old)"), "{steps}: {users}");
+            assert!(!users.contains(" old=") && !users.contains("|old="), "{steps}: {users}");
+            assert!(list.contains("travel.old") && !list.contains(" old "), "{steps}: {list}");
+            assert_eq!(ok(&mut app, "whoami"), "app (editor) @ workspace 'travel.old'");
+        }
+        assert_eq!(ok(&mut app, "get kept"), "kept: 1 [number]");
+        // Nobody else gained anything, and the record is gone.
+        assert!(users.contains("*.places=write"), "{steps}: {users}");
+        assert!(!users.lines().any(|l| l.contains("other") && l.contains("old")), "{steps}: {users}");
+        assert!(inst.system.get("moving:old").unwrap().is_none(), "{steps}");
+    }
+}
+
 #[test]
 fn accounts_from_before_2_0_keep_their_personal_workspace() {
     let dir = TempDir::new("model_migration");

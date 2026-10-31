@@ -5,25 +5,38 @@
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Replaces `path` with `bytes` whole or not at all: they are written to
-/// `<path>.tmp`, flushed to the disk, then renamed over `path`. A crash or a
-/// full disk leaves the previous file as it was.
+/// Replaces `path` with `bytes` whole or not at all: they are written to a
+/// temporary file next to it, flushed to the disk, then renamed over `path`.
+/// A crash or a full disk leaves the previous file as it was.
+///
+/// The temporary file is named after the process (`<path>.<pid>.tmp`): the
+/// writers of one process are already one at a time (the configuration under
+/// its lock, a `.meta` under the lock of its workspace), and another process
+/// writing the same file never mixes its bytes with these.
+///
+/// On Linux and macOS the folder is synced after the rename, so that the new
+/// name itself survives a power cut. Windows offers no way to do that from the
+/// standard library: NTFS records the rename in its journal, which reaches
+/// the disk within seconds, but a power cut before then may bring back the
+/// previous file, whole.
 pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp);
     let written = std::fs::File::create(&tmp).and_then(|mut f| {
         f.write_all(bytes)?;
         f.sync_all()
     });
-    match written.and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    #[cfg(unix)]
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 pub fn now_secs() -> i64 {
@@ -414,7 +427,8 @@ mod tests {
         write_atomic(&path, b"first").unwrap();
         write_atomic(&path, b"second, longer").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");
-        assert!(!dir.join("kiva.conf.tmp").exists());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, [std::ffi::OsString::from("kiva.conf")], "no temporary file left");
         // A write that cannot happen leaves the file as it was.
         assert!(write_atomic(&dir.join("missing").join("x"), b"y").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"second, longer");

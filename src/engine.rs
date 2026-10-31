@@ -2460,6 +2460,13 @@ impl Engine {
         })
     }
 
+    /// Puts every write made so far on the disk, whatever `storage.sync_writes`
+    /// says: for a write that something written elsewhere next depends on.
+    pub fn sync(&self) -> Result<()> {
+        self.lock().file.sync_data()?;
+        Ok(())
+    }
+
     /// Turns `storage.sync_writes` on or off; it applies to the next write.
     pub fn set_sync_writes(&self, on: bool) {
         self.sync_writes.store(on, Ordering::Relaxed);

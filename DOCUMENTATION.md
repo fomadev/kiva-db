@@ -2451,6 +2451,7 @@ Workspace 'places_travel' is now 'travel.places'. Its files did not move, and it
 * It needs the admin role, and is refused while a session is in the workspace (`workspace 'places_travel' is in use`), as for the one you are in: run it when the applications are stopped, then give them the new name.
 * Applications that named the old workspace (`?workspace=`, `SELECT`, `kivadb -w`) must use the new name.
 * Replicas are disconnected and copy the master again, under the new names.
+* If KivaDB stops in the middle of a move (a crash, a power cut), the next start finishes it or takes it back, whichever `kiva.conf` says, and writes a line in the log: `[WARN] the move of workspace 'places_travel' to 'travel.places', stopped in the middle, was finished.` The workspace is reachable under one name, by the users who reached it before.
 
 ---
 
