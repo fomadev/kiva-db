@@ -31,6 +31,14 @@ pub const KNOWN: &[(&str, &str, &str, &str)] = &[
         "local",
         "Time zone dates are shown and read in: local (the machine's), UTC, a name such as Africa/Kinshasa, or +01:00",
     ),
+    ("time", "date_format", "iso", "How the shell writes and reads dates: iso (2026-10-27) or a format such as DD-MM-YYYY"),
+    ("time", "time_format", "iso", "How the shell writes and reads times: iso (14:30:00) or a format such as HH:mm"),
+    (
+        "time",
+        "datetime_format",
+        "iso",
+        "How the shell writes and reads datetimes: iso (2026-10-27 14:30:00 +01:00) or a format such as DD/MM/YYYY HH:mm",
+    ),
     ("server", "threads", "8", "Commands executed in parallel"),
     ("server", "max_clients", "1000", "Maximum simultaneous connections"),
     ("http", "enabled", "true", "Expose the REST API when serving"),
@@ -141,6 +149,10 @@ fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         "role" => matches!(value, "master" | "replica" | "slave"),
         "sync_mode" => matches!(value, "async" | "sync"),
         "zone" => return crate::time::Zone::parse(value).map(|_| ()),
+        "date_format" | "time_format" | "datetime_format" => {
+            let kind = crate::time::FormatKind::ALL.into_iter().find(|k| k.config_key() == key).expect("a format key");
+            return crate::time::parse_format(kind, value).map(|_| ());
+        }
         _ => true,
     };
     if ok {

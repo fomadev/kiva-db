@@ -34,6 +34,7 @@ impl Session {
             }
             "project" => self.cmd_project(a, out),
             "timezone" => self.cmd_timezone(a, out),
+            "format" => self.cmd_format(a, out),
             "users" => self.cmd_users(out),
             "create" => self.cmd_create(a, out),
             "tune" => self.cmd_tune(a, out),
@@ -736,7 +737,8 @@ impl Session {
     fn cmd_modify(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str =
             "Usage: modify user \"<name>\" password \"<new>\" | modify user \"<name>\" role \"<role>\" | \
-                             modify user \"<name>\" default workspace <name>|none | modify user \"<name>\" timezone <zone>|none";
+                             modify user \"<name>\" default workspace <name>|none | modify user \"<name>\" timezone <zone>|none \
+                             | modify user \"<name>\" date|time|datetime format \"<format>\"|iso|none";
         let mut c = Cur::new(a);
         if !c.eat("user") {
             return Err(USAGE.into());
@@ -783,6 +785,32 @@ impl Session {
                 None => format!("'{name}' now uses the server's time zone, from the next login."),
             });
             user.timezone = zone;
+            auth::save_user(&self.inst.system, &user)?;
+        } else if let Some(kind) = c.peek().and_then(|t| crate::time::FormatKind::parse(&t.text)) {
+            c.next();
+            if !c.eat("format") {
+                return Err(USAGE.into());
+            }
+            let t = word(c.next(), "a format such as \"DD-MM-YYYY\", iso or none")?;
+            let format = if t.eq_ignore_ascii_case("none") {
+                None
+            } else {
+                crate::time::parse_format(kind, &t)?;
+                Some(if t.eq_ignore_ascii_case("iso") { "iso".to_string() } else { t })
+            };
+            c.finish(USAGE)?;
+            if !is_admin && name != self.user_name() {
+                return Err("permission denied: you can only change your own formats.".into());
+            }
+            let k = kind.name();
+            out.say(match &format {
+                Some(f) => format!("The {k} format of '{name}' set to {f}: it applies from the next login."),
+                None => format!("'{name}' now uses the server's {k} format, from the next login."),
+            });
+            match format {
+                Some(f) => user.formats.insert(k.to_string(), f),
+                None => user.formats.remove(k),
+            };
             auth::save_user(&self.inst.system, &user)?;
         } else if c.eat("default") {
             if !c.eat("workspace") {
@@ -1004,6 +1032,74 @@ impl Session {
         } else {
             Err(USAGE.into())
         }
+    }
+
+    /// `format` shows the formats dates are written and read in;
+    /// `format date "DD-MM-YYYY"` (or `iso`) changes one for this session,
+    /// `format date default` goes back to the user's, else the server's;
+    /// `format iso` and `format default` do it for the three at once.
+    fn cmd_format(&mut self, a: &[Token], out: &mut Out) -> R {
+        use crate::time::FormatKind;
+        const USAGE: &str = "Usage: format [iso | default | date|time|datetime \"<format>\"|iso|default]   \
+                             (formats: DD-MM-YYYY, MM/DD/YYYY, HH:mm, DD/MM/YYYY HH:mm:ss XXX...)";
+        let mut c = Cur::new(a);
+        let account = || {
+            let user = self.user.as_ref().map(|u| u.name.clone());
+            user.and_then(|n| auth::get_user(&self.inst.system, &n).ok().flatten())
+        };
+        // The account's format of a kind, if it sets one.
+        let of_account = |user: &Option<auth::User>, kind: FormatKind| {
+            let text = user.as_ref()?.formats.get(kind.name())?;
+            crate::time::parse_format(kind, text).ok().map(|p| (p, "the account"))
+        };
+        // All three when asked; after a change, the ones changed.
+        let mut shown = FormatKind::ALL.to_vec();
+        if let Some(t) = c.next() {
+            let all = FormatKind::parse(&t.text).is_none();
+            let kinds: Vec<FormatKind> = match FormatKind::parse(&t.text) {
+                Some(kind) => vec![kind],
+                None => {
+                    c.finish(USAGE)?;
+                    FormatKind::ALL.to_vec()
+                }
+            };
+            let value = if kinds.len() == 1 { word(c.next(), "a format, iso or default")? } else { t.text.clone() };
+            c.finish(USAGE)?;
+            let user = account();
+            shown = kinds.clone();
+            for kind in kinds {
+                if value.eq_ignore_ascii_case("default") {
+                    match of_account(&user, kind) {
+                        Some(p) => self.formats.insert(kind, p),
+                        None => self.formats.remove(&kind),
+                    };
+                } else if value.eq_ignore_ascii_case("iso") {
+                    self.formats.insert(kind, (None, "this session"));
+                } else if all {
+                    return Err(USAGE.into());
+                } else {
+                    self.formats.insert(kind, (crate::time::parse_format(kind, &value)?, "this session"));
+                }
+            }
+            self.use_zone();
+        }
+        let now = crate::time::now();
+        let examples = [
+            crate::time::shown_date(crate::time::today()),
+            crate::time::shown_time(crate::time::current_time()),
+            crate::time::shown_instant(now),
+        ];
+        for (kind, example) in FormatKind::ALL.into_iter().zip(examples).filter(|(k, _)| shown.contains(k)) {
+            let (text, from) = match self.formats.get(&kind) {
+                Some((p, from)) => (p.as_ref().map_or("iso", |p| p.text()).to_string(), from.to_string()),
+                None => (
+                    self.inst.format(kind).map_or("iso".to_string(), |p| p.text().to_string()),
+                    format!("the server's time.{}", kind.config_key()),
+                ),
+            };
+            out.say(format!("{:<9} {text} (from {from}), now: {example}", format!("{}:", kind.name())));
+        }
+        Ok(())
     }
 
     /// `timezone` shows the zone dates are shown and read in; `timezone <name>`

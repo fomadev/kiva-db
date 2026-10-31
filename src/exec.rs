@@ -275,13 +275,13 @@ pub(crate) fn parse_value(t: &Token, forced: Option<Type>, key: &str) -> Result<
     }
 }
 
-/// The text of a `date`, `datetime` or `time`; a datetime without a zone is a
-/// wall clock of the session's zone.
+/// The text of a `date`, `datetime` or `time`, in the session's format or in
+/// ISO; a datetime without a zone is a wall clock of the session's zone.
 fn temporal_literal(ty: Type, text: &str) -> Result<Value, String> {
     match ty {
-        Type::Date => time::parse_date(text).map(Value::Date),
-        Type::Time => time::parse_time(text).map(Value::Time),
-        _ => time::parse_datetime(text, &time::zone()).map(Value::DateTime),
+        Type::Date => time::read_date(text).map(Value::Date),
+        Type::Time => time::read_time(text).map(Value::Time),
+        _ => time::read_datetime(text, &time::zone()).map(Value::DateTime),
     }
 }
 
@@ -1014,6 +1014,7 @@ const HELP: &str = r#"
   create user "<n>" identified by "<p>" [role admin|editor|viewer]
   modify user "<n>" password "<p>" | modify user "<n>" role "<r>"
   drop user "<n>" | users | whoami | auth <user> <password>
+  timezone [<zone>|default] | format [date|time|datetime "<format>"|iso|default]
   grant read|write on all|workspace "<w>" to "<n>"
   revoke read|write [on all|workspace "<w>"] from "<n>"
   audit last <N> | audit since "<YYYY-MM-DD>" | audit failed-logins
@@ -2327,7 +2328,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         // Compacting only rewrites the workspace's file: allowed to the project's managers.
         "compact" => Need::Owner,
         // Changing one's own password needs no workspace; the rest is checked inside.
-        "whoami" | "modify" | "timezone" => Need::Login,
+        "whoami" | "modify" | "timezone" | "format" => Need::Login,
         "project" if sub("create") || sub("remove") => Need::Admin,
         "project" => Need::Login,
         // Creating is checked against the project: its managers may.

@@ -78,6 +78,8 @@ pub struct User {
     pub default_workspace: Option<String>,
     /// The time zone dates are shown and read in for this user (`Africa/Kinshasa`).
     pub timezone: Option<String>,
+    /// The date formats of this user, by kind (`date` -> `DD-MM-YYYY`).
+    pub formats: BTreeMap<String, String>,
     pub created: i64,
     salt: Vec<u8>,
     hash: Vec<u8>,
@@ -110,6 +112,7 @@ impl User {
             grants: BTreeMap::new(),
             default_workspace: None,
             timezone: None,
+            formats: BTreeMap::new(),
             created: now_secs(),
             salt,
             hash,
@@ -182,7 +185,7 @@ impl User {
     fn to_json(&self) -> Json {
         let grants: serde_json::Map<String, Json> =
             self.grants.iter().map(|(k, v)| (k.clone(), Json::String(v.name().into()))).collect();
-        json!({
+        let mut j = json!({
             "salt": hex_encode(&self.salt),
             "hash": hex_encode(&self.hash),
             "iterations": self.iterations,
@@ -192,7 +195,12 @@ impl User {
             "timezone": self.timezone,
             "created": self.created,
             "model": MODEL,
-        })
+        });
+        // Only when set: an account without formats stays as 2.0 wrote it.
+        if !self.formats.is_empty() {
+            j["formats"] = json!(self.formats);
+        }
+        j
     }
 
     fn from_json(name: &str, j: &Json) -> Option<User> {
@@ -213,6 +221,10 @@ impl User {
             grants,
             default_workspace: j["default_workspace"].as_str().map(str::to_string),
             timezone: j["timezone"].as_str().map(str::to_string),
+            formats: j["formats"]
+                .as_object()
+                .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+                .unwrap_or_default(),
             created: j["created"].as_i64().unwrap_or(0),
             salt: hex_decode(j["salt"].as_str()?)?,
             hash: hex_decode(j["hash"].as_str()?)?,
