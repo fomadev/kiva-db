@@ -17,13 +17,14 @@ use crate::jsonpath;
 use crate::query::{Expr, Query};
 use crate::schema::{Moment, Schema};
 use crate::util::{glob_match, glob_prefix, now_ms, now_secs, random_u64};
-use crate::value::{Type, Value};
+use crate::value::{DocEnc, Type, Value};
 pub use crate::vector::AutoTune;
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
 
 mod ordering;
 use serde_json::Value as Json;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -67,6 +68,10 @@ impl Entry {
         self.flags & FLAG_MSGPACK != 0
     }
 
+    pub fn doc_enc(&self) -> DocEnc {
+        DocEnc::from_flags(self.flags)
+    }
+
     pub fn compression(&self) -> Compression {
         Compression::from_flag(self.flags & FLAG_COMP_MASK)
     }
@@ -80,7 +85,7 @@ pub enum Op {
         ty: Type,
         /// Canonical (uncompressed) payload.
         raw: Vec<u8>,
-        msgpack: bool,
+        enc: DocEnc,
         timestamp: i64,
         expires_at: i64,
         created: bool,
@@ -891,11 +896,9 @@ const PREFILTER_RATIO: usize = 10;
 /// the documents' full vectors then put in their true order.
 const RERANK: usize = 2;
 
-fn as_doc(v: &Value) -> Option<&Json> {
-    match v {
-        Value::Doc(j) => Some(j),
-        _ => None,
-    }
+/// A document as indexes and vectors read it: a typed one in plain JSON.
+fn as_doc(v: &Value) -> Option<Cow<'_, Json>> {
+    v.json_doc()
 }
 
 fn pattern_covers(index_pattern: &str, query_pattern: &str) -> bool {
@@ -1190,8 +1193,10 @@ pub fn unique_conflicts(path: &Path, keys: Option<&Keys>) -> Result<Vec<String>>
             continue;
         }
         let Ok((_, stored)) = crypt::open_record(keys, &rec) else { continue };
-        let Ok(Value::Doc(doc)) =
-            compress::unpack(&stored, e.compression()).and_then(|raw| Value::decode(e.ty, &raw, e.is_msgpack()))
+        let Some(doc) = compress::unpack(&stored, e.compression())
+            .and_then(|raw| Value::decode(e.ty, &raw, e.doc_enc()))
+            .ok()
+            .and_then(Value::into_json_doc)
         else {
             continue;
         };
@@ -1389,7 +1394,10 @@ impl Inner {
 
     fn read_value(&mut self, key: &str, e: &Entry) -> Result<Value> {
         let raw = self.read_raw(key, e)?;
-        Value::decode(e.ty, &raw, e.is_msgpack())
+        Value::decode(e.ty, &raw, e.doc_enc()).map_err(|err| match err {
+            KivaError::Corrupted(why) => KivaError::Corrupted(format!("the record of '{key}': {why}")),
+            other => other,
+        })
     }
 
     /// Encodes a record, encrypted when this engine has a key.
@@ -1431,7 +1439,7 @@ impl Inner {
             if index.memory_bytes() > budget {
                 return false;
             }
-            if let Ok(Value::Doc(doc)) = self.read_value(&k, &e) {
+            if let Some(doc) = self.read_value(&k, &e).ok().and_then(Value::into_json_doc) {
                 index.update(&k, Some(&doc));
             }
         }
@@ -1461,10 +1469,8 @@ impl Inner {
             .map(|(k, e)| (k.clone(), e.clone()))
             .collect();
         for (k, e) in written {
-            match self.read_value(&k, &e) {
-                Ok(Value::Doc(doc)) => self.vecs[i].update(&k, Some(&doc)),
-                _ => self.vecs[i].update(&k, None),
-            }
+            let doc = self.read_value(&k, &e).ok().and_then(Value::into_json_doc);
+            self.vecs[i].update(&k, doc.as_ref());
         }
     }
 
@@ -1658,7 +1664,7 @@ impl Inner {
                 key,
                 ty: 0,
                 raw: &[],
-                msgpack: false,
+                enc: DocEnc::Json,
                 timestamp,
                 expires_at: 0,
                 created: None,
@@ -1722,7 +1728,7 @@ impl Inner {
             key: String,
             ty: u8,
             raw: Vec<u8>,
-            msgpack: bool,
+            enc: DocEnc,
             timestamp: i64,
             expires_at: i64,
             end: u64,
@@ -1738,7 +1744,7 @@ impl Inner {
                     key: &o.key,
                     ty: o.ty,
                     raw: &o.raw,
-                    msgpack: o.msgpack,
+                    enc: o.enc,
                     timestamp: o.timestamp,
                     expires_at: o.expires_at,
                     created: None,
@@ -1770,7 +1776,7 @@ impl Inner {
                 key: String::from_utf8_lossy(&k).into_owned(),
                 ty: h.ty,
                 raw,
-                msgpack: h.flags & FLAG_MSGPACK != 0,
+                enc: DocEnc::from_flags(h.flags),
                 timestamp: h.timestamp,
                 expires_at: h.expires_at,
                 end: from + pos as u64,
@@ -1797,14 +1803,11 @@ impl Inner {
         if !self.schemas.iter().any(|(s, _)| glob_match(&s.pattern, key)) {
             return Ok(None);
         }
-        let mut doc = match value {
-            Value::Doc(d) => d.clone(),
-            _ => Json::Null,
-        };
+        let mut doc = value.json_doc().map(Cow::into_owned).unwrap_or(Json::Null);
         let mut failure = None;
         for (s, _) in self.schemas.iter().filter(|(s, _)| glob_match(&s.pattern, key)) {
             let res = match value {
-                Value::Doc(_) => s.conform(&mut doc, at),
+                Value::Doc(_) | Value::Typed(_) => s.conform(&mut doc, at),
                 other => Err(format!("a JSON object is expected, not a [{}]", other.ty().name())),
             };
             if let Err(e) = res {
@@ -1822,6 +1825,12 @@ impl Inner {
         }
         Ok(match value {
             Value::Doc(d) if *d != doc => Some(Value::Doc(doc)),
+            Value::Typed(d) if crate::doc::to_plain_json(d) != doc => {
+                return Err(KivaError::Schema(format!(
+                    "'{key}' not written: its schema fills in defaults, which a document holding decimal, date, \
+                     time or datetime values does not take yet: write them in the document"
+                )))
+            }
             _ => None,
         })
     }
@@ -1840,7 +1849,7 @@ impl Inner {
         let mut count = 0;
         for (k, e) in &keys {
             let why = match self.value_of(k, e) {
-                Ok(Value::Doc(d)) => schema.check(&d).err(),
+                Ok(v @ (Value::Doc(_) | Value::Typed(_))) => schema.check(&v.json_doc().unwrap_or_default()).err(),
                 Ok(other) => Some(format!("a [{}], not a JSON object", other.ty().name())),
                 Err(err) => Some(err.to_string()),
             };
@@ -1996,7 +2005,7 @@ impl Inner {
             .map(|(k, e)| (k.clone(), e.clone()))
             .collect();
         for (k, e) in keys {
-            if let Ok(Value::Doc(doc)) = self.read_value(&k, &e) {
+            if let Some(doc) = self.read_value(&k, &e).ok().and_then(Value::into_json_doc) {
                 self.sec[i].update(&k, Some(&doc));
             }
         }
@@ -2028,16 +2037,12 @@ fn build_put(
 ) -> Result<(Vec<u8>, Entry, Vec<u8>)> {
     validate_key(key)?;
     let ty = value.ty();
-    let msgpack = msgpack && ty.is_doc();
-    let raw = value.encode(msgpack)?;
+    let (raw, enc) = value.encode_stored(msgpack && ty.is_doc())?;
     if raw.len() > MAX_VALUE_LEN {
         return Err(KivaError::Invalid("value is larger than 256 MB".into()));
     }
     let (stored, cflag) = compress::pack(&raw, inner.compression);
-    let mut flags = cflag | extra_flags;
-    if msgpack {
-        flags |= FLAG_MSGPACK;
-    }
+    let flags = cflag | extra_flags | enc.flags();
     let rec = inner.encode(key, &stored, ty as u8, flags, timestamp, expires_at);
     let h = parse_header(&rec);
     let entry = Entry {
@@ -2638,8 +2643,9 @@ impl Engine {
             if let Some(v) = &filled {
                 value = v;
             }
-            inner.check_unique(&[(key, as_doc(value))])?;
-            inner.check_vector_room(inner.vector_growth(key, as_doc(value)))?;
+            let doc = as_doc(value);
+            inner.check_unique(&[(key, doc.as_deref())])?;
+            inner.check_vector_room(inner.vector_growth(key, doc.as_deref()))?;
         }
         let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
         self.after_write(&inner);
@@ -2675,8 +2681,9 @@ impl Engine {
         if let Some(v) = inner.conformed(key, &new, Moment::now())? {
             new = v;
         }
-        inner.check_unique(&[(key, as_doc(&new))])?;
-        inner.check_vector_room(inner.vector_growth(key, as_doc(&new)))?;
+        let doc = as_doc(&new);
+        inner.check_unique(&[(key, doc.as_deref())])?;
+        inner.check_vector_room(inner.vector_growth(key, doc.as_deref()))?;
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
@@ -2703,7 +2710,7 @@ impl Engine {
                 key,
                 ty: value.ty() as u8,
                 raw: &raw,
-                msgpack: entry.is_msgpack(),
+                enc: entry.doc_enc(),
                 timestamp,
                 expires_at,
                 created: Some(created),
@@ -2713,33 +2720,22 @@ impl Engine {
         }
         inner.seq += 1;
         entry.version = inner.seq;
-        let msgpack = entry.is_msgpack();
-        let doc = match value {
-            Value::Doc(j) => Some(j),
-            _ => None,
-        };
+        let enc = entry.doc_enc();
+        let doc = as_doc(value);
         let version = entry.version;
-        inner.idx_insert(key, entry, doc);
+        inner.idx_insert(key, entry, doc.as_deref());
         if inner.cache.is_pinned(key) {
             inner.cache.put(key, version, value, raw.len());
         }
         inner.dirty_ops += 1;
-        self.emit(&Op::Set { key: key.to_string(), ty: value.ty(), raw, msgpack, timestamp, expires_at, created });
+        self.emit(&Op::Set { key: key.to_string(), ty: value.ty(), raw, enc, timestamp, expires_at, created });
         Ok(created)
     }
 
     /// Applies a replicated write exactly as the primary recorded it.
-    pub fn put_raw(
-        &self,
-        key: &str,
-        ty: Type,
-        raw: &[u8],
-        msgpack: bool,
-        timestamp: i64,
-        expires_at: i64,
-    ) -> Result<()> {
-        let value = Value::decode(ty, raw, msgpack)?;
-        self.put_at(key, &value, expires_at, msgpack, timestamp, false).map(|_| ())
+    pub fn put_raw(&self, key: &str, ty: Type, raw: &[u8], enc: DocEnc, timestamp: i64, expires_at: i64) -> Result<()> {
+        let value = Value::decode(ty, raw, enc)?;
+        self.put_at(key, &value, expires_at, enc == DocEnc::MsgPack, timestamp, false).map(|_| ())
     }
 
     pub fn delete(&self, key: &str) -> Result<bool> {
@@ -2860,7 +2856,7 @@ impl Engine {
         }
         if inner.sec.iter().any(|s| s.unique) {
             // What each key holds once the whole batch is applied.
-            let mut last: Vec<(&str, Option<&Json>)> = Vec::new();
+            let mut last: Vec<(&str, Option<Cow<Json>>)> = Vec::new();
             let mut slot: HashMap<&str, usize> = HashMap::new();
             for op in &ops {
                 let (key, doc) = match op {
@@ -2875,6 +2871,7 @@ impl Engine {
                     }
                 }
             }
+            let last: Vec<(&str, Option<&Json>)> = last.iter().map(|(k, d)| (*k, d.as_deref())).collect();
             inner.check_unique(&last)?;
         }
 
@@ -2896,11 +2893,8 @@ impl Engine {
                         None => inner.live(&key, now).is_some(),
                     };
                     shadow.insert(key.clone(), true);
-                    vector_growth += inner.vector_growth(&key, as_doc(&value));
-                    let doc = match value {
-                        Value::Doc(j) => Some(j),
-                        _ => None,
-                    };
+                    let doc = value.into_json_doc();
+                    vector_growth += inner.vector_growth(&key, doc.as_ref());
                     staged.push(Staged::Put { key, ty: entry.ty, entry, raw, doc, created: !exists, rec_off: 0 });
                     recs.push(rec);
                 }
@@ -2956,7 +2950,7 @@ impl Engine {
                         key,
                         ty: *ty as u8,
                         raw,
-                        msgpack: entry.is_msgpack(),
+                        enc: entry.doc_enc(),
                         timestamp: entry.timestamp,
                         expires_at: entry.expires_at,
                         created: Some(*created),
@@ -2967,7 +2961,7 @@ impl Engine {
                         key,
                         ty: 0,
                         raw: &[],
-                        msgpack: false,
+                        enc: DocEnc::Json,
                         timestamp: ts,
                         expires_at: 0,
                         created: None,
@@ -2985,14 +2979,14 @@ impl Engine {
                 Staged::Put { key, mut entry, raw, doc, ty, created, rec_off } => {
                     entry.offset = base + rec_off as u64;
                     entry.version = seq;
-                    let (msgpack, timestamp, expires_at) = (entry.is_msgpack(), entry.timestamp, entry.expires_at);
+                    let (enc, timestamp, expires_at) = (entry.doc_enc(), entry.timestamp, entry.expires_at);
                     inner.idx_insert(&key, entry, doc.as_ref());
                     if inner.cache.is_pinned(&key) {
-                        if let Ok(v) = Value::decode(ty, &raw, msgpack) {
+                        if let Ok(v) = Value::decode(ty, &raw, enc) {
                             inner.cache.put(&key, seq, &v, raw.len());
                         }
                     }
-                    self.emit(&Op::Set { key, ty, raw, msgpack, timestamp, expires_at, created });
+                    self.emit(&Op::Set { key, ty, raw, enc, timestamp, expires_at, created });
                 }
                 Staged::Del { key } => {
                     inner.idx_remove(&key);
@@ -3033,7 +3027,7 @@ impl Engine {
                 key: "",
                 ty: 0,
                 raw: &[],
-                msgpack: false,
+                enc: DocEnc::Json,
                 timestamp: now_secs(),
                 expires_at: 0,
                 created: None,
@@ -3186,7 +3180,7 @@ impl Engine {
                 } else {
                     (stored, e.flags & FLAG_COMP_MASK)
                 };
-                let flags = (e.flags & FLAG_MSGPACK) | cflag;
+                let flags = (e.flags & (FLAG_MSGPACK | FLAG_KDOC)) | cflag;
                 let rec =
                     crypt::encode_record(keys.as_deref(), key, &stored2, e.ty as u8, flags, e.timestamp, e.expires_at);
                 let h = parse_header(&rec);
@@ -4186,7 +4180,7 @@ impl Engine {
                 let dims = inner.vecs[i].dims;
                 let step = (keys.len() / sample).max(1);
                 for (k, e) in keys.into_iter().step_by(step).take(sample) {
-                    if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                    if let Some(doc) = inner.value_of(&k, &e)?.into_json_doc() {
                         given.extend(vector::extract(&doc, &path).filter(|v| Some(v.len()) == dims));
                     }
                 }
@@ -4432,7 +4426,7 @@ impl Engine {
                     continue;
                 }
                 let Some(e) = inner.live(&key, now) else { continue };
-                let Value::Doc(doc) = inner.value_of(&key, &e)? else { continue };
+                let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
                 read += 1;
                 if !passes(&doc) {
                     continue;
@@ -4494,8 +4488,8 @@ impl Engine {
                         return true;
                     }
                     *read += 1;
-                    match inner.value_of(key, &e) {
-                        Ok(Value::Doc(d)) => {
+                    match inner.value_of(key, &e).map(Value::into_json_doc) {
+                        Ok(Some(d)) => {
                             let ok = rest.iter().all(|(p, c)| jsonpath::get(&d, p).is_some_and(|v| c.test(v)));
                             if ok {
                                 docs.insert(key.to_string(), d);
@@ -4525,7 +4519,7 @@ impl Engine {
                 // check every condition once more on what is returned.
                 if (quantized || !filter.is_empty()) && !docs.contains_key(&key) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let Value::Doc(d) = inner.value_of(&key, &e)? else { continue };
+                    let Some(d) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
                     read += 1;
                     docs.insert(key.clone(), d);
                 }
@@ -4565,7 +4559,7 @@ impl Engine {
                 let mut chosen = Vec::new();
                 for (key, score) in vector::top_k(scored, n, &query) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let Value::Doc(doc) = inner.value_of(&key, &e)? else { continue };
+                    let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
                     read += 1;
                     if passes(&doc) {
                         docs.insert(key.clone(), doc);
@@ -4590,7 +4584,7 @@ impl Engine {
             let examined = candidates.len();
             let mut scored = Vec::new();
             for (k, e) in candidates {
-                if let Value::Doc(doc) = inner.value_of(&k, &e)? {
+                if let Some(doc) = inner.value_of(&k, &e)?.into_json_doc() {
                     if !passes(&doc) {
                         continue;
                     }
@@ -4610,7 +4604,7 @@ impl Engine {
                 continue;
             }
             let Some(e) = inner.live(&key, now) else { continue };
-            if let Value::Doc(doc) = inner.value_of(&key, &e)? {
+            if let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() {
                 rows.push((key, score, doc));
             }
         }
@@ -5355,7 +5349,7 @@ impl Engine {
                 v
             }
         };
-        let Value::Doc(doc) = value else {
+        let Some(doc) = value.into_json_doc() else {
             return Ok(None);
         };
         // An index only narrows the reading: the whole condition decides.

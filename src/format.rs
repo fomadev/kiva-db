@@ -13,6 +13,11 @@
 //! damaged end of log and cutting them off. A file without them stays at
 //! format 1, readable by 1.x.
 //!
+//! Format 3 is raised the same way by the first document written in `KDOC`
+//! (`FLAG_KDOC`): one holding a `decimal`, `date`, `time` or `datetime`.
+//! KivaDB 2.0.0-rc.2 and 1.x then refuse the file at its header. A document
+//! of JSON types only is written as before, and leaves the format alone.
+//!
 //! Record (28-byte header + key + value), all integers little-endian:
 //! `crc32 u32 | k_size u16 | v_size u32 | type u8 | flags u8 | timestamp i64 | expires_at i64`
 //!
@@ -24,7 +29,7 @@ use crate::compress::Compression;
 
 pub const MAGIC: &[u8; 4] = b"KIVA";
 /// The newest format this build reads and writes.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 /// The format of KivaDB 1.x: what a file without the types of 2.0 keeps.
 pub const FORMAT_V1: u32 = 1;
 pub const FILE_HEADER_LEN: u64 = 16;
@@ -34,6 +39,9 @@ pub const FLAG_COMP_MASK: u8 = 0b0000_0011;
 pub const FLAG_MSGPACK: u8 = 0b0000_0100;
 /// Key and value are encrypted (AES-256-GCM); see [`crate::crypt`].
 pub const FLAG_ENCRYPTED: u8 = 0b0000_1000;
+/// The document is `KDOC` ([`crate::doc`]): it holds a `decimal`, `date`,
+/// `time` or `datetime`, which JSON cannot carry. Raises the file to format 3.
+pub const FLAG_KDOC: u8 = 0b0001_0000;
 /// Record belongs to an atomic batch; it only takes effect once the batch's
 /// final record (carrying `FLAG_TXN_COMMIT` as well) is present on disk.
 pub const FLAG_TXN: u8 = 0b0010_0000;
@@ -88,9 +96,11 @@ pub fn parse_file_header(h: &[u8]) -> std::result::Result<(u64, u32), String> {
     Ok((u64::from_le_bytes([h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]]), version))
 }
 
-/// The format a record of type `ty` needs.
-pub fn format_for_type(ty: u8) -> u32 {
-    if ty >= 8 {
+/// The format a record of type `ty` with `flags` needs.
+pub fn format_for_record(ty: u8, flags: u8) -> u32 {
+    if flags & FLAG_KDOC != 0 {
+        3
+    } else if ty >= 8 {
         2
     } else {
         FORMAT_V1
@@ -103,7 +113,7 @@ pub fn format_needed(buf: &[u8]) -> u32 {
     let mut need = FORMAT_V1;
     while buf.len() - pos >= REC_HEADER_LEN {
         let h = parse_header(&buf[pos..]);
-        need = need.max(format_for_type(h.ty));
+        need = need.max(format_for_record(h.ty, h.flags));
         pos += h.total_len() as usize;
     }
     need

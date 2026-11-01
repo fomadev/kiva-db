@@ -11,7 +11,7 @@ use crate::instance::{Instance, VERSION};
 use crate::proto::*;
 use crate::repl;
 use crate::session::{Need, Session};
-use crate::value::{Type, Value};
+use crate::value::{DocEnc, Type, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
@@ -254,7 +254,7 @@ fn binary_set(sess: &mut Session, payload: &[u8]) -> Result<()> {
     let ttl = r.u32()? as i64;
     let key = r.str16()?;
     validate_key_name(&key).map_err(KivaError::Invalid)?;
-    let value = Value::decode(ty, r.rest(), false)
+    let value = Value::decode(ty, r.rest(), DocEnc::Json)
         .map_err(|e| KivaError::Invalid(format!("value does not match its type: {e}")))?;
     let expires_at = crate::util::deadline_in(ttl);
     sess.kv_put(&key, value, expires_at, false)

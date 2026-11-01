@@ -403,7 +403,7 @@ fn replicated_writes_are_journaled_on_the_replica_with_its_own_cursors() {
     master.enable_changes(Settings::default()).unwrap();
     replica.enable_changes(Settings::default()).unwrap();
     master.put("a", &s("1"), 0, false).unwrap();
-    replica.put_raw("a", Type::String, b"1", false, 0, 0).unwrap();
+    replica.put_raw("a", Type::String, b"1", kivadb::value::DocEnc::Json, 0, 0).unwrap();
     assert_eq!(summary(&replica, ChangesFrom::Beginning), [row(1, "insert", "a")]);
     let cursor = master.read_changes(ChangesFrom::Now, 1, None, None).unwrap().cursor;
     let err = replica.read_changes(ChangesFrom::Cursor(cursor), 10, None, None).err().unwrap().to_string();

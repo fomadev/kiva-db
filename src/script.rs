@@ -73,6 +73,8 @@ fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
         Value::Bool(b) => LVal::Boolean(*b),
         Value::Null => LVal::Nil,
         Value::Doc(j) => json_to_lua(lua, j)?,
+        // Decimals, dates and times as their texts.
+        Value::Typed(d) => json_to_lua(lua, &crate::doc::to_plain_json(d))?,
         Value::Bytes(b) => LVal::String(lua.create_string(b)?),
         Value::Date(_) | Value::DateTime(_) | Value::Time(_) => {
             LVal::String(lua.create_string(v.to_json().as_str().unwrap_or(""))?)

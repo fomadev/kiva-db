@@ -15,6 +15,9 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 * Account creation dates (`users`) are shown in the server's time zone (`time.zone`, the machine's by default, as before), not always the machine's.
 * The `users` structured request answers `default_workspace` instead of `home`; `whoami` answers `workspace` and `access` as `null` for a session in no workspace.
 * **Replication:** a node of 2.x and a node of 1.x never follow each other. A 1.x replica of a 2.0 master stopped at the first date it received, after emptying its data for the snapshot; a 2.0 replica of a 1.x master received accounts it never migrated, which reached nothing on it. Both are now refused before the snapshot, the replica keeping its data, and `replica status` says which node to upgrade. Upgrade a group as a whole ([33.5](DOCUMENTATION.md#335-a-replication-group)).
+* The engine can now keep documents holding `decimal`, `date`, `time` and `datetime` values as such, in a binary encoding of its own (`KDOC`). The first such document written to a workspace raises its data file to storage format 3, which 2.0.0-rc.2 and 1.x refuse at opening (`unsupported storage format 3`) without changing it; a workspace without one keeps its format, and documents of JSON types stay in JSON or MessagePack as before. No command writes such values yet: the typed literals and extended JSON that will do it come in later candidates ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md)).
+* **Replication:** a 2.0.0 master refuses a replica of 2.0.0-rc.2 or earlier before the snapshot, the replica keeping its data, since it could not read those documents. Upgrade the replicas first, then the master.
+* A backup that holds a data file of storage format 3 says so in its manifest (backup format 2): an older KivaDB refuses it before restoring anything. `restore --check` reads every such document.
 * How to upgrade, step by step, and how to go back: [Chapter 33](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20) of the manual.
 
 ### Added
@@ -61,6 +64,7 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 ### Known limits
 
+* Documents holding `decimal`, `date`, `time` or `datetime` values are read by queries, indexes and programs in plain JSON (those values as texts) until queries know them; `json set`, `json incr`, `json del`, `json append`, `json insert` and the Redis `JSON.*` commands that change a document refuse such a document rather than turn its values into texts, and a schema with defaults refuses it. Writing the whole document again works ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md)).
 * Replication does not cross major versions: a 2.0 replica refuses a 1.x master, and the other way round. Upgrade the master first ([Chapter 33](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20)).
 * Going back to 1.x: 1.7.1 refuses a workspace that received a `date`, `datetime` or `time` (storage format 2), which then comes back only from a backup made before the upgrade; it reads the accounts of 2.0 with the rules of 1.x ([33.7](DOCUMENTATION.md#337-going-back-to-1x)).
 * The change journal does not record expirations, each node keeps its own journal and cursors, and a restored backup starts a new one ([22.5](DOCUMENTATION.md#225-the-change-journal-changes-kept-read-again-from-a-cursor)).

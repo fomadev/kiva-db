@@ -683,8 +683,8 @@ fn project(doc: &Json, fields: &[String]) -> Json {
 }
 
 fn render_row(key: &str, value: &Value, fields: &Option<Vec<String>>) -> String {
-    match (fields, value) {
-        (Some(f), Value::Doc(doc)) => format!("{key}: {}", project(doc, f)),
+    match (fields, value.json_doc()) {
+        (Some(f), Some(doc)) => format!("{key}: {}", project(&doc, f)),
         _ => format!("{key}: {} [{}]", value.display(), value.ty().name()),
     }
 }
@@ -1293,7 +1293,7 @@ impl Session {
             }
             let Some((v, _)) = self.kv_get(key)? else { continue };
             let doc = match &v {
-                Value::Doc(j) => j.clone(),
+                Value::Doc(_) | Value::Typed(_) => v.json_doc().map(|j| j.into_owned()).unwrap_or_default(),
                 // A string holding JSON text can be navigated too.
                 Value::Str(s) => match serde_json::from_str::<Json>(s) {
                     Ok(j) if j.is_object() || j.is_array() => j,
@@ -2083,6 +2083,9 @@ impl Session {
         // changing another field of the same document at the same time
         // cannot lose this change, nor this one lose theirs.
         let done = self.kv_modify(&key, |value| {
+            if let Value::Typed(_) = value {
+                return Err(crate::value::typed_unchangeable(&key));
+            }
             let mut doc = doc_of(&key, value)?;
             let msg = match change {
                 Change::Set(v) => {
@@ -2145,6 +2148,12 @@ impl Session {
                 "TypeError: only arrays and objects can be converted; '{key}' is a [{}].",
                 value.ty().name()
             ));
+        }
+        if let Value::Typed(_) = value {
+            out.say(format!(
+                "OK: {key} holds decimal, date, time or datetime values: it stays in KDOC, the binary encoding that keeps them."
+            ));
+            return Ok(());
         }
         let name = if msgpack { "MessagePack" } else { "JSON" };
         if meta.msgpack == msgpack {
@@ -2384,6 +2393,7 @@ fn redact(cmd: &str, t: &[Token], line: &str) -> String {
 fn doc_of(key: &str, value: Value) -> crate::error::Result<Json> {
     match value {
         Value::Doc(d) => Ok(d),
+        Value::Typed(d) => Ok(crate::doc::to_plain_json(&d)),
         other => {
             Err(KivaError::Invalid(format!("TypeError: '{key}' is a [{}], not an object or array.", other.ty().name())))
         }

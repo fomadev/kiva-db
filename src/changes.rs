@@ -24,6 +24,7 @@
 use crate::crypt::{Domain, Keys};
 use crate::error::{KivaError, Result};
 use crate::util::glob_match;
+use crate::value::DocEnc;
 use serde_json::{json, Value as Json};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -55,6 +56,8 @@ const F_VALUE: u8 = 4;
 const F_CREATED: u8 = 8;
 /// Rebuilt from the data file after a crash: whether the key was created is not known.
 const F_REBUILT: u8 = 16;
+/// The value is a `KDOC` document (`crate::doc`).
+const F_KDOC: u8 = 32;
 
 /// How long and how much the journal keeps, and whether it keeps the values.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,7 +105,7 @@ pub struct NewChange<'a> {
     pub key: &'a str,
     pub ty: u8,
     pub raw: &'a [u8],
-    pub msgpack: bool,
+    pub enc: DocEnc,
     pub timestamp: i64,
     pub expires_at: i64,
     /// `None` when not known (rebuilt after a crash).
@@ -119,7 +122,7 @@ pub struct Change {
     pub ty: u8,
     /// The value as stored (canonical bytes), when the journal keeps values.
     pub value: Option<Vec<u8>>,
-    pub msgpack: bool,
+    pub enc: DocEnc,
     pub timestamp: i64,
     pub expires_at: i64,
     pub created: Option<bool>,
@@ -322,10 +325,11 @@ impl Journal {
         let mut offsets = Vec::with_capacity(changes.len());
         for (i, c) in changes.iter().enumerate() {
             let seq = first + i as u64;
-            let mut flags = 0;
-            if c.msgpack {
-                flags |= F_MSGPACK;
-            }
+            let mut flags = match c.enc {
+                DocEnc::Json => 0,
+                DocEnc::MsgPack => F_MSGPACK,
+                DocEnc::Kdoc => F_KDOC,
+            };
             match c.created {
                 Some(true) => flags |= F_CREATED,
                 Some(false) => {}
@@ -658,7 +662,7 @@ pub fn to_json(c: &Change, cursor: &str) -> Json {
     };
     let ty = crate::value::Type::from_u8(c.ty).filter(|_| c.kind == ChangeKind::Set);
     let value = match (&c.value, ty) {
-        (Some(raw), Some(ty)) => match crate::value::Value::decode(ty, raw, c.msgpack) {
+        (Some(raw), Some(ty)) => match crate::value::Value::decode(ty, raw, c.enc) {
             Ok(crate::value::Value::Bytes(b)) => Json::String(crate::util::b64_encode(&b)),
             Ok(v) => v.to_json(),
             Err(_) => Json::Null,
@@ -829,7 +833,13 @@ impl Parsed {
             key: self.key,
             ty: self.ty,
             value: (self.flags & F_VALUE != 0).then_some(self.value),
-            msgpack: self.flags & F_MSGPACK != 0,
+            enc: if self.flags & F_KDOC != 0 {
+                DocEnc::Kdoc
+            } else if self.flags & F_MSGPACK != 0 {
+                DocEnc::MsgPack
+            } else {
+                DocEnc::Json
+            },
             timestamp: self.timestamp,
             expires_at: self.expires_at,
             created: if self.flags & F_REBUILT != 0 { None } else { Some(self.flags & F_CREATED != 0) },
@@ -849,7 +859,7 @@ mod tests {
             key,
             ty: 1,
             raw,
-            msgpack: false,
+            enc: DocEnc::Json,
             timestamp: 100,
             expires_at: 0,
             created: Some(true),

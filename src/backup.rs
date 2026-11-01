@@ -25,7 +25,9 @@
 
 use crate::engine::Engine;
 use crate::error::{KivaError, Result};
-use crate::format::{parse_file_header, parse_header, FILE_HEADER_LEN, REC_HEADER_LEN};
+use crate::format::{
+    parse_file_header, parse_header, FILE_HEADER_LEN, FLAG_ENCRYPTED, FLAG_KDOC, FLAG_TOMBSTONE, REC_HEADER_LEN,
+};
 use crate::instance::{Instance, VERSION};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -37,6 +39,9 @@ use std::path::{Component, Path, PathBuf};
 
 const ROOT: &str = "kivadb-backup";
 const FORMAT: u64 = 1;
+/// The manifest format of an archive holding a data file of storage format 3:
+/// an older KivaDB refuses it before restoring anything.
+const FORMAT_NATIVE: u64 = 2;
 
 /// What to save.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,11 +111,13 @@ struct Hashing<T> {
     inner: T,
     hash: Sha256,
     count: u64,
+    /// The first bytes read: a data file's header.
+    head: Vec<u8>,
 }
 
 impl<T> Hashing<T> {
     fn new(inner: T) -> Self {
-        Hashing { inner, hash: Sha256::new(), count: 0 }
+        Hashing { inner, hash: Sha256::new(), count: 0, head: Vec::new() }
     }
 }
 
@@ -130,6 +137,8 @@ impl<T: Write> Write for Hashing<T> {
 impl<T: Read> Read for Hashing<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
+        let want = (FILE_HEADER_LEN as usize).saturating_sub(self.head.len()).min(n);
+        self.head.extend_from_slice(&buf[..want]);
         self.hash.update(&buf[..n]);
         self.count += n as u64;
         Ok(n)
@@ -139,10 +148,13 @@ impl<T: Read> Read for Hashing<T> {
 struct Writer<W: Write> {
     tar: tar::Builder<W>,
     files: Vec<Json>,
+    /// The newest storage format among the data files saved.
+    storage_format: u32,
 }
 
 impl<W: Write> Writer<W> {
-    fn add(&mut self, name: &str, len: u64, data: impl Read) -> Result<()> {
+    /// Saves a file; returns its first bytes.
+    fn add(&mut self, name: &str, len: u64, data: impl Read) -> Result<Vec<u8>> {
         let mut header = tar::Header::new_gnu();
         header.set_size(len);
         header.set_mode(0o600);
@@ -154,17 +166,20 @@ impl<W: Write> Writer<W> {
             return Err(KivaError::Other(format!("{name} changed size while it was saved")));
         }
         self.files.push(json!({ "path": name, "size": len, "sha256": hex(&reader.hash.finalize()) }));
-        Ok(())
+        Ok(reader.head)
     }
 
     fn add_bytes(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
-        self.add(name, bytes.len() as u64, bytes)
+        self.add(name, bytes.len() as u64, bytes).map(|_| ())
     }
 
     /// The data file of an engine as it is now, and its index definitions.
     fn add_engine(&mut self, dir: &str, file: &str, engine: &Engine) -> Result<()> {
         let snap = engine.backup_snapshot()?;
-        self.add(&format!("{dir}/{file}"), snap.len, &snap.file)?;
+        let head = self.add(&format!("{dir}/{file}"), snap.len, &snap.file)?;
+        if let Ok((_, format)) = parse_file_header(&head) {
+            self.storage_format = self.storage_format.max(format);
+        }
         if let Some(meta) = &snap.meta {
             self.add_bytes(&format!("{dir}/{file}.meta"), meta)?;
         }
@@ -208,7 +223,7 @@ pub fn backup(inst: &Instance, scope: &Scope, output: &Path) -> Result<BackupRep
 fn write_archive(inst: &Instance, scope: &Scope, path: &Path) -> Result<(String, Vec<String>, usize)> {
     let file = Hashing::new(File::create(path)?);
     let gz = GzEncoder::new(file, flate2::Compression::default());
-    let mut w = Writer { tar: tar::Builder::new(gz), files: Vec::new() };
+    let mut w = Writer { tar: tar::Builder::new(gz), files: Vec::new(), storage_format: 0 };
     let names: Vec<String> = match scope {
         Scope::Home => {
             let cfg = inst.cfg();
@@ -241,7 +256,7 @@ fn write_archive(inst: &Instance, scope: &Scope, path: &Path) -> Result<(String,
     }
     let count = w.files.len();
     let manifest = json!({
-        "format": FORMAT,
+        "format": if w.storage_format >= 3 { FORMAT_NATIVE } else { FORMAT },
         "kivadb": VERSION,
         "created": crate::util::now_secs(),
         "scope": if *scope == Scope::Home { "home" } else { "workspace" },
@@ -321,6 +336,14 @@ pub fn check_log(path: &Path) -> std::result::Result<u64, String> {
         if crc32fast::hash(&data[pos + 4..end]) != h.crc {
             return Err(format!("checksum mismatch in the record at byte {pos}"));
         }
+        // A KDOC document is read whole (an encrypted one needs its key: its checksum is checked).
+        if h.flags & FLAG_KDOC != 0 && h.flags & (FLAG_ENCRYPTED | FLAG_TOMBSTONE) == 0 {
+            let stored = &data[pos + REC_HEADER_LEN + h.k_size as usize..end];
+            crate::compress::unpack(stored, h.compression())
+                .map_err(|e| e.to_string())
+                .and_then(|raw| crate::doc::decode(&raw))
+                .map_err(|e| format!("the document in the record at byte {pos} cannot be read: {e}"))?;
+        }
         records += 1;
         pos = end;
     }
@@ -383,7 +406,7 @@ pub fn check(archive: &Path, near: &Path) -> Result<Checked> {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .ok_or_else(|| bad(archive, "it has no readable manifest.json: is it a KivaDB backup?"))?;
-    if manifest["format"].as_u64() != Some(FORMAT) {
+    if !manifest["format"].as_u64().is_some_and(|f| (FORMAT..=FORMAT_NATIVE).contains(&f)) {
         return Err(bad(archive, format!("backup format {} is not supported by this KivaDB", manifest["format"])));
     }
     let listed = manifest["files"].as_array().cloned().unwrap_or_default();

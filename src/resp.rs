@@ -498,7 +498,7 @@ fn bytes_of(v: &Value) -> Option<Vec<u8>> {
         Value::Bool(b) => b.to_string().into_bytes(),
         Value::Null => Vec::new(),
         Value::Bytes(b) => b.clone(),
-        Value::Doc(_) => return None,
+        Value::Doc(_) | Value::Typed(_) => return None,
         // ISO 8601; a datetime in UTC: 2026-10-27T13:30:00.000Z.
         Value::Date(_) | Value::DateTime(_) | Value::Time(_) => v.encode(false).ok()?,
     })
