@@ -694,6 +694,19 @@ fn numbers_are_compared_and_added_exactly() {
     ok(&mut s, r#"schema set m: {"v": {"type": "integer", "max": 9007199254740992}}"#);
     ok(&mut s, r#"set m:1 {"v": 9007199254740992}"#);
     assert!(fails(&mut s, r#"set m:2 {"v": 9007199254740993}"#).contains("above the maximum"));
+
+    // A float written in a document is the one its text names, to the last bit,
+    // and an equality finds it again.
+    for (i, f) in ["931512115818215.9", "-4.5128006423347067e+18", "0.30000000000000004", "2.2250738585072014e-308"]
+        .iter()
+        .enumerate()
+    {
+        ok(&mut s, &format!(r#"set f:{i} {{"x": {f}}}"#));
+        let want: f64 = f.parse().unwrap();
+        let got = get(&mut s, &format!("f:{i}"))["value"]["x"].as_f64().unwrap();
+        assert_eq!(got.to_bits(), want.to_bits(), "{f}");
+        assert!(ok(&mut s, &format!("get where f:{i}.x = {f}")).ends_with("(1 matches)"), "{f}");
+    }
 }
 
 #[test]

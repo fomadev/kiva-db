@@ -28,7 +28,9 @@ harness = false
 crc32fast = "1"
 lz4_flex = "0.11"
 flate2 = "1"
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip: a float read from JSON text is the one the text names, to
+# the last bit (the default parser may be one unit off in the last place).
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 rmp-serde = "1"
 sha2 = "0.10"
 sha1 = "0.10"
