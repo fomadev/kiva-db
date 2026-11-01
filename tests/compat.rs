@@ -254,10 +254,10 @@ fn a_format_from_a_newer_kivadb_is_refused() {
     let home = home_from("v1.7.1", &dir);
     let store = home.join("data").join("store.kiva");
     let mut bytes = std::fs::read(&store).unwrap();
-    bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
     std::fs::write(&store, &bytes).unwrap();
     let err = Instance::open(&home, Options::default()).err().map(|e| e.to_string()).unwrap_or_default();
-    assert!(err.contains("unsupported storage format 3"), "{err}");
+    assert!(err.contains("unsupported storage format 4 (this build reads formats 1 to 3)"), "{err}");
     assert_eq!(std::fs::read(&store).unwrap(), bytes, "a refused file is left as it is");
 }
 

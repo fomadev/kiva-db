@@ -123,6 +123,15 @@ impl Conn {
         Ok(self.get(k)?.map(|(v, m)| (to_json(v), m.expires_at)))
     }
 
+    /// The document at `k` and its expiry, to change it: refused when it holds
+    /// decimals, dates or times, which plain JSON would turn into texts.
+    fn json_doc_to_change(&mut self, k: &str) -> std::result::Result<Option<(Json, i64)>, Reply> {
+        match self.get(k)? {
+            Some((Value::Typed(_), _)) => Err(Reply::err(crate::value::typed_unchangeable(k).to_string())),
+            found => Ok(found.map(|(v, m)| (to_json(v), m.expires_at))),
+        }
+    }
+
     /// Answers one value per path: a list of the matches for a `$` path
     /// (empty when nothing is there), the value or nil for a legacy one.
     fn per_path(&self, p: &Path, found: Option<Reply>) -> Reply {
@@ -166,7 +175,7 @@ impl Conn {
                     self.put(&k, to_value(value), exp)?;
                     return Ok(Reply::ok());
                 }
-                let Some((mut doc, exp)) = current else {
+                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
                     return Err(Reply::err("new objects must be created at the root"));
                 };
                 jsonpath::set(&mut doc, &p.segs, value).map_err(Reply::err)?;
@@ -232,7 +241,7 @@ impl Conn {
                 arity(args, 2)?;
                 let k = key(&args[1])?;
                 let p = path_at(args, 2)?;
-                let Some((mut doc, exp)) = self.json_doc(&k)? else { return Ok(Reply::Int(0)) };
+                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else { return Ok(Reply::Int(0)) };
                 if p.root() {
                     self.sess.kv_del(&k)?;
                     return Ok(Reply::Int(1));
@@ -261,7 +270,7 @@ impl Conn {
                     Json::Number(n) => n,
                     _ => return Err(Reply::err("expected a number")),
                 };
-                let Some((mut doc, exp)) = self.json_doc(&k)? else {
+                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
                     return Err(Reply::err("could not perform this operation on a key that doesn't exist"));
                 };
                 let next = if name == "JSON.NUMINCRBY" {
@@ -331,7 +340,7 @@ impl Conn {
                 let p = path(&args[2])?;
                 let first = if insert { 4 } else { 3 };
                 let values = args[first..].iter().map(|a| json_arg(a)).collect::<std::result::Result<Vec<_>, _>>()?;
-                let Some((mut doc, exp)) = self.json_doc(&k)? else {
+                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
                     return Err(Reply::err("could not perform this operation on a key that doesn't exist"));
                 };
                 let Some(Json::Array(arr)) =

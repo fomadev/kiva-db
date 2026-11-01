@@ -425,3 +425,45 @@ Changes made after reviewing it:
 - **Section 4**: M-refuse requires the old versions to leave the file unchanged, not only to refuse it.
 
 Left open, to settle in C1 with tests: the exact `rust_decimal` behaviours this note relies on (the serialization layout, checked overflow, and rounding in division).
+
+## 17. C2 as built
+
+C2 stores documents with native values and reads them back; queries, commands and programs still see plain JSON (C3 to C5).
+
+### 17.1 One change from section 13
+
+Section 13 has documents become `Value::Doc(Doc)`. C2 keeps `Value::Doc(Json)` for documents JSON can hold, and adds `Value::Typed(Doc)` for the others, the ones written in `KDOC`:
+
+- a document is `Typed` exactly when it is stored in `KDOC`: `Value::typed` makes one, and gives back `Doc` in plain JSON when JSON can hold it (15.4, the `u64` rule included);
+- JSON and MessagePack documents go through the code of 2.0 unchanged, so H-read and H-format hold by construction, and they pay no conversion;
+- the modules that read documents (indexes, vectors, queries, unique checks, schemas, projections, Lua, changes) read a typed one in plain JSON, through `Value::json_doc`;
+- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works.
+
+C3 can then move the readers to `Doc` one by one, and lift the refusals as each command learns native values.
+
+### 17.2 What is stored
+
+| Piece | Built |
+| :--- | :--- |
+| Record flag | `FLAG_KDOC` (bit 4); `DocEnc` (`Json`, `MsgPack`, `Kdoc`) carried by the engine, the change journal (flag 32) and the replication stream (byte 2) |
+| Format | `FORMAT_VERSION` 3; `format_for_record` gives 3 for a record with `FLAG_KDOC`; raised before the record and synced, as for format 2 |
+| Writing | `doc::check` refuses what `decode` would refuse or read differently: nesting deeper than 128, a float not finite, a time or datetime finer than the millisecond, a leap second |
+| Reading | a damaged `KDOC` payload is `ERR_DATA_CORRUPTED`, naming the key |
+| Compaction | records copied as they are; a record rewritten (recompression, encryption key, transaction flags) keeps `FLAG_KDOC`, which the copy dropped before C2 for flags other than MessagePack |
+| Replication | the replica's hello carries `native`; a master refuses a replica without it before any snapshot (`upgrade the replica to KivaDB ... or later`) |
+| Backups | manifest format 2 when an archive holds a data file of format 3; `restore --check` decodes every `KDOC` payload that is not encrypted |
+| `convert` | a typed document answers that it stays in `KDOC` |
+
+### 17.3 Tests
+
+`tests/native.rs`, 17 tests, among them: the round trip of every type at every depth through writing, reading and reopening; a JSON-only tree written as JSON; the refusals before writing; a 1.7.1 home raised only by a typed document, its values, indexes, workspaces and accounts kept; JSON, MessagePack and `KDOC` documents under one unique index and one B-tree index, rebuilt at opening; a transaction of typed documents cut before its last record; a crash between the header and the record, and in the middle of the record; compaction by copy and by recompression; a damaged payload with a right checksum; backups and restores; the commands that refuse; the change journal; the replication of a record; a replica hello without `native`.
+
+With `KIVADB_RC2_BIN` and `KIVADB_V1_BIN` (the CI downloads both, checked against the checksums of their releases): the published `2.0.0-rc.2` and 1.7.1 refuse a home of format 3 and leave every file as it was, refuse its archive before restoring a file, and a real `rc.2` replica keeps its data and says to upgrade; a home without typed documents still opens in `rc.2`.
+
+### 17.4 Limits
+
+- No command creates a native value yet (C4 typed literals, C5 extended JSON). The engine API (`Value::typed`) and replication are the only writers.
+- Encrypted `KDOC` payloads are checked by their checksum only in `restore --check`, which has no key.
+- The change journal keeps its version 1: a journal holding `KDOC` changes sits next to a data file of format 3, which an older KivaDB refuses first.
+- A Lua script that reads a typed document and writes it back writes texts: Lua gets plain JSON until C5 (`kiva.decimal`, `kiva.date`...).
+- Measurements on one Windows laptop ([docs/v2/benchmarks/documents.md](../v2/benchmarks/documents.md)): KDOC about 15 % smaller than JSON for orders with decimals and dates, decoded faster than JSON; the comparison of JSON workloads before and after C2 is within the noise of that machine and is to run again on a quiet Linux machine (lot S).

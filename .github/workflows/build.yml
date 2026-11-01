@@ -84,6 +84,19 @@ jobs:
           tar xzf "$RUNNER_TEMP/v1.tar.gz" -C "$RUNNER_TEMP/v1"
           echo "KIVADB_V1_BIN=$RUNNER_TEMP/v1/kivadb" >> "$GITHUB_ENV"
 
+      - name: Fetch KivaDB 2.0.0-rc.2
+        # tests/native.rs runs it on a home of storage format 3, which it must
+        # refuse without changing it (KIVADB_RC2_BIN). Checksum from the
+        # SHA256SUMS.txt of the rc.2 release.
+        if: matrix.os-name == 'linux'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/rc2"
+          curl -sSfL -o "$RUNNER_TEMP/rc2.tar.gz" https://github.com/fomadev/kiva-db/releases/download/v2.0.0-rc.2/kivadb_linux_x64.tar.gz
+          echo "db62b0e213b0473191b2b298026a16847e60564eb84f276fcd7956cb538748c8  $RUNNER_TEMP/rc2.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/rc2.tar.gz" -C "$RUNNER_TEMP/rc2"
+          echo "KIVADB_RC2_BIN=$RUNNER_TEMP/rc2/kivadb" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test
 

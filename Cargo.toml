@@ -24,6 +24,10 @@ harness = false
 name = "versions"
 harness = false
 
+[[bench]]
+name = "documents"
+harness = false
+
 [dependencies]
 crc32fast = "1"
 lz4_flex = "0.11"

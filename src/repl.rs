@@ -38,7 +38,7 @@ use crate::error::{KivaError, Result};
 use crate::instance::Instance;
 use crate::proto::*;
 use crate::util::now_secs;
-use crate::value::Type;
+use crate::value::{DocEnc, Type};
 use serde_json::{json, Value as Json};
 use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -60,6 +60,10 @@ const ALL_WORKSPACES: &str = "repl=3";
 
 /// What a replica of KivaDB 1.x puts there instead.
 const ALL_WORKSPACES_1X: &str = "repl=2";
+
+/// What a replica that reads `KDOC` documents (storage format 3) puts in its
+/// hello: one without it, `2.0.0-rc.2` or older, would misread them.
+const NATIVE: &str = "native";
 
 /// The name the system database goes by in the stream; no workspace can
 /// have it, since workspace names hold letters, digits, `_` and `-` only.
@@ -430,13 +434,17 @@ impl ReplState {
     }
 }
 
-fn set_payload(seq: u64, key: &str, ty: Type, msgpack: bool, timestamp: i64, expires_at: i64, raw: &[u8]) -> Vec<u8> {
+fn set_payload(seq: u64, key: &str, ty: Type, enc: DocEnc, timestamp: i64, expires_at: i64, raw: &[u8]) -> Vec<u8> {
     let mut p = Vec::with_capacity(28 + key.len() + raw.len());
     p.extend_from_slice(&seq.to_be_bytes());
     p.extend_from_slice(&timestamp.to_be_bytes());
     p.extend_from_slice(&expires_at.to_be_bytes());
     p.push(ty as u8);
-    p.push(msgpack as u8);
+    p.push(match enc {
+        DocEnc::Json => 0,
+        DocEnc::MsgPack => 1,
+        DocEnc::Kdoc => 2,
+    });
     p.extend_from_slice(&(key.len() as u16).to_be_bytes());
     p.extend_from_slice(key.as_bytes());
     p.extend_from_slice(raw);
@@ -459,13 +467,14 @@ fn reachable(listen: &str, peer: &str) -> String {
 pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, hello: String) {
     let mut words = hello.split_whitespace();
     let listen = words.next().unwrap_or_default().to_string();
-    let (mut node, mut all, mut v1) = (String::new(), false, false);
+    let (mut node, mut all, mut v1, mut native) = (String::new(), false, false, false);
     for w in words {
         match w.strip_prefix("node=") {
             Some(n) => node = n.to_string(),
             None => {
                 all |= w == ALL_WORKSPACES;
                 v1 |= w == ALL_WORKSPACES_1X;
+                native |= w == NATIVE;
             }
         }
     }
@@ -482,6 +491,15 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
                 crate::instance::VERSION
             )
         };
+        let _ = write_frame(&mut stream, ST_ERR, msg.as_bytes());
+        return;
+    }
+    if !native {
+        let msg = format!(
+            "this master runs KivaDB {v}, whose documents may hold decimal, date, time and datetime values: \
+             upgrade the replica to KivaDB {v} or later",
+            v = crate::instance::VERSION
+        );
         let _ = write_frame(&mut stream, ST_ERR, msg.as_bytes());
         return;
     }
@@ -530,7 +548,7 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
             write_frame(stream, R_RESET, &0u64.to_be_bytes())?;
             for (key, _) in engine.range(None, None, false, 0) {
                 if let Ok(Some((raw, e))) = engine.get_raw(&key) {
-                    let p = set_payload(0, &key, e.ty, e.is_msgpack(), e.timestamp, e.expires_at, &raw);
+                    let p = set_payload(0, &key, e.ty, e.doc_enc(), e.timestamp, e.expires_at, &raw);
                     write_frame(stream, R_SET, &p)?;
                 }
             }
@@ -539,7 +557,7 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
         write_frame(stream, R_RESET, &0u64.to_be_bytes())?;
         for (key, _) in inst.system.range(None, None, false, 0) {
             if let Ok(Some((raw, e))) = inst.system.get_raw(&key) {
-                let p = set_payload(0, &key, e.ty, e.is_msgpack(), e.timestamp, e.expires_at, &raw);
+                let p = set_payload(0, &key, e.ty, e.doc_enc(), e.timestamp, e.expires_at, &raw);
                 write_frame(stream, R_SET, &p)?;
             }
         }
@@ -560,8 +578,8 @@ pub fn serve_replica(inst: &Arc<Instance>, mut stream: TcpStream, peer: String, 
                         current = ws;
                     }
                     match op {
-                        Op::Set { key, ty, raw, msgpack, timestamp, expires_at, .. } => {
-                            let p = set_payload(seq, &key, ty, msgpack, timestamp, expires_at, &raw);
+                        Op::Set { key, ty, raw, enc, timestamp, expires_at, .. } => {
+                            let p = set_payload(seq, &key, ty, enc, timestamp, expires_at, &raw);
                             write_frame(stream, R_SET, &p)?;
                         }
                         Op::Del { key } => {
@@ -682,7 +700,7 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
     if inst.repl.advertised().is_empty() {
         inst.repl.group().advertised = listen.clone();
     }
-    let hello = format!("{listen} node={} {ALL_WORKSPACES}", inst.repl.node_id());
+    let hello = format!("{listen} node={} {ALL_WORKSPACES} {NATIVE}", inst.repl.node_id());
     write_frame(&mut stream, CMD_REPL_SYNC, hello.as_bytes())?;
     inst.repl.touch();
 
@@ -751,9 +769,14 @@ fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result
                 // An older master sends seconds.
                 let expires_at = crate::util::expiry_to_ms(r.i64()?);
                 let ty = Type::from_u8(r.u8()?).ok_or_else(|| KivaError::Corrupted("bad type in stream".into()))?;
-                let msgpack = r.u8()? != 0;
+                let enc = match r.u8()? {
+                    0 => DocEnc::Json,
+                    1 => DocEnc::MsgPack,
+                    2 => DocEnc::Kdoc,
+                    _ => return Err(KivaError::Corrupted("bad document encoding in stream".into())),
+                };
                 let key = r.str16()?;
-                engine.put_raw(&key, ty, r.rest(), msgpack, timestamp, expires_at)?;
+                engine.put_raw(&key, ty, r.rest(), enc, timestamp, expires_at)?;
                 if on_system && key.starts_with("trigger:") {
                     inst.reload_triggers();
                 }

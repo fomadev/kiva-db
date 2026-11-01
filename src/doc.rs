@@ -412,7 +412,33 @@ fn put_varint(out: &mut Vec<u8>, mut n: u64) {
     out.push(n as u8);
 }
 
-/// A document in `KDOC`: the version byte, then the value.
+/// Refuses what [`decode`] would refuse or read back differently, before it
+/// is written: nesting deeper than [`MAX_DEPTH`], a float that is not finite,
+/// a time or datetime finer than the millisecond, a leap second.
+pub fn check(doc: &Doc) -> Result<(), String> {
+    check_at(doc, 1)
+}
+
+fn check_at(doc: &Doc, depth: usize) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("a document nested deeper than {MAX_DEPTH} levels"));
+    }
+    let whole_ms = |nanos: u32| nanos.is_multiple_of(1_000_000) && nanos < 1_000_000_000;
+    match doc {
+        Doc::Float(f) if !f.is_finite() => Err(format!("{f} is not a finite number")),
+        Doc::Time(t) if !whole_ms(t.nanosecond()) => {
+            Err(format!("the time {t} is finer than the millisecond, or a leap second"))
+        }
+        Doc::DateTime(t) if !whole_ms(t.nanosecond()) => {
+            Err(format!("the datetime {t} is finer than the millisecond, or a leap second"))
+        }
+        Doc::Array(items) => items.iter().try_for_each(|v| check_at(v, depth + 1)),
+        Doc::Object(m) => m.values().try_for_each(|v| check_at(v, depth + 1)),
+        _ => Ok(()),
+    }
+}
+
+/// A document in `KDOC`: the version byte, then the value. [`check`] it first.
 pub fn encode(doc: &Doc) -> Vec<u8> {
     let mut out = vec![KDOC_VERSION];
     encode_value(doc, &mut out);

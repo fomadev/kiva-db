@@ -2,11 +2,14 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
+use crate::doc::{self, Doc};
 use crate::error::{KivaError, Result};
+use crate::format::{FLAG_KDOC, FLAG_MSGPACK};
 use crate::time;
 use crate::util::{b64_decode, b64_encode, hex_encode};
 use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use serde_json::Value as Json;
+use std::borrow::Cow;
 
 /// On-disk type tag of a stored value.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -85,6 +88,35 @@ impl Type {
     }
 }
 
+/// How a document's bytes are written, as the record flags say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocEnc {
+    Json,
+    MsgPack,
+    Kdoc,
+}
+
+impl DocEnc {
+    pub fn from_flags(flags: u8) -> DocEnc {
+        if flags & FLAG_KDOC != 0 {
+            DocEnc::Kdoc
+        } else if flags & FLAG_MSGPACK != 0 {
+            DocEnc::MsgPack
+        } else {
+            DocEnc::Json
+        }
+    }
+
+    /// The record flags that say it.
+    pub fn flags(self) -> u8 {
+        match self {
+            DocEnc::Json => 0,
+            DocEnc::MsgPack => FLAG_MSGPACK,
+            DocEnc::Kdoc => FLAG_KDOC,
+        }
+    }
+}
+
 /// A typed value. Numbers keep their textual form so that what was written is
 /// exactly what is read back; `Doc` always holds a JSON array or object.
 #[derive(Clone, Debug, PartialEq)]
@@ -94,6 +126,11 @@ pub enum Value {
     Bool(bool),
     Null,
     Doc(Json),
+    /// An array or object holding a value JSON cannot carry (`decimal`,
+    /// `date`, `time`, `datetime`), written in `KDOC`. Made by
+    /// [`Value::typed`], which keeps a document JSON can hold as `Doc`: a
+    /// document is `Typed` exactly when it is stored in `KDOC`.
+    Typed(Doc),
     Bytes(Vec<u8>),
     Date(NaiveDate),
     DateTime(DateTime<Utc>),
@@ -109,6 +146,8 @@ impl Value {
             Value::Null => Type::Null,
             Value::Doc(j) if j.is_array() => Type::Array,
             Value::Doc(_) => Type::Object,
+            Value::Typed(Doc::Array(_)) => Type::Array,
+            Value::Typed(_) => Type::Object,
             Value::Bytes(_) => Type::Bytes,
             Value::Date(_) => Type::Date,
             Value::DateTime(_) => Type::DateTime,
@@ -116,9 +155,54 @@ impl Value {
         }
     }
 
-    /// Canonical payload bytes. `msgpack` only affects documents.
+    /// A document as a value: `Typed` when it holds a value JSON cannot
+    /// carry, else `Doc` in plain JSON, which then loses nothing.
+    pub fn typed(d: Doc) -> Result<Value> {
+        check_document(&d)?;
+        Ok(if d.json_encodable() { Value::Doc(doc::to_plain_json(&d)) } else { Value::Typed(d) })
+    }
+
+    /// The document as JSON, to read it: a typed one in plain JSON, its
+    /// decimals, dates and times as texts.
+    pub fn json_doc(&self) -> Option<Cow<'_, Json>> {
+        match self {
+            Value::Doc(j) => Some(Cow::Borrowed(j)),
+            Value::Typed(d) => Some(Cow::Owned(doc::to_plain_json(d))),
+            _ => None,
+        }
+    }
+
+    /// [`Value::json_doc`], owned.
+    pub fn into_json_doc(self) -> Option<Json> {
+        match self {
+            Value::Doc(j) => Some(j),
+            Value::Typed(d) => Some(doc::to_plain_json(&d)),
+            _ => None,
+        }
+    }
+
+    /// The bytes as stored, and how: a typed document in `KDOC`, another
+    /// document in MessagePack when `msgpack`, else as [`Value::encode`]. A
+    /// `Typed` that JSON can hold is written as JSON: `KDOC` only when needed.
+    pub fn encode_stored(&self, msgpack: bool) -> Result<(Vec<u8>, DocEnc)> {
+        match self {
+            Value::Typed(d) => {
+                check_document(d)?;
+                if d.json_encodable() {
+                    return Value::Doc(doc::to_plain_json(d)).encode_stored(msgpack);
+                }
+                Ok((doc::encode(d), DocEnc::Kdoc))
+            }
+            Value::Doc(_) if msgpack => Ok((self.encode(true)?, DocEnc::MsgPack)),
+            _ => Ok((self.encode(false)?, DocEnc::Json)),
+        }
+    }
+
+    /// Canonical payload bytes. `msgpack` only affects documents; a typed
+    /// one is written in plain JSON (what the network protocol carries).
     pub fn encode(&self, msgpack: bool) -> Result<Vec<u8>> {
         Ok(match self {
+            Value::Typed(d) => return Value::Doc(doc::to_plain_json(d)).encode(msgpack),
             Value::Str(s) => s.as_bytes().to_vec(),
             Value::Num(s) => s.as_bytes().to_vec(),
             Value::Bool(b) => {
@@ -144,12 +228,15 @@ impl Value {
         })
     }
 
-    pub fn decode(ty: Type, raw: &[u8], msgpack: bool) -> Result<Value> {
+    pub fn decode(ty: Type, raw: &[u8], enc: DocEnc) -> Result<Value> {
         let text = |raw: &[u8]| {
             std::str::from_utf8(raw)
                 .map(|s| s.to_string())
                 .map_err(|_| KivaError::Corrupted("value is not valid UTF-8".into()))
         };
+        if enc == DocEnc::Kdoc && !ty.is_doc() {
+            return Err(KivaError::Corrupted(format!("a [{}] marked as a KDOC document", ty.name())));
+        }
         Ok(match ty {
             Type::String => Value::Str(text(raw)?),
             Type::Number => {
@@ -165,8 +252,21 @@ impl Value {
                 _ => return Err(KivaError::Corrupted("stored boolean is malformed".into())),
             },
             Type::Null => Value::Null,
+            Type::Array | Type::Object if enc == DocEnc::Kdoc => {
+                let d = doc::decode(raw).map_err(|e| KivaError::Corrupted(format!("KDOC document: {e}")))?;
+                let ok = matches!((ty, &d), (Type::Array, Doc::Array(_)) | (Type::Object, Doc::Object(_)));
+                if !ok {
+                    return Err(KivaError::Corrupted("document does not match its type tag".into()));
+                }
+                // Read as written; one JSON could hold is kept as JSON.
+                if d.json_encodable() {
+                    Value::Doc(doc::to_plain_json(&d))
+                } else {
+                    Value::Typed(d)
+                }
+            }
             Type::Array | Type::Object => {
-                let j: Json = if msgpack {
+                let j: Json = if enc == DocEnc::MsgPack {
                     rmp_serde::from_slice(raw)
                         .map_err(|e| KivaError::Corrupted(format!("MessagePack document: {e}")))?
                 } else {
@@ -195,6 +295,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             Value::Doc(j) => j.to_string(),
+            Value::Typed(d) => doc::to_plain_json(d).to_string(),
             Value::Bytes(b) => {
                 if b.len() > 64 {
                     format!("0x{}... ({} bytes)", hex_encode(&b[..64]), b.len())
@@ -216,6 +317,7 @@ impl Value {
             Value::Bool(b) => Json::Bool(*b),
             Value::Null => Json::Null,
             Value::Doc(j) => j.clone(),
+            Value::Typed(d) => doc::to_plain_json(d),
             Value::Bytes(b) => serde_json::json!({ "$bytes": b64_encode(b) }),
             Value::Date(d) => Json::String(time::date_text(*d)),
             Value::DateTime(t) => Json::String(time::iso(*t)),
@@ -288,4 +390,20 @@ pub fn fmt_f64(f: f64) -> String {
     } else {
         format!("{f}")
     }
+}
+
+/// Why a typed document is not changed in place yet.
+pub fn typed_unchangeable(key: &str) -> KivaError {
+    KivaError::Invalid(format!(
+        "'{key}' holds decimal, date, time or datetime values, which this command would turn into texts: \
+         write the whole document again instead"
+    ))
+}
+
+/// An array or an object that `KDOC` reads back as it is ([`doc::check`]).
+fn check_document(d: &Doc) -> Result<()> {
+    if !matches!(d, Doc::Array(_) | Doc::Object(_)) {
+        return Err(KivaError::Invalid(format!("a document is an array or an object, not a [{}]", d.type_name())));
+    }
+    doc::check(d).map_err(KivaError::Invalid)
 }

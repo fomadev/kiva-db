@@ -261,6 +261,6 @@ fn scripts_obey_the_schema_and_replicated_writes_are_kept_as_sent() {
     let e: Arc<Engine> = Engine::open(engine_dir.path().join("store.kiva"), EngineOptions::default()).unwrap();
     e.set_schema("user:*", &json!({"email": {"type": "string", "required": true}})).unwrap();
     assert!(e.put("user:1", &Value::Doc(json!({"name": "x"})), 0, false).is_err());
-    e.put_raw("user:1", Type::Object, br#"{"name":"x"}"#, false, 0, 0).unwrap();
+    e.put_raw("user:1", Type::Object, br#"{"name":"x"}"#, kivadb::value::DocEnc::Json, 0, 0).unwrap();
     assert_eq!(e.get("user:1").unwrap().unwrap().0, Value::Doc(json!({"name": "x"})));
 }
