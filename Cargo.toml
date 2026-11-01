@@ -31,6 +31,10 @@ flate2 = "1"
 # float_roundtrip: a float read from JSON text is the one the text names, to
 # the last bit (the default parser may be one unit off in the last place).
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+# Documents keep their members in the order they were written.
+indexmap = "2"
+# Exact decimals (`decimal`): a 96-bit integer and a scale of 0 to 28.
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
 rmp-serde = "1"
 sha2 = "0.10"
 sha1 = "0.10"

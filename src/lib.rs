@@ -17,6 +17,7 @@ pub mod client;
 pub mod compress;
 pub mod config;
 pub mod crypt;
+pub mod doc;
 pub mod doctor;
 pub mod engine;
 pub mod error;
