@@ -87,7 +87,7 @@ pub fn parse_path(path: &str) -> Result<Vec<Seg>, String> {
 
 /// The position `seg` designates in an array of `len` elements. With
 /// `append`, the position just after the last one is accepted too.
-fn position(seg: &Seg, len: usize, append: bool) -> Option<usize> {
+pub(crate) fn position(seg: &Seg, len: usize, append: bool) -> Option<usize> {
     let n = match seg {
         Seg::Idx(i) => *i,
         Seg::Key(k) => k.parse().ok()?,
@@ -133,7 +133,7 @@ fn parent_mut<'a>(doc: &'a mut Json, parents: &[Seg]) -> Result<&'a mut Json, St
     Ok(cur)
 }
 
-fn out_of_range(seg: &Seg, len: usize) -> String {
+pub(crate) fn out_of_range(seg: &Seg, len: usize) -> String {
     match seg {
         Seg::Idx(i) => format!("array index {i} is out of range (length {len})"),
         Seg::Key(k) => format!("array elements are addressed by index, not by '{k}'"),

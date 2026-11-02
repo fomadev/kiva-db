@@ -23,6 +23,15 @@ pub fn sort_key(v: Option<&Json>) -> Option<SKey> {
     }
 }
 
+/// The value a value of a document sorts by: a decimal by its exact value.
+pub fn sort_key_leaf(v: Option<crate::view::Leaf>) -> Option<SKey> {
+    let v = v?;
+    match v.decimal() {
+        Some(d) => Some(SKey::Num(crate::num::NumKey::Decimal(*d))),
+        None => sort_key(Some(&v.json())),
+    }
+}
+
 /// The sort key of a value held by an index: that of the field.
 pub fn sort_key_of(v: &SKey) -> Option<SKey> {
     match v {
@@ -144,7 +153,7 @@ pub fn compare(a: &Option<SKey>, a_key: &str, b: &Option<SKey>, b_key: &str, des
 pub struct Row {
     pub sk: Option<SKey>,
     pub key: String,
-    pub doc: Json,
+    pub doc: crate::value::Value,
     desc: bool,
 }
 
@@ -181,7 +190,7 @@ impl TopK {
         TopK { limit, desc, heap: BinaryHeap::new(), all: Vec::new(), offered: 0 }
     }
 
-    pub fn offer(&mut self, sk: Option<SKey>, key: String, doc: Json) {
+    pub fn offer(&mut self, sk: Option<SKey>, key: String, doc: crate::value::Value) {
         self.offered += 1;
         let row = Row { sk, key, doc, desc: self.desc };
         if self.limit == 0 {
@@ -290,7 +299,7 @@ mod tests {
             "-5",
         ];
         let mut raw: Vec<SKey> = texts.iter().map(|t| SKey::Str(t.to_string())).collect();
-        raw.extend([SKey::Num(crate::num::NumKey(3.into())), SKey::Bool(true)]);
+        raw.extend([SKey::Num(crate::num::NumKey::Json(3.into())), SKey::Bool(true)]);
         raw.sort();
         let key = |v: &SKey| sort_key(Some(&v.to_json()));
         for (i, v) in raw.iter().enumerate() {
@@ -322,9 +331,9 @@ mod tests {
     fn the_heap_keeps_the_first_rows() {
         let mut top = TopK::new(2, true);
         for (k, v) in [("a", 1), ("b", 5), ("c", 3), ("d", 5)] {
-            top.offer(sk(json!(v)), k.into(), json!(v));
+            top.offer(sk(json!(v)), k.into(), crate::value::Value::Doc(json!(v)));
         }
-        top.offer(None, "e".into(), json!(null));
+        top.offer(None, "e".into(), crate::value::Value::Null);
         let keys: Vec<String> = top.into_sorted().into_iter().map(|r| r.key).collect();
         assert_eq!(keys, ["b", "d"]);
     }

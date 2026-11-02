@@ -21,10 +21,10 @@ use crate::value::{DocEnc, Type, Value};
 pub use crate::vector::AutoTune;
 pub use crate::vector::Kind as VectorIndexKind;
 use crate::vector::{self, Metric, VecIndex};
+use crate::view::{DocView, Leaf};
 
 mod ordering;
 use serde_json::Value as Json;
-use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -321,11 +321,19 @@ pub enum SKey {
 }
 
 impl SKey {
+    /// The key of a value of a document: a decimal by its exact value.
+    pub fn from_leaf(v: Leaf) -> Option<SKey> {
+        match v.decimal() {
+            Some(d) => Some(SKey::Num(crate::num::NumKey::Decimal(*d))),
+            None => SKey::from_json(&v.json()),
+        }
+    }
+
     pub fn from_json(j: &Json) -> Option<SKey> {
         match j {
             Json::Null => Some(SKey::Null),
             Json::Bool(b) => Some(SKey::Bool(*b)),
-            Json::Number(n) => Some(SKey::Num(crate::num::NumKey(n.clone()))),
+            Json::Number(n) => Some(SKey::Num(crate::num::NumKey::Json(n.clone()))),
             Json::String(s) => Some(SKey::Str(s.clone())),
             _ => None,
         }
@@ -339,7 +347,7 @@ impl SKey {
         match self {
             SKey::Null => Json::Null,
             SKey::Bool(b) => Json::Bool(*b),
-            SKey::Num(n) => Json::Number(n.0.clone()),
+            SKey::Num(n) => n.to_json(),
             SKey::Str(s) => Json::String(s.clone()),
             SKey::Tuple(parts) => Json::Array(parts.iter().map(SKey::to_json).collect()),
         }
@@ -482,9 +490,9 @@ impl SecIndex {
 
     /// The indexed value of `doc`. On several fields, a document lacking
     /// one of them, or holding an array or an object there, is not indexed.
-    fn value(&self, doc: &Json) -> Option<SKey> {
+    fn value(&self, doc: DocView) -> Option<SKey> {
         let one = |path: &Vec<jsonpath::Seg>| {
-            jsonpath::get(doc, path).and_then(SKey::from_json).map(|sk| match sk {
+            doc.get(path).and_then(SKey::from_leaf).map(|sk| match sk {
                 SKey::Str(s) if self.fold => SKey::Str(s.to_lowercase()),
                 sk => sk,
             })
@@ -529,7 +537,7 @@ impl SecIndex {
         }
     }
 
-    fn update(&mut self, key: &str, doc: Option<&Json>) {
+    fn update(&mut self, key: &str, doc: Option<DocView>) {
         if !glob_match(&self.pattern, key) {
             return;
         }
@@ -689,6 +697,15 @@ impl Cond {
         }
     }
 
+    /// Whether a value of a document passes the condition: a decimal of a
+    /// typed document by its exact value, any other value as its JSON.
+    pub fn test_leaf(&self, v: Leaf) -> bool {
+        match v.decimal() {
+            Some(d) if self.func.is_none() => compare_decimal(d, self.op, &self.value),
+            _ => self.test(&v.json()),
+        }
+    }
+
     /// `created_at` or `month(created_at)`, as the condition is written.
     pub fn target(&self) -> String {
         match self.func {
@@ -742,8 +759,8 @@ impl Order {
         format!("{} {}", self.field, if self.desc { "desc" } else { "asc" })
     }
 
-    fn key_of(&self, doc: &Json) -> Option<SKey> {
-        ordering::sort_key(jsonpath::get(doc, &self.path))
+    fn key_of(&self, doc: &Value) -> Option<SKey> {
+        ordering::sort_key_leaf(DocView::of(doc)?.get(&self.path))
     }
 }
 
@@ -769,7 +786,6 @@ pub struct Measured {
 }
 
 pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
-    use std::cmp::Ordering::*;
     match (op, a, b) {
         (CmpOp::In, _, Json::Array(list)) => return list.iter().any(|v| compare_json(a, CmpOp::Eq, v)),
         (CmpOp::Like | CmpOp::ILike, Json::String(text), Json::String(pattern)) => {
@@ -784,6 +800,25 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
         Some((tag, text)) => crate::time::compare_tagged(a, tag, text),
         None => plain_order(a, b, op),
     };
+    verdict(ord, op)
+}
+
+/// A decimal of a typed document against the value of a condition: equal,
+/// above or below a number by their exact values (NATIVE_DOCUMENTS.md 6.2).
+fn compare_decimal(d: &rust_decimal::Decimal, op: CmpOp, b: &Json) -> bool {
+    let ord = match (op, b) {
+        (CmpOp::In, Json::Array(list)) => return list.iter().any(|v| compare_decimal(d, CmpOp::Eq, v)),
+        (CmpOp::In | CmpOp::Like | CmpOp::ILike, _) => return false,
+        (_, Json::Number(n)) => Some(crate::num::NumKey::Decimal(*d).cmp_json(n)),
+        _ => None,
+    };
+    verdict(ord, op)
+}
+
+/// What a comparison answers, from the order of its two values (`None`:
+/// not comparable, which only `!=` accepts).
+fn verdict(ord: Option<std::cmp::Ordering>, op: CmpOp) -> bool {
+    use std::cmp::Ordering::*;
     match (ord, op) {
         (None, CmpOp::Ne) => true,
         (None, _) => false,
@@ -793,7 +828,7 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
         (Some(o), CmpOp::Ge) => o != Less,
         (Some(o), CmpOp::Lt) => o == Less,
         (Some(o), CmpOp::Le) => o != Greater,
-        (Some(_), CmpOp::In | CmpOp::Like | CmpOp::ILike) => unreachable!("answered above"),
+        (Some(_), CmpOp::In | CmpOp::Like | CmpOp::ILike) => unreachable!("answered before"),
     }
 }
 
@@ -896,9 +931,9 @@ const PREFILTER_RATIO: usize = 10;
 /// the documents' full vectors then put in their true order.
 const RERANK: usize = 2;
 
-/// A document as indexes and vectors read it: a typed one in plain JSON.
-fn as_doc(v: &Value) -> Option<Cow<'_, Json>> {
-    v.json_doc()
+/// A document as indexes read it.
+fn as_doc(v: &Value) -> Option<DocView<'_>> {
+    DocView::of(v)
 }
 
 fn pattern_covers(index_pattern: &str, query_pattern: &str) -> bool {
@@ -1193,15 +1228,14 @@ pub fn unique_conflicts(path: &Path, keys: Option<&Keys>) -> Result<Vec<String>>
             continue;
         }
         let Ok((_, stored)) = crypt::open_record(keys, &rec) else { continue };
-        let Some(doc) = compress::unpack(&stored, e.compression())
-            .and_then(|raw| Value::decode(e.ty, &raw, e.doc_enc()))
-            .ok()
-            .and_then(Value::into_json_doc)
+        let Ok(value) =
+            compress::unpack(&stored, e.compression()).and_then(|raw| Value::decode(e.ty, &raw, e.doc_enc()))
         else {
             continue;
         };
+        let Some(doc) = DocView::of(&value) else { continue };
         for s in indexes.iter_mut().filter(|s| crate::util::glob_match(&s.pattern, key)) {
-            s.update(key, Some(&doc));
+            s.update(key, Some(doc));
         }
     }
     Ok(indexes
@@ -1439,8 +1473,8 @@ impl Inner {
             if index.memory_bytes() > budget {
                 return false;
             }
-            if let Some(doc) = self.read_value(&k, &e).ok().and_then(Value::into_json_doc) {
-                index.update(&k, Some(&doc));
+            if let Ok(value) = self.read_value(&k, &e) {
+                index.update(&k, DocView::of(&value).map(DocView::json).as_deref());
             }
         }
         true
@@ -1557,7 +1591,7 @@ impl Inner {
         Ok(offset)
     }
 
-    fn idx_insert(&mut self, key: &str, e: Entry, doc: Option<&Json>) {
+    fn idx_insert(&mut self, key: &str, e: Entry, doc: Option<DocView>) {
         self.live_bytes += e.rec_len();
         let expires_at = e.expires_at;
         match self.index.insert(key.to_string(), e) {
@@ -1575,8 +1609,11 @@ impl Inner {
         for s in &mut self.sec {
             s.update(key, doc);
         }
-        for v in &mut self.vecs {
-            v.update(key, doc);
+        if !self.vecs.is_empty() {
+            let json = doc.map(DocView::json);
+            for v in &mut self.vecs {
+                v.update(key, json.as_deref());
+            }
         }
         self.cache.remove(key);
     }
@@ -1630,8 +1667,12 @@ impl Inner {
     }
 
     /// Memory the vector indexes would gain from writing `doc` under `key`.
-    fn vector_growth(&self, key: &str, doc: Option<&Json>) -> usize {
-        self.vecs.iter().map(|v| v.growth(key, doc)).sum()
+    fn vector_growth(&self, key: &str, doc: Option<DocView>) -> usize {
+        if self.vecs.is_empty() {
+            return 0;
+        }
+        let json = doc.map(DocView::json);
+        self.vecs.iter().map(|v| v.growth(key, json.as_deref())).sum()
     }
 
     /// Bytes the vector indexes may still take under both bounds.
@@ -1803,12 +1844,17 @@ impl Inner {
         if !self.schemas.iter().any(|(s, _)| glob_match(&s.pattern, key)) {
             return Ok(None);
         }
-        let mut doc = value.json_doc().map(Cow::into_owned).unwrap_or(Json::Null);
+        let mut doc = match value {
+            Value::Doc(j) => Value::Doc(j.clone()),
+            Value::Typed(d) => Value::Typed(d.clone()),
+            _ => Value::Null,
+        };
         let mut failure = None;
         for (s, _) in self.schemas.iter().filter(|(s, _)| glob_match(&s.pattern, key)) {
-            let res = match value {
-                Value::Doc(_) | Value::Typed(_) => s.conform(&mut doc, at),
-                other => Err(format!("a JSON object is expected, not a [{}]", other.ty().name())),
+            let res = match &mut doc {
+                Value::Doc(j) => s.conform(j, at),
+                Value::Typed(d) => s.conform_typed(d, at),
+                _ => Err(format!("a JSON object is expected, not a [{}]", value.ty().name())),
             };
             if let Err(e) = res {
                 failure = Some(format!("'{key}' not written: {e} (schema on {})", s.pattern));
@@ -1823,16 +1869,8 @@ impl Inner {
             }
             return Err(KivaError::Schema(why));
         }
-        Ok(match value {
-            Value::Doc(d) if *d != doc => Some(Value::Doc(doc)),
-            Value::Typed(d) if crate::doc::to_plain_json(d) != doc => {
-                return Err(KivaError::Schema(format!(
-                    "'{key}' not written: its schema fills in defaults, which a document holding decimal, date, \
-                     time or datetime values does not take yet: write them in the document"
-                )))
-            }
-            _ => None,
-        })
+        // Defaults added: what is written is the document with them.
+        Ok((doc != *value).then_some(doc))
     }
 
     /// How many documents of the schema's pattern were read, how many do not
@@ -1849,7 +1887,7 @@ impl Inner {
         let mut count = 0;
         for (k, e) in &keys {
             let why = match self.value_of(k, e) {
-                Ok(v @ (Value::Doc(_) | Value::Typed(_))) => schema.check(&v.json_doc().unwrap_or_default()).err(),
+                Ok(v @ (Value::Doc(_) | Value::Typed(_))) => DocView::of(&v).and_then(|d| schema.check_view(d).err()),
                 Ok(other) => Some(format!("a [{}], not a JSON object", other.ty().name())),
                 Err(err) => Some(err.to_string()),
             };
@@ -1867,7 +1905,7 @@ impl Inner {
     /// unique index. `writes` holds each key written with the document it
     /// will hold (`None`: deleted, or no longer a document); keys written
     /// together are judged by their new values, never their old ones.
-    fn check_unique(&self, writes: &[(&str, Option<&Json>)]) -> Result<()> {
+    fn check_unique(&self, writes: &[(&str, Option<DocView>)]) -> Result<()> {
         let now = now_ms();
         for s in self.sec.iter().filter(|s| s.unique) {
             let mut taken: HashMap<SKey, &str> = HashMap::new();
@@ -2005,8 +2043,8 @@ impl Inner {
             .map(|(k, e)| (k.clone(), e.clone()))
             .collect();
         for (k, e) in keys {
-            if let Some(doc) = self.read_value(&k, &e).ok().and_then(Value::into_json_doc) {
-                self.sec[i].update(&k, Some(&doc));
+            if let Ok(value) = self.read_value(&k, &e) {
+                self.sec[i].update(&k, DocView::of(&value));
             }
         }
     }
@@ -2644,8 +2682,8 @@ impl Engine {
                 value = v;
             }
             let doc = as_doc(value);
-            inner.check_unique(&[(key, doc.as_deref())])?;
-            inner.check_vector_room(inner.vector_growth(key, doc.as_deref()))?;
+            inner.check_unique(&[(key, doc)])?;
+            inner.check_vector_room(inner.vector_growth(key, doc))?;
         }
         let created = self.put_locked(&mut inner, key, value, expires_at, msgpack, timestamp)?;
         self.after_write(&inner);
@@ -2682,8 +2720,8 @@ impl Engine {
             new = v;
         }
         let doc = as_doc(&new);
-        inner.check_unique(&[(key, doc.as_deref())])?;
-        inner.check_vector_room(inner.vector_growth(key, doc.as_deref()))?;
+        inner.check_unique(&[(key, doc)])?;
+        inner.check_vector_room(inner.vector_growth(key, doc))?;
         self.put_locked(&mut inner, key, &new, e.expires_at, e.is_msgpack(), now_secs())?;
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
@@ -2723,7 +2761,7 @@ impl Engine {
         let enc = entry.doc_enc();
         let doc = as_doc(value);
         let version = entry.version;
-        inner.idx_insert(key, entry, doc.as_deref());
+        inner.idx_insert(key, entry, doc);
         if inner.cache.is_pinned(key) {
             inner.cache.put(key, version, value, raw.len());
         }
@@ -2856,7 +2894,7 @@ impl Engine {
         }
         if inner.sec.iter().any(|s| s.unique) {
             // What each key holds once the whole batch is applied.
-            let mut last: Vec<(&str, Option<Cow<Json>>)> = Vec::new();
+            let mut last: Vec<(&str, Option<DocView>)> = Vec::new();
             let mut slot: HashMap<&str, usize> = HashMap::new();
             for op in &ops {
                 let (key, doc) = match op {
@@ -2871,12 +2909,11 @@ impl Engine {
                     }
                 }
             }
-            let last: Vec<(&str, Option<&Json>)> = last.iter().map(|(k, d)| (*k, d.as_deref())).collect();
             inner.check_unique(&last)?;
         }
 
         enum Staged {
-            Put { key: String, entry: Entry, raw: Vec<u8>, doc: Option<Json>, ty: Type, created: bool, rec_off: usize },
+            Put { key: String, entry: Entry, raw: Vec<u8>, doc: Option<Value>, ty: Type, created: bool, rec_off: usize },
             Del { key: String },
         }
         let mut staged = Vec::with_capacity(ops.len());
@@ -2893,8 +2930,8 @@ impl Engine {
                         None => inner.live(&key, now).is_some(),
                     };
                     shadow.insert(key.clone(), true);
-                    let doc = value.into_json_doc();
-                    vector_growth += inner.vector_growth(&key, doc.as_ref());
+                    vector_growth += inner.vector_growth(&key, as_doc(&value));
+                    let doc = value.ty().is_doc().then_some(value);
                     staged.push(Staged::Put { key, ty: entry.ty, entry, raw, doc, created: !exists, rec_off: 0 });
                     recs.push(rec);
                 }
@@ -2980,7 +3017,7 @@ impl Engine {
                     entry.offset = base + rec_off as u64;
                     entry.version = seq;
                     let (enc, timestamp, expires_at) = (entry.doc_enc(), entry.timestamp, entry.expires_at);
-                    inner.idx_insert(&key, entry, doc.as_ref());
+                    inner.idx_insert(&key, entry, doc.as_ref().and_then(as_doc));
                     if inner.cache.is_pinned(&key) {
                         if let Ok(v) = Value::decode(ty, &raw, enc) {
                             inner.cache.put(&key, seq, &v, raw.len());
@@ -4374,7 +4411,11 @@ impl Engine {
         for c in &q.filter {
             filter.push((jsonpath::parse_path(&c.field).map_err(KivaError::Invalid)?, c));
         }
-        let passes = |doc: &Json| filter.iter().all(|(p, c)| jsonpath::get(doc, p).is_some_and(|v| c.test(v)));
+        let passes = |doc: &Value| {
+            DocView::of(doc).is_some_and(|d| filter.iter().all(|(p, c)| d.get(p).is_some_and(|v| c.test_leaf(v))))
+        };
+        // The vector of a document, from its JSON.
+        let vector_of = |doc: &Value| DocView::of(doc).and_then(|d| vector::extract(&d.json(), &path));
         let query = vector::Query::new(q.vector.clone(), q.metric);
         let mut inner = self.lock();
         let now = now_ms();
@@ -4416,7 +4457,7 @@ impl Engine {
             .map(|j| indexed.swap_remove(j));
 
         // Documents read to test the filter, kept for the answer.
-        let mut docs: HashMap<String, Json> = HashMap::new();
+        let mut docs: HashMap<String, Value> = HashMap::new();
         let mut read = 0usize;
         let (chosen, examined, compared, approximate, how) = if let Some((s, candidates)) = prefilter {
             let examined = candidates.len();
@@ -4426,14 +4467,17 @@ impl Engine {
                     continue;
                 }
                 let Some(e) = inner.live(&key, now) else { continue };
-                let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
+                let doc = inner.value_of(&key, &e)?;
+                if !doc.ty().is_doc() {
+                    continue;
+                }
                 read += 1;
                 if !passes(&doc) {
                     continue;
                 }
                 let found = match index {
                     Some(i) if !inner.vecs[i].quantized() => inner.vecs[i].get(&key).map(|(v, n)| query.score(&v, n)),
-                    _ => vector::extract(&doc, &path).filter(|v| v.len() == query.dims()).map(|v| query.score_vec(&v)),
+                    _ => vector_of(&doc).filter(|v| v.len() == query.dims()).map(|v| query.score_vec(&v)),
                 };
                 if let Some(score) = found {
                     scored.push((key.clone(), score));
@@ -4488,9 +4532,11 @@ impl Engine {
                         return true;
                     }
                     *read += 1;
-                    match inner.value_of(key, &e).map(Value::into_json_doc) {
-                        Ok(Some(d)) => {
-                            let ok = rest.iter().all(|(p, c)| jsonpath::get(&d, p).is_some_and(|v| c.test(v)));
+                    match inner.value_of(key, &e) {
+                        Ok(d) if d.ty().is_doc() => {
+                            let ok = DocView::of(&d).is_some_and(|view| {
+                                rest.iter().all(|(p, c)| view.get(p).is_some_and(|v| c.test_leaf(v)))
+                            });
                             if ok {
                                 docs.insert(key.to_string(), d);
                             }
@@ -4519,7 +4565,10 @@ impl Engine {
                 // check every condition once more on what is returned.
                 if (quantized || !filter.is_empty()) && !docs.contains_key(&key) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let Some(d) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
+                    let d = inner.value_of(&key, &e)?;
+                    if !d.ty().is_doc() {
+                        continue;
+                    }
                     read += 1;
                     docs.insert(key.clone(), d);
                 }
@@ -4529,10 +4578,8 @@ impl Engine {
                         continue;
                     }
                 }
-                let full = quantized
-                    .then(|| docs.get(&key).and_then(|d| vector::extract(d, &path)))
-                    .flatten()
-                    .filter(|v| v.len() == query.dims());
+                let full =
+                    quantized.then(|| docs.get(&key).and_then(vector_of)).flatten().filter(|v| v.len() == query.dims());
                 let score = match full {
                     Some(v) => Some(query.score_vec(&v)),
                     None => inner.vecs[i].get(&key).map(|(v, n)| query.score(&v, n)),
@@ -4559,7 +4606,7 @@ impl Engine {
                 let mut chosen = Vec::new();
                 for (key, score) in vector::top_k(scored, n, &query) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() else { continue };
+                    let doc = inner.value_of(&key, &e)?;
                     read += 1;
                     if passes(&doc) {
                         docs.insert(key.clone(), doc);
@@ -4584,11 +4631,12 @@ impl Engine {
             let examined = candidates.len();
             let mut scored = Vec::new();
             for (k, e) in candidates {
-                if let Some(doc) = inner.value_of(&k, &e)?.into_json_doc() {
+                let doc = inner.value_of(&k, &e)?;
+                if doc.ty().is_doc() {
                     if !passes(&doc) {
                         continue;
                     }
-                    if let Some(v) = vector::extract(&doc, &path).filter(|v| v.len() == query.dims()) {
+                    if let Some(v) = vector_of(&doc).filter(|v| v.len() == query.dims()) {
                         scored.push((k, query.score_vec(&v)));
                     }
                 }
@@ -4599,7 +4647,7 @@ impl Engine {
         };
         let mut rows = Vec::new();
         for (key, score) in chosen {
-            if let Some(doc) = docs.remove(&key) {
+            if let Some(doc) = docs.remove(&key).and_then(Value::into_json_doc) {
                 rows.push((key, score, doc));
                 continue;
             }
@@ -4773,7 +4821,7 @@ impl Engine {
         let order = |v: &Json| match (sk, v) {
             (SKey::Null, Json::Null) => Some(Equal),
             (SKey::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
-            (SKey::Num(a), Json::Number(n)) => Some(crate::num::cmp(&a.0, n)),
+            (SKey::Num(a), Json::Number(n)) => Some(a.cmp_json(n)),
             (SKey::Str(a), Json::String(b)) => Some(a.as_str().cmp(b.as_str())),
             _ => None,
         };
@@ -5110,6 +5158,17 @@ impl Engine {
         Ok(self.read_query(q, &ReadOpts { limit, ..ReadOpts::default() }, f)?.0)
     }
 
+    /// [`Self::scan_query`], each document as its value: a typed one keeps its
+    /// decimals, which plain JSON would give as texts (aggregates).
+    pub fn scan_query_values(
+        &self,
+        q: &Query,
+        limit: usize,
+        f: impl FnMut(String, Value) -> std::result::Result<(), String>,
+    ) -> Result<Plan> {
+        Ok(self.run_query(q, &ReadOpts { limit, ..ReadOpts::default() }, true, f)?.0)
+    }
+
     /// Calls `f` with each document `q` selects, in the order and from the
     /// position `opts` says, counting what the reading did. `f` runs while
     /// the engine is locked.
@@ -5118,6 +5177,16 @@ impl Engine {
         q: &Query,
         opts: &ReadOpts,
         f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+    ) -> Result<(Plan, Measured)> {
+        self.run_query(q, opts, true, as_json(f))
+    }
+
+    /// [`Self::read_query`], each document as its value.
+    pub fn read_query_values(
+        &self,
+        q: &Query,
+        opts: &ReadOpts,
+        f: impl FnMut(String, Value) -> std::result::Result<(), String>,
     ) -> Result<(Plan, Measured)> {
         self.run_query(q, opts, true, f)
     }
@@ -5130,6 +5199,16 @@ impl Engine {
         opts: &ReadOpts,
         f: impl FnMut(String, Json) -> std::result::Result<(), String>,
     ) -> Result<Measured> {
+        Ok(self.run_query(q, opts, false, as_json(f))?.1)
+    }
+
+    /// [`Self::find`], each document as its value.
+    pub fn find_values(
+        &self,
+        q: &Query,
+        opts: &ReadOpts,
+        f: impl FnMut(String, Value) -> std::result::Result<(), String>,
+    ) -> Result<Measured> {
         Ok(self.run_query(q, opts, false, f)?.1)
     }
 
@@ -5138,7 +5217,7 @@ impl Engine {
         q: &Query,
         opts: &ReadOpts,
         estimate: bool,
-        mut f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+        mut f: impl FnMut(String, Value) -> std::result::Result<(), String>,
     ) -> Result<(Plan, Measured)> {
         let started = Instant::now();
         let mut inner = self.lock();
@@ -5147,7 +5226,7 @@ impl Engine {
         m.plan_time = started.elapsed();
         let now = now_ms();
         let limit = opts.limit;
-        let mut emit = |m: &mut Measured, key: String, doc: Json| -> Result<bool> {
+        let mut emit = |m: &mut Measured, key: String, doc: Value| -> Result<bool> {
             f(key, doc).map_err(KivaError::Invalid)?;
             m.returned += 1;
             Ok(limit == 0 || m.returned < limit as u64)
@@ -5326,7 +5405,7 @@ impl Engine {
     }
 
     /// The document at `key` if it is one of `q`'s, counting the reading.
-    fn examine(inner: &mut Inner, q: &Query, key: &str, now: i64, m: &mut Measured) -> Result<Option<Json>> {
+    fn examine(inner: &mut Inner, q: &Query, key: &str, now: i64, m: &mut Measured) -> Result<Option<Value>> {
         m.keys_examined += 1;
         if !glob_match(&q.pattern, key) {
             return Ok(None);
@@ -5349,12 +5428,12 @@ impl Engine {
                 v
             }
         };
-        let Some(doc) = value.into_json_doc() else {
+        let Some(doc) = DocView::of(&value) else {
             return Ok(None);
         };
         // An index only narrows the reading: the whole condition decides.
-        if q.matches(&doc) {
-            Ok(Some(doc))
+        if q.matches_view(doc) {
+            Ok(Some(value))
         } else {
             m.filtered_out += 1;
             Ok(None)
@@ -5792,4 +5871,11 @@ pub struct VectorResult {
     pub compared: usize,
     /// How the filter was applied, when there is one.
     pub filter: Option<String>,
+}
+
+/// A reader of documents in plain JSON, as a reader of values.
+fn as_json(
+    mut f: impl FnMut(String, Json) -> std::result::Result<(), String>,
+) -> impl FnMut(String, Value) -> std::result::Result<(), String> {
+    move |k, v| f(k, v.into_json_doc().unwrap_or_default())
 }

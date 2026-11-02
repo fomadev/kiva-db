@@ -401,7 +401,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                     group_by.map(|g| g.strip_prefix(&q.pattern).and_then(|f| f.strip_prefix('.')).unwrap_or(g));
                 let mut acc = Aggregation::new(aggs, group_by).map_err(KivaError::Invalid)?;
                 let limit = req["limit"].as_u64().unwrap_or(0) as usize;
-                let plan = sess.engine.scan_query(&q, limit, |_, doc| acc.add(&doc))?;
+                let plan = sess.engine.scan_query_values(&q, limit, |_, doc| acc.add_value(&doc))?;
                 let mut out = aggregated_json(&acc.finish().map_err(KivaError::Invalid)?, group_by.is_some());
                 out["plan"] = plan_json(&plan);
                 return Ok(out);

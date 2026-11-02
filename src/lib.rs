@@ -18,6 +18,7 @@ pub mod compress;
 pub mod config;
 pub mod crypt;
 pub mod doc;
+pub mod docpath;
 pub mod doctor;
 pub mod engine;
 pub mod error;
@@ -52,6 +53,7 @@ pub mod update;
 pub mod util;
 pub mod value;
 pub mod vector;
+pub mod view;
 
 pub use engine::{Engine, EngineOptions};
 pub use error::{KivaError, Result};

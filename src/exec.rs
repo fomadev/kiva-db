@@ -5,6 +5,8 @@
 //! The command interpreter: turns one line of shell syntax into operations
 //! on a `Session` and collects the text to show.
 
+use crate::doc::{self, Doc};
+use crate::docpath;
 use crate::engine::{BatchOp, CmpOp, Cond, Measured, Order, Plan, ReadOpts};
 use crate::error::KivaError;
 use crate::expr;
@@ -1292,8 +1294,12 @@ impl Session {
                 continue;
             }
             let Some((v, _)) = self.kv_get(key)? else { continue };
+            if let Value::Typed(d) = &v {
+                let segs = jsonpath::parse_path(path)?;
+                return Ok(docpath::get(d, &segs).map(|leaf| (leaf_value(leaf), key.to_string())));
+            }
             let doc = match &v {
-                Value::Doc(_) | Value::Typed(_) => v.json_doc().map(|j| j.into_owned()).unwrap_or_default(),
+                Value::Doc(_) => v.json_doc().map(|j| j.into_owned()).unwrap_or_default(),
                 // A string holding JSON text can be navigated too.
                 Value::Str(s) => match serde_json::from_str::<Json>(s) {
                     Ok(j) if j.is_object() || j.is_array() => j,
@@ -1713,7 +1719,7 @@ impl Session {
         c.finish(&aggregate_usage(func))?;
         let agg = Agg::new(verb, func, field.as_deref())?;
         let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
-        self.engine.find(&q, &ReadOpts { limit, ..ReadOpts::default() }, |_, doc| acc.add(&doc))?;
+        self.engine.find_values(&q, &ReadOpts { limit, ..ReadOpts::default() }, |_, doc| acc.add_value(&doc))?;
         let r = acc.finish()?;
         let name = {
             let mut n = verb[..1].to_uppercase() + &verb[1..];
@@ -1888,7 +1894,7 @@ impl Session {
                     Some((f, field, group_by)) => {
                         let agg = Agg::new(f.name(), *f, field.as_deref())?;
                         let mut acc = Aggregation::new(vec![agg], group_by.as_deref())?;
-                        let (plan, m) = self.engine.read_query(&q, &opts, |_, doc| acc.add(&doc))?;
+                        let (plan, m) = self.engine.read_query_values(&q, &opts, |_, doc| acc.add_value(&doc))?;
                         (plan, m, Some(acc.finish()?.groups.len()))
                     }
                     None => {
@@ -2011,6 +2017,35 @@ impl Session {
             let Some((value, _)) = self.kv_get(&key)? else {
                 return Err(format!("Key '{key}' not found."));
             };
+            if let Value::Typed(d) = &value {
+                let Some(leaf) = docpath::get(d, &path) else {
+                    out.say(format!("{at}: (nil)"));
+                    return Ok(());
+                };
+                let (shown, ty) = show_leaf(leaf);
+                match sub.as_str() {
+                    "get" => out.say(format!("{at}: {shown} [{ty}]")),
+                    "type" => out.say(format!("{at}: [{ty}]")),
+                    "len" => match leaf {
+                        Doc::Array(a) => out.say(format!("{at}: {}", a.len())),
+                        Doc::Object(m) => out.say(format!("{at}: {}", m.len())),
+                        Doc::Str(s) => out.say(format!("{at}: {}", s.chars().count())),
+                        _ => return Err(format!("TypeError: {at} is a [{ty}], which has no length.")),
+                    },
+                    _ => {
+                        let Doc::Object(m) = leaf else {
+                            return Err(format!("TypeError: {at} is a [{ty}], not an object."));
+                        };
+                        if m.is_empty() {
+                            out.say(format!("{at}: no fields"));
+                        }
+                        for k in m.keys() {
+                            out.say(k.clone());
+                        }
+                    }
+                }
+                return Ok(());
+            }
             let doc = doc_of(&key, value)?;
             let Some(j) = jsonpath::get(&doc, &path) else {
                 out.say(format!("{at}: (nil)"));
@@ -2047,7 +2082,7 @@ impl Session {
             Delete,
             Append(Vec<Json>),
             Insert(Json),
-            Incr(serde_json::Number),
+            Incr(serde_json::Number, String),
         }
         let change = match sub.as_str() {
             "set" => Change::Set(match time_expr(&mut c) {
@@ -2071,7 +2106,7 @@ impl Session {
             "incr" => {
                 let t = c.next().ok_or(USAGE)?;
                 match literal_json(&t.text, t.is_quoted()) {
-                    Ok(Json::Number(n)) if t.is_bare() => Change::Incr(n),
+                    Ok(Json::Number(n)) if t.is_bare() => Change::Incr(n, t.text.clone()),
                     _ => return Err("ValueError: the increment must be a number.".into()),
                 }
             }
@@ -2083,8 +2118,40 @@ impl Session {
         // changing another field of the same document at the same time
         // cannot lose this change, nor this one lose theirs.
         let done = self.kv_modify(&key, |value| {
-            if let Value::Typed(_) = value {
-                return Err(crate::value::typed_unchangeable(&key));
+            if let Value::Typed(mut d) = value {
+                // The same change on the typed tree: the values it does not touch keep their types.
+                let bad = |e: String| KivaError::Invalid(format!("{e} ({at})"));
+                let msg = match change {
+                    Change::Set(v) => {
+                        docpath::set(&mut d, &path, doc::from_json(&v)).map_err(bad)?;
+                        format!("OK: {at} updated.")
+                    }
+                    Change::Delete => {
+                        if !docpath::delete(&mut d, &path) {
+                            return Ok((None, format!("Not found: {at}")));
+                        }
+                        format!("Deleted: {at}")
+                    }
+                    Change::Append(values) => {
+                        let n =
+                            docpath::append(&mut d, &path, values.iter().map(doc::from_json).collect()).map_err(bad)?;
+                        format!("OK: {at} now has {n} elements.")
+                    }
+                    Change::Insert(v) => {
+                        let n = docpath::insert(&mut d, &path, doc::from_json(&v)).map_err(bad)?;
+                        format!("OK: inserted at {at}; the array now has {n} elements.")
+                    }
+                    Change::Incr(by, text) => {
+                        let by = docpath::increment(docpath::get(&d, &path), &by, &text);
+                        let v = docpath::incr(&mut d, &path, &by).map_err(bad)?;
+                        let (shown, ty) = show_leaf(&v);
+                        format!("{at}: {shown} [{ty}]")
+                    }
+                };
+                if !matches!(d, Doc::Array(_) | Doc::Object(_)) {
+                    return Err(KivaError::Invalid("the root of a document must stay an object or array.".into()));
+                }
+                return Ok((Some(Value::typed(d)?), msg));
             }
             let mut doc = doc_of(&key, value)?;
             let msg = match change {
@@ -2108,7 +2175,7 @@ impl Session {
                         jsonpath::insert(&mut doc, &path, v).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
                     format!("OK: inserted at {at}; the array now has {n} elements.")
                 }
-                Change::Incr(by) => {
+                Change::Incr(by, _) => {
                     let v =
                         jsonpath::incr(&mut doc, &path, &by).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
                     format!("{at}: {v} [number]")
@@ -2397,5 +2464,32 @@ fn doc_of(key: &str, value: Value) -> crate::error::Result<Json> {
         other => {
             Err(KivaError::Invalid(format!("TypeError: '{key}' is a [{}], not an object or array.", other.ty().name())))
         }
+    }
+}
+
+/// A value of a typed document as the shell shows it, with its type: a
+/// decimal as written, a date, time or datetime in the session's format.
+fn show_leaf(d: &Doc) -> (String, &'static str) {
+    let v = match d {
+        Doc::Decimal(x) => return (x.to_string(), "decimal"),
+        Doc::Date(x) => Value::Date(*x),
+        Doc::DateTime(x) => Value::DateTime(*x),
+        Doc::Time(x) => Value::Time(*x),
+        Doc::Array(_) | Doc::Object(_) => return (doc::to_plain_json(d).to_string(), d.type_name()),
+        _ => Value::from_json(doc::to_plain_json(d)),
+    };
+    (v.display(), v.ty().name())
+}
+
+/// A value of a typed document as a value of its own: a date, time or
+/// datetime as one, a decimal as its exact number, a part as a document.
+fn leaf_value(d: &Doc) -> Value {
+    match d {
+        Doc::Decimal(x) => Value::Num(x.to_string()),
+        Doc::Date(x) => Value::Date(*x),
+        Doc::DateTime(x) => Value::DateTime(*x),
+        Doc::Time(x) => Value::Time(*x),
+        Doc::Array(_) | Doc::Object(_) => Value::typed(d.clone()).unwrap_or(Value::Null),
+        _ => Value::from_json(doc::to_plain_json(d)),
     }
 }

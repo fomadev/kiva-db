@@ -52,3 +52,23 @@ The rounds of a single version differ by a factor of 2 to 3 on this machine, so 
 The fsync case is slower in all three rounds of C2, by 4 % to 35 %. It is the only case that looks consistent. C2 changes nothing in fsync itself: a write of a JSON document costs one more `match` on the encoding.
 
 These comparisons should be run again on a quiet Linux machine before a candidate (lot S). Disk and memory are the same.
+
+## Queries on JSON documents before and after C3
+
+C3 makes queries, indexes, `order by` and aggregates read documents through a view that also reads typed documents. `cargo bench --bench queries` measures what that costs JSON documents: 50 000 documents, in process, on the same machine as above. It ran on 2026-11-02, with `main` at `e9d6c7b` and the C3 branch run in turns.
+
+The first run of C3 came right after a release build and was about twice as slow on several cases. Running the two versions alternately gave the medians below, in ms:
+
+| Case | main, run 1 | main, run 2 | C3, run 1 | C3, run 2 |
+| :--- | ---: | ---: | ---: | ---: |
+| limit, no index | 1.140 | 1.059 | 1.070 | 1.087 |
+| and, two indexes | 2.722 | 2.628 | 2.589 | 3.069 |
+| and, unique index on both | 0.013 | 0.018 | 0.012 | 0.013 |
+| order, broad filter | 0.331 | 0.335 | 0.359 | 0.420 |
+| order, selective filter | 6.220 | 4.938 | 4.973 | 7.113 |
+| order by the filtered field | 0.625 | 0.249 | 0.245 | 0.364 |
+| one index, one key | 0.009 | 0.015 | 0.009 | 0.010 |
+| no index, every match | 481.4 | 527.7 | 539.6 | 545.9 |
+| one index, a range | 48.0 | 48.5 | 44.9 | 53.2 |
+
+On this machine, the two versions are within the spread of each version's own runs. The full scan without an index ("no index, every match") is the one case where C3 is slower in both runs, by 3 % to 13 %. For a JSON document, C3 adds one check per compared value, whether it is a decimal. This should be measured again on a quiet Linux machine (lot S).

@@ -458,19 +458,17 @@ fn a_backup_of_typed_documents_restores_them_and_says_its_format() {
 }
 
 #[test]
-fn commands_that_would_turn_typed_values_into_texts_refuse_them() {
+fn commands_change_typed_documents_and_convert_leaves_them_in_kdoc() {
     let dir = TempDir::new("native_commands");
     let inst = open(dir.path());
     let mut s = Session::new(inst.clone(), true, None);
     let e = inst.engine("default").unwrap();
     e.put("o:1", &Value::typed(order()).unwrap(), 0, false).unwrap();
-    for cmd in ["json set o:1 .id 8", "json incr o:1 .id 1", "json del o:1 .note", "json append o:1 .lines 1"] {
-        let err = fails(&mut s, cmd);
-        assert!(err.contains("holds decimal, date, time or datetime values"), "{cmd}: {err}");
-    }
+    // A change of one field (lot C3) keeps every other value as it was.
+    ok(&mut s, "json set o:1 .id 8");
+    ok(&mut s, "json set o:1 .id 7");
     assert_same(typed(&e.get("o:1").unwrap().unwrap().0), &order());
-    // Reading works, in plain JSON.
-    assert_eq!(ok(&mut s, "json get o:1 .total"), "o:1.total: 1250.50 [string]");
+    assert_eq!(ok(&mut s, "json get o:1 .total"), "o:1.total: 1250.50 [decimal]");
     assert!(ok(&mut s, "convert o:1 to msgpack").contains("stays in KDOC"));
     // A whole new document replaces it, here one JSON holds.
     ok(&mut s, r#"update o:1 {"id": 8}"#);
