@@ -485,7 +485,7 @@ A value of a typed document is judged as follows:
 | `date`, `time`, `datetime` | its ISO text, which the conditions on moments of 2.0 already compare as a moment, and `order by` sorts by its canonical text |
 | text, boolean, null | as in JSON |
 
-**Change from section 6.** Temporal values are not a kind of their own yet: a native date and the ISO text `"2026-10-31"` are one value in a unique index, and they sort among texts. This keeps old data and new data answering the same queries, and turns the U-kind risk (15.2) the other way round: no duplicates appear by mixing texts and native dates. The maintainer approved this rule on 2026-11-02 (#98): it stays for 2.0.0.
+**Change from section 6.** Temporal values are not a kind of their own: a native date and the ISO text `"2026-10-31"` are one value in a unique index, and they sort among texts. This keeps old data and new data answering the same queries, and turns the U-kind risk (15.2) the other way round: no duplicates appear by mixing texts and native dates. The maintainer approved this rule on 2026-11-02 (#98): it stays for 2.0.0.
 
 ### 18.2 Changing a document
 
