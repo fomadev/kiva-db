@@ -667,8 +667,11 @@ fn legacy_root_account_is_renamed() {
     {
         // A home created when the built-in administrator was called root.
         let sys = kivadb::Engine::open(dir.path().join("system").join("system.kiva"), Default::default()).unwrap();
-        kivadb::auth::save_user(&sys, &kivadb::auth::User::new("root", "old-secret", kivadb::auth::Role::Admin))
-            .unwrap();
+        kivadb::auth::save_user(
+            &sys,
+            &kivadb::auth::User::new("root", "old-secret", kivadb::auth::Role::Admin).unwrap(),
+        )
+        .unwrap();
     }
     let inst = instance(&dir);
     assert!(kivadb::auth::get_user(&inst.system, "root").unwrap().is_none());

@@ -70,7 +70,7 @@ pub fn write_hint(
     }
     let (mut stored, flag) = compress::pack(&body, compression);
     if let Some(keys) = keys {
-        keys.seal(Domain::Hint, &file_id.to_le_bytes(), &mut stored);
+        keys.seal(Domain::Hint, &file_id.to_le_bytes(), &mut stored)?;
     }
 
     let mut out = Vec::with_capacity(HINT_HEADER_LEN + stored.len());

@@ -1435,7 +1435,7 @@ impl Inner {
     }
 
     /// Encodes a record, encrypted when this engine has a key.
-    fn encode(&self, key: &str, value: &[u8], ty: u8, flags: u8, timestamp: i64, expires_at: i64) -> Vec<u8> {
+    fn encode(&self, key: &str, value: &[u8], ty: u8, flags: u8, timestamp: i64, expires_at: i64) -> Result<Vec<u8>> {
         crypt::encode_record(self.keys.as_deref(), key, value, ty, flags, timestamp, expires_at)
     }
 
@@ -1536,7 +1536,11 @@ impl Inner {
         let crc = crc32fast::hash(&out);
         out.extend_from_slice(&crc.to_le_bytes());
         if let Some(keys) = &self.keys {
-            keys.seal(crypt::Domain::Graphs, &self.file_id.to_le_bytes(), &mut out);
+            // Never written in clear: without a nonce the graphs are not saved,
+            // and are rebuilt from the data when next needed.
+            if keys.seal(crypt::Domain::Graphs, &self.file_id.to_le_bytes(), &mut out).is_err() {
+                return;
+            }
             out.splice(0..0, GRAPHS_SEALED.iter().copied());
         }
         let tmp = sidecar(path, "graphs.tmp");
@@ -2081,7 +2085,7 @@ fn build_put(
     }
     let (stored, cflag) = compress::pack(&raw, inner.compression);
     let flags = cflag | extra_flags | enc.flags();
-    let rec = inner.encode(key, &stored, ty as u8, flags, timestamp, expires_at);
+    let rec = inner.encode(key, &stored, ty as u8, flags, timestamp, expires_at)?;
     let h = parse_header(&rec);
     let entry = Entry {
         offset: 0,
@@ -2128,7 +2132,7 @@ impl Engine {
         let mode;
 
         if file_len == 0 {
-            file_id = random_u64();
+            file_id = random_u64()?;
             format = FORMAT_V1;
             file.write_all(&file_header(file_id, format))?;
             file.sync_data()?;
@@ -2782,7 +2786,7 @@ impl Engine {
         if inner.live(key, now_ms()).is_none() {
             return Ok(false);
         }
-        let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
+        let rec = inner.encode(key, &[], 0, FLAG_TOMBSTONE, now_secs(), 0)?;
         let at = inner.append(&rec, false)?;
         inner.journal_del(key, now_secs(), at + rec.len() as u64);
         inner.seq += 1;
@@ -2944,7 +2948,7 @@ impl Engine {
                         continue;
                     }
                     shadow.insert(key.clone(), false);
-                    recs.push(inner.encode(&key, &[], 0, FLAG_TOMBSTONE | FLAG_TXN, now, 0));
+                    recs.push(inner.encode(&key, &[], 0, FLAG_TOMBSTONE | FLAG_TXN, now, 0)?);
                     staged.push(Staged::Del { key });
                 }
             }
@@ -3051,7 +3055,7 @@ impl Engine {
         if inner.closed {
             return Err(KivaError::Other("database is closed".into()));
         }
-        let file_id = random_u64();
+        let file_id = random_u64()?;
         inner.file.set_len(0)?;
         inner.file.seek(SeekFrom::Start(0))?;
         inner.file.write_all(&file_header(file_id, FORMAT_V1))?;
@@ -3181,7 +3185,7 @@ impl Engine {
         let keys = self.opts.keys.clone();
 
         // Phase 2 (unlocked): copy live records into a fresh file.
-        let new_id = random_u64();
+        let new_id = random_u64()?;
         let mut reader = File::open(&self.path)?;
         let mut out = BufWriter::with_capacity(1 << 20, File::create(tmp_path)?);
         out.write_all(&file_header(new_id, FORMAT_V1))?;
@@ -3219,7 +3223,7 @@ impl Engine {
                 };
                 let flags = (e.flags & (FLAG_MSGPACK | FLAG_KDOC)) | cflag;
                 let rec =
-                    crypt::encode_record(keys.as_deref(), key, &stored2, e.ty as u8, flags, e.timestamp, e.expires_at);
+                    crypt::encode_record(keys.as_deref(), key, &stored2, e.ty as u8, flags, e.timestamp, e.expires_at)?;
                 let h = parse_header(&rec);
                 ne.flags = h.flags;
                 ne.v_size = h.v_size;
@@ -3344,7 +3348,7 @@ impl Engine {
             fs::copy(&self.path, &bak)?;
             report.backup = Some(bak);
             for k in &report.corrupted {
-                let rec = inner.encode(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0);
+                let rec = inner.encode(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0)?;
                 let at = inner.append(&rec, true)?;
                 inner.journal_del(k, now_secs(), at + rec.len() as u64);
                 inner.seq += 1;

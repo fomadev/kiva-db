@@ -103,10 +103,12 @@ pub fn valid_username(name: &str) -> bool {
 }
 
 impl User {
-    pub fn new(name: &str, password: &str, role: Role) -> User {
-        let salt = random_bytes(16);
+    /// Fails when the system generator cannot give the salt: no account is
+    /// made with a predictable one.
+    pub fn new(name: &str, password: &str, role: Role) -> Result<User> {
+        let salt = random_bytes(16)?;
         let hash = hash_password(password, &salt, ITERATIONS);
-        User {
+        Ok(User {
             name: name.to_string(),
             role,
             grants: BTreeMap::new(),
@@ -117,7 +119,7 @@ impl User {
             salt,
             hash,
             iterations: ITERATIONS,
-        }
+        })
     }
 
     pub fn verify(&self, password: &str) -> bool {
@@ -130,10 +132,14 @@ impl User {
         self.verify("")
     }
 
-    pub fn set_password(&mut self, password: &str) {
-        self.salt = random_bytes(16);
+    /// When the system generator cannot give a new salt, the account keeps
+    /// its password, salt and hash unchanged.
+    pub fn set_password(&mut self, password: &str) -> Result<()> {
+        let salt = random_bytes(16)?;
+        self.hash = hash_password(password, &salt, ITERATIONS);
+        self.salt = salt;
         self.iterations = ITERATIONS;
-        self.hash = hash_password(password, &self.salt, ITERATIONS);
+        Ok(())
     }
 
     /// Access level this user has on `workspace`, if any: the highest of
@@ -252,7 +258,7 @@ pub fn create_user(sys: &Engine, name: &str, password: &str, role: Role) -> Resu
     if get_user(sys, name)?.is_some() {
         return Err(KivaError::Exists(format!("user '{name}' already exists")));
     }
-    let user = User::new(name, password, role);
+    let user = User::new(name, password, role)?;
     save_user(sys, &user)?;
     Ok(user)
 }
@@ -288,7 +294,7 @@ pub fn ensure_admin(sys: &Engine) -> Result<()> {
             save_user(sys, &legacy)?;
             delete_user(sys, "root")?;
         }
-        None => save_user(sys, &User::new(DEFAULT_ADMIN, "", Role::Admin))?,
+        None => save_user(sys, &User::new(DEFAULT_ADMIN, "", Role::Admin)?)?,
     }
     Ok(())
 }
@@ -400,7 +406,7 @@ mod tests {
     #[test]
     fn a_login_enters_the_default_or_the_only_workspace() {
         let all: Vec<String> = ["default", "travel.places", "travel.cache", "school.places"].map(String::from).to_vec();
-        let mut u = User::new("dev", "pw", Role::Editor);
+        let mut u = User::new("dev", "pw", Role::Editor).unwrap();
         assert_eq!(u.arrival(&all), None);
         u.grants.insert("school.places".into(), Priv::Read);
         assert_eq!(u.arrival(&all).as_deref(), Some("school.places"));
@@ -411,5 +417,36 @@ mod tests {
         assert!(u.manages("travel.cache") && !u.manages("school.places") && !u.manages("default"));
         assert_eq!(u.access("travel.places"), Some(Priv::Write));
         assert_eq!(u.access("default"), None);
+    }
+
+    #[test]
+    fn a_broken_generator_makes_no_account_and_changes_no_password() {
+        use crate::util::tests::with_failing_random;
+        let dir = std::env::temp_dir().join(format!("kivadb_auth_random_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sys = Engine::open(dir.join("system.kiva"), crate::engine::EngineOptions::default()).unwrap();
+
+        let err = with_failing_random(|| create_user(&sys, "ana", "s3cret-pw", Role::Editor)).unwrap_err();
+        let text = err.to_string();
+        assert!(text.starts_with("ERR_RANDOM_UNAVAILABLE"), "{text}");
+        assert!(!text.contains("s3cret-pw"), "the password is not in the error: {text}");
+        assert!(get_user(&sys, "ana").unwrap().is_none(), "no account saved");
+        assert!(with_failing_random(|| ensure_admin(&sys)).is_err());
+        assert!(get_user(&sys, DEFAULT_ADMIN).unwrap().is_none(), "no administrator with a predictable salt");
+
+        let mut user = create_user(&sys, "ana", "old-pw", Role::Editor).unwrap();
+        let before = (user.salt.clone(), user.hash.clone(), user.iterations);
+        assert!(with_failing_random(|| user.set_password("new-pw")).is_err());
+        assert_eq!((user.salt.clone(), user.hash.clone(), user.iterations), before);
+        assert!(user.verify("old-pw") && !user.verify("new-pw"));
+
+        // Once the generator works again, salts are fresh for every account.
+        user.set_password("new-pw").unwrap();
+        assert!(user.verify("new-pw") && user.salt != before.0);
+        let other = User::new("bo", "new-pw", Role::Editor).unwrap();
+        assert_ne!(other.salt, user.salt);
+        drop(sys);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

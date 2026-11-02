@@ -197,7 +197,10 @@ fn follow_new_master(inst: &Arc<Instance>, master: &str, epoch: u64, why: &str) 
 /// Starts the failure detector of a server. It does nothing while
 /// `failover.auto` is off.
 pub fn start(inst: &Arc<Instance>) {
-    inst.repl.load_identity(inst);
+    if let Err(e) = inst.repl.load_identity(inst) {
+        inst.repl.set_event(format!("no failover: this node has no identity: {e}"));
+        return;
+    }
     let inst = inst.clone();
     let _ = std::thread::Builder::new().name("kiva-failover".into()).spawn(move || {
         let mut next_try = Instant::now();
@@ -214,8 +217,9 @@ pub fn start(inst: &Arc<Instance>) {
                     if let Err(e) = elect(&inst, &s) {
                         inst.repl.set_event(format!("no failover: {e}"));
                     }
-                    // Spread the attempts of several replicas apart.
-                    let jitter = crate::util::random_u64() % (s.timeout.as_millis() as u64).max(1);
+                    // Spread the attempts of several replicas apart. Without
+                    // the generator there is no spread, not one from the clock.
+                    let jitter = crate::util::random_u64().unwrap_or(0) % (s.timeout.as_millis() as u64).max(1);
                     next_try = Instant::now() + s.timeout + Duration::from_millis(jitter);
                 }
             } else if inst.repl.replicas().is_empty() {

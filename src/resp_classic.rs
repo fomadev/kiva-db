@@ -30,9 +30,9 @@ fn side(arg: &[u8]) -> std::result::Result<bool, Reply> {
     }
 }
 
-/// A random index below `n`.
-fn pick(n: usize) -> usize {
-    (crate::util::random_u64() % n as u64) as usize
+/// A random index below `n`; an error reply when the system generator fails.
+fn pick(n: usize) -> std::result::Result<usize, Reply> {
+    crate::util::random_u64().map(|r| (r % n as u64) as usize).map_err(|e| Reply::err(e.to_string()))
 }
 
 /// Positions `start..=stop` of a sequence of `len` items, negative ones
@@ -270,7 +270,7 @@ impl Conn {
                 let Some(count) = args.get(2) else {
                     return Ok(match fields.len() {
                         0 => Reply::nil(),
-                        n => Reply::bulk(fields[pick(n)].0.clone()),
+                        n => Reply::bulk(fields[pick(n)?].0.clone()),
                     });
                 };
                 let count = int(count)?;
@@ -285,13 +285,13 @@ impl Conn {
                     // Distinct fields, in a random order.
                     let mut all: Vec<usize> = (0..fields.len()).collect();
                     for i in (1..all.len()).rev() {
-                        all.swap(i, pick(i + 1));
+                        all.swap(i, pick(i + 1)?);
                     }
                     all.truncate(count as usize);
                     all
                 } else {
                     // A negative count may repeat fields.
-                    (0..count.unsigned_abs()).map(|_| pick(fields.len())).collect()
+                    (0..count.unsigned_abs()).map(|_| pick(fields.len())).collect::<std::result::Result<_, _>>()?
                 };
                 let field = |i: usize| Reply::bulk(fields[i].0.clone());
                 let value = |i: usize| Reply::bulk(json_text(fields[i].1));

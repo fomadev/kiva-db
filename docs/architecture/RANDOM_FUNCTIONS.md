@@ -24,6 +24,22 @@ Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and 
 
 That failure is very unlikely on supported systems, but a salt or a token must never silently become predictable. Lot R0 makes the function report the failure instead. This is a fix, independent of the new functions.
 
+**Done in R0.** One source remains, `util::fill_random` (`getrandom`), with no fallback; `crypt.rs` draws from it too. When it fails, the operation fails with `ERR_RANDOM_UNAVAILABLE`, and nothing is written in place of the random bytes. Each caller:
+
+| Caller | What it draws | On failure |
+| :--- | :--- | :--- |
+| `auth::User::new`, `set_password` | 16-byte salts | no account; the password, salt and hash stay as they were |
+| `crypt::generate_key` (`kivadb keygen`) | master keys | no key, exit code 1 |
+| `crypt::Keys::seal` | 96-bit nonces of records, the change journal, hints and vector graphs | nothing encrypted: the write is refused; graphs are not saved, never saved in clear |
+| `util::new_id` (`add`) | the process part and counter start of identifiers | no key made |
+| `engine` (open, `clear`, compaction), `changes`, `backup::check` | file ids, journal ids, staging names | the operation fails before writing |
+| `repl::load_identity` | a new node id | automatic failover does not start, with the reason in its event |
+| `failover` | the delay between election attempts | no delay added, never one from the clock |
+| `doctor` | a probe file name | reported as a failure |
+| `HRANDFIELD`, `SRANDMEMBER`, `SPOP`, `ZRANDMEMBER` | a member's index | an error reply |
+
+The semantic cache's consistency token starts from the clock. It is a sequence, not a secret: it only has to differ from the tokens before a restart.
+
 ## 2. Principles
 
 1. **Values, not code.** A function is evaluated by the engine where the grammar has a value, never by reading a text as code. `"uuid()"` in quotes stays a text.
