@@ -58,13 +58,49 @@ pub fn cmp(a: &Number, b: &Number) -> Ordering {
     }
 }
 
-/// A number as an index holds it: equal, ordered and hashed by its value.
+/// A number as an index holds it: equal, ordered and hashed by its value,
+/// whether it is a JSON number or a decimal of a typed document.
 #[derive(Clone, Debug)]
-pub struct NumKey(pub Number);
+pub enum NumKey {
+    Json(Number),
+    Decimal(rust_decimal::Decimal),
+}
+
+impl NumKey {
+    /// The number for the exact comparisons of [`crate::doc`]: a `u64`
+    /// beyond `i64` as the decimal that holds it.
+    fn with<R>(&self, f: impl FnOnce(crate::doc::Num) -> R) -> R {
+        use crate::doc::Num;
+        match self {
+            NumKey::Decimal(d) => f(Num::Decimal(d)),
+            NumKey::Json(n) => match (n.as_i64(), n.as_u64()) {
+                (Some(i), _) => f(Num::Int(i)),
+                (None, Some(u)) => f(Num::Decimal(&rust_decimal::Decimal::from(u))),
+                _ => f(Num::Float(n.as_f64().unwrap_or(0.0))),
+            },
+        }
+    }
+
+    /// As JSON: a decimal as its text, the way plain JSON carries it.
+    pub fn to_json(&self) -> Json {
+        match self {
+            NumKey::Json(n) => Json::Number(n.clone()),
+            NumKey::Decimal(d) => Json::String(d.to_string()),
+        }
+    }
+
+    /// Against a JSON number, exactly.
+    pub fn cmp_json(&self, n: &Number) -> Ordering {
+        match self {
+            NumKey::Json(m) => cmp(m, n),
+            NumKey::Decimal(_) => self.cmp(&NumKey::Json(n.clone())),
+        }
+    }
+}
 
 impl PartialEq for NumKey {
     fn eq(&self, o: &Self) -> bool {
-        cmp(&self.0, &o.0).is_eq()
+        self.cmp(o).is_eq()
     }
 }
 impl Eq for NumKey {}
@@ -75,18 +111,18 @@ impl PartialOrd for NumKey {
 }
 impl Ord for NumKey {
     fn cmp(&self, o: &Self) -> Ordering {
-        cmp(&self.0, &o.0)
+        match (self, o) {
+            (NumKey::Json(a), NumKey::Json(b)) => cmp(a, b),
+            _ => self.with(|a| o.with(|b| crate::doc::cmp_num(a, b))),
+        }
     }
 }
-// Equal values hash alike: a float that holds an integer of the 64-bit
-// range hashes as that integer, and -0.0 as 0.
+// Equal values hash alike, whatever their kinds (NATIVE_DOCUMENTS.md 15.1):
+// an integer as that integer, a fraction a decimal holds as that decimal,
+// another float as its bits.
 impl std::hash::Hash for NumKey {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        match exact(&self.0) {
-            Exact::Int(i) => (0u8, i).hash(h),
-            Exact::Float(f) if f.fract() == 0.0 && (-TWO_63..TWO_64).contains(&f) => (0u8, f as i128).hash(h),
-            Exact::Float(f) => (1u8, f.to_bits()).hash(h),
-        }
+        self.with(crate::doc::num_class).hash(h)
     }
 }
 
@@ -133,6 +169,11 @@ impl Sum {
                 self.float += f;
             }
         }
+    }
+
+    /// The sum while only integers were added.
+    pub fn exact_int(&self) -> Option<i128> {
+        (!self.fractional).then_some(self.int)
     }
 
     pub fn total(&self) -> f64 {
@@ -266,7 +307,7 @@ mod tests {
         assert_eq!(cmp(&n(json!(-2)), &n(json!(-2.5))), Ordering::Greater);
         use std::collections::HashSet;
         let set: HashSet<NumKey> =
-            [json!(1), json!(1.0), json!(-0.0), json!(0)].into_iter().map(|j| NumKey(n(j))).collect();
+            [json!(1), json!(1.0), json!(-0.0), json!(0)].into_iter().map(|j| NumKey::Json(n(j))).collect();
         assert_eq!(set.len(), 2);
     }
 

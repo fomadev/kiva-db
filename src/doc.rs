@@ -381,6 +381,103 @@ impl PartialEq for Doc {
 }
 
 // ---------------------------------------------------------------------------
+// Arithmetic, exact or refused
+// ---------------------------------------------------------------------------
+
+/// A number as arithmetic sees it: an integer (an `int`, or a decimal with
+/// scale 0 that JSON held as a 64-bit integer, 15.4), a float, or a decimal.
+enum Operand {
+    Int(i128),
+    Float(f64),
+    Decimal(Decimal),
+}
+
+fn operand(d: &Doc) -> Result<Operand, String> {
+    Ok(match d {
+        Doc::Int(i) => Operand::Int(*i as i128),
+        Doc::Float(f) => Operand::Float(*f),
+        Doc::Decimal(x) => match u64_beyond_i64(x) {
+            Some(u) => Operand::Int(u as i128),
+            None => Operand::Decimal(*x),
+        },
+        other => return Err(format!("a [{}] is not a number", other.type_name())),
+    })
+}
+
+/// An integer result: an `int`, a decimal in the range of the unsigned
+/// 64-bit integers JSON holds, refused beyond.
+fn int_result(i: i128) -> Result<Doc, String> {
+    if let Ok(v) = i64::try_from(i) {
+        Ok(Doc::Int(v))
+    } else if let Ok(u) = u64::try_from(i) {
+        Ok(Doc::Decimal(Decimal::from(u)))
+    } else {
+        Err("the result would be beyond the 64-bit integers".into())
+    }
+}
+
+fn float_result(f: f64) -> Result<Doc, String> {
+    if f.is_finite() {
+        Ok(Doc::Float(f))
+    } else {
+        Err("the result would be NaN or infinite".into())
+    }
+}
+
+fn int_as_decimal(i: i128) -> Result<Decimal, String> {
+    i64::try_from(i).map(Decimal::from).or_else(|_| u64::try_from(i).map(Decimal::from)).map_err(|_| "too large".into())
+}
+
+fn mixed(a: &Doc, b: &Doc) -> String {
+    format!(
+        "a decimal and a float do not mix ({} and {}): the result would look exact without being so",
+        to_plain_json(a),
+        to_plain_json(b)
+    )
+}
+
+/// `a + b`: exact for integers (refused beyond 64 bits) and decimals
+/// (refused beyond their range), in floating point for floats with
+/// integers, and refused for a decimal with a float (NATIVE_DOCUMENTS.md 2.2).
+pub fn add(a: &Doc, b: &Doc) -> Result<Doc, String> {
+    match (operand(a)?, operand(b)?) {
+        (Operand::Int(x), Operand::Int(y)) => int_result(x + y),
+        (Operand::Float(x), Operand::Float(y)) => float_result(x + y),
+        (Operand::Int(i), Operand::Float(f)) | (Operand::Float(f), Operand::Int(i)) => float_result(i as f64 + f),
+        (Operand::Decimal(_), Operand::Float(_)) | (Operand::Float(_), Operand::Decimal(_)) => Err(mixed(a, b)),
+        (Operand::Decimal(x), Operand::Decimal(y)) => decimal_result(x.checked_add(y)),
+        (Operand::Decimal(x), Operand::Int(i)) | (Operand::Int(i), Operand::Decimal(x)) => {
+            decimal_result(int_as_decimal(i).ok().and_then(|i| x.checked_add(i)))
+        }
+    }
+}
+
+/// `a × b`, under the rules of [`add`]: a product of decimals that would
+/// need more than 28 decimals, or more digits than a decimal holds, is
+/// refused rather than rounded.
+pub fn mul(a: &Doc, b: &Doc) -> Result<Doc, String> {
+    let exact = |x: Decimal, y: Decimal| x.checked_mul(y).filter(|r| r.is_zero() || r.scale() == x.scale() + y.scale());
+    match (operand(a)?, operand(b)?) {
+        (Operand::Int(x), Operand::Int(y)) => x
+            .checked_mul(y)
+            .ok_or_else(|| "the result would be beyond the 64-bit integers".to_string())
+            .and_then(int_result),
+        (Operand::Float(x), Operand::Float(y)) => float_result(x * y),
+        (Operand::Int(i), Operand::Float(f)) | (Operand::Float(f), Operand::Int(i)) => float_result(i as f64 * f),
+        (Operand::Decimal(_), Operand::Float(_)) | (Operand::Float(_), Operand::Decimal(_)) => Err(mixed(a, b)),
+        (Operand::Decimal(x), Operand::Decimal(y)) => decimal_result(exact(x, y)),
+        (Operand::Decimal(x), Operand::Int(i)) | (Operand::Int(i), Operand::Decimal(x)) => {
+            decimal_result(int_as_decimal(i).ok().and_then(|i| exact(x, i)))
+        }
+    }
+}
+
+fn decimal_result(r: Option<Decimal>) -> Result<Doc, String> {
+    r.map(Doc::Decimal)
+        .ok_or_else(|| "the result is beyond what a decimal holds exactly (28 decimals, about 7.9 × 10^28)".into())
+}
+
+// ---------------------------------------------------------------------------
 // The binary encoding KDOC
 // ---------------------------------------------------------------------------
 

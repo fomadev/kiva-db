@@ -392,14 +392,6 @@ pub fn fmt_f64(f: f64) -> String {
     }
 }
 
-/// Why a typed document is not changed in place yet.
-pub fn typed_unchangeable(key: &str) -> KivaError {
-    KivaError::Invalid(format!(
-        "'{key}' holds decimal, date, time or datetime values, which this command would turn into texts: \
-         write the whole document again instead"
-    ))
-}
-
 /// An array or an object that `KDOC` reads back as it is ([`doc::check`]).
 fn check_document(d: &Doc) -> Result<()> {
     if !matches!(d, Doc::Array(_) | Doc::Object(_)) {

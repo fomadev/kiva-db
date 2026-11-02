@@ -437,7 +437,7 @@ Section 13 has documents become `Value::Doc(Doc)`. C2 keeps `Value::Doc(Json)` f
 - a document is `Typed` exactly when it is stored in `KDOC`: `Value::typed` makes one, and gives back `Doc` in plain JSON when JSON can hold it (15.4, the `u64` rule included);
 - JSON and MessagePack documents go through the code of 2.0 unchanged, so H-read and H-format hold by construction, and they pay no conversion;
 - the modules that read documents (indexes, vectors, queries, unique checks, schemas, projections, Lua, changes) read a typed one in plain JSON, through `Value::json_doc`;
-- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works.
+- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works. C3 lifts these refusals (section 18).
 
 C3 can then move the readers to `Doc` one by one, and lift the refusals as each command learns native values.
 
@@ -467,3 +467,76 @@ With `KIVADB_RC2_BIN` and `KIVADB_V1_BIN` (the CI downloads both, checked agains
 - The change journal keeps its version 1: a journal holding `KDOC` changes sits next to a data file of format 3, which an older KivaDB refuses first.
 - A Lua script that reads a typed document and writes it back writes texts: Lua gets plain JSON until C5 (`kiva.decimal`, `kiva.date`...).
 - Measurements on one Windows laptop ([docs/v2/benchmarks/documents.md](../v2/benchmarks/documents.md)): KDOC about 15 % smaller than JSON for orders with decimals and dates, decoded faster than JSON; the comparison of JSON workloads before and after C2 is within the noise of that machine and is to run again on a quiet Linux machine (lot S).
+
+## 18. C3 as built
+
+C3 lets queries, indexes, sorting, aggregates, schemas and partial changes work on typed documents without losing a type. Programs still receive plain JSON (C5).
+
+### 18.1 Reading a document: one view, two forms
+
+`view::DocView` reads a document as it is stored, JSON or a typed tree, and `view::Leaf` is the value at a path. Conditions, indexes, unique checks, `order by`, aggregates, schemas and the filters of vector search all read through them, so a JSON document is never converted and a typed one never projected to JSON before it is judged.
+
+A value of a typed document is judged as follows:
+
+| Value | Judged as |
+| :--- | :--- |
+| `decimal` | its exact value: `NumKey::Decimal`, compared, ordered and hashed with JSON numbers by `doc::cmp_num` and `doc::num_class` (15.1) |
+| `int`, `float` | the JSON number it is, as before |
+| `date`, `time`, `datetime` | its ISO text, which the conditions on moments of 2.0 already compare as a moment, and `order by` sorts by its canonical text |
+| text, boolean, null | as in JSON |
+
+**Change from section 6.** Temporal values are not a kind of their own: a native date and the ISO text `"2026-10-31"` are one value in a unique index, and they sort among texts. This keeps old data and new data answering the same queries, and turns the U-kind risk (15.2) the other way round: no duplicates appear by mixing texts and native dates. The maintainer approved this rule on 2026-11-02 (#98): it stays for 2.0.0.
+
+### 18.2 Changing a document
+
+`docpath` makes the changes of `jsonpath` on a `Doc`: `set`, `delete`, `append`, `insert`, `incr` and `mul`. The shell (`json set|delete|append|insert|incr`) and Redis (`JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`) use them for typed documents. JSON documents keep the code of 2.0. A document that loses its last native value is written in JSON again.
+
+`doc::add` and `doc::mul` implement 2.2:
+
+- integers are exact and refused beyond 64 bits; the `u64` integers of 2.0 stay integers;
+- a decimal with an integer or a decimal is exact, and a product needing more than 28 decimals is refused rather than rounded;
+- a decimal with a float is refused, naming both;
+- an increment written with a fraction is read from its text as a decimal when the value it changes is a decimal, so `json incr k .balance -100.25` adds the decimal `-100.25`, not the nearest float. An increment with an exponent (`1e-1`) stays a float, and is refused against a decimal.
+
+### 18.3 Aggregates and schemas
+
+- **`sum` and `avg`.** Over decimals, with the integers next to them, the result is exact. A float among them is refused. `avg` divides the exact sum with `rust_decimal`, rounded to 28 decimals. Both results come out as the decimal's text, as plain JSON carries decimals.
+- **`min` and `max`.** Numbers, decimals included, are ordered by exact value.
+- **`group by`.** A decimal groups with the JSON number equal to it when one exists (`10.50` with `10.5`); otherwise it groups under `{"$decimal": "..."}`.
+- **Schemas** gain the types `int`, `float` and `decimal`:
+  - `number` and `integer` accept decimals (an integer decimal for `integer`);
+  - `min`, `max` and `enum` compare decimals exactly;
+  - `date`, `datetime` and `time` accept native values as well as ISO texts;
+  - defaults are filled into typed documents.
+- **Compatibility.** An older KivaDB refuses a `.meta` that holds the new type names, as the design said (9).
+
+### 18.4 What reaches programs
+
+| Path | Typed documents |
+| :--- | :--- |
+| Shell | `json get` and `json type` name `decimal`, `date`, `time` and `datetime`. `get k.path` gives a date, time or datetime as that type, and a decimal as an exact `number` |
+| REST, binary protocol, structured requests | plain JSON. Queries and aggregates judge exactly |
+| Redis | plain JSON. `JSON.NUMINCRBY` answers a decimal with its exact digits |
+| Lua | plain JSON: decimals and moments as texts. A script that reads a typed document and writes it back writes texts until C5 (`kiva.decimal`...) |
+| Change journal, replication | the record as written (`KDOC`), so the types of a partial change are kept |
+
+### 18.5 Tests
+
+`tests/native_queries.rs` has 10 tests:
+
+- **Shell:** nested changes keep the other types; exact increments; the refusal of a decimal with a float; reading with types; a return to JSON.
+- **Transactions:** commit and rollback.
+- **Queries:** equality, ranges, `in`, `order by`, and moments over decimals in KDOC next to numbers in JSON and MessagePack, run with and without a B-tree index and after a reopen.
+- **Unique indexes:** `10.50` against `10.5`, `0.1` the decimal against `0.1` the float, and `7` against `7.000`.
+- **Aggregates:** exact `sum` and `avg`, `min`, `max`, `group by`, the month of a native date, the refusal of a decimal with a float, and the structured request.
+- **Schemas:** `decimal`, `int`, `number`, `date`, `min`, defaults, `schema check`.
+- **Changes and replication:** the change journal, and replication of the bytes.
+- **Programs:** Redis `JSON.*` over a real RESP connection; REST reads and a structured query over HTTP; the binary protocol; Lua.
+
+`src/docpath.rs` adds unit tests of the changes and of exact arithmetic. `tests/native.rs` now checks that commands change typed documents, where it checked that they refused them.
+
+### 18.6 Limits
+
+- No command creates a native value yet: typed literals arrive in C4, extended JSON in C5.
+- Dates, times and datetimes are not a kind of their own in indexes and sorting (18.1).
+- A decimal is compared with the value of a condition, which is a JSON number. `where price = 0.1` therefore finds the decimal `0.1` only if the float `0.1` equals it, which it does not. Ranges work. Equality on such decimals needs decimal literals (C4).

@@ -28,6 +28,8 @@
 use crate::engine::{CmpOp, Cond, MAX_IN_VALUES};
 use crate::jsonpath::{self, Seg};
 use crate::time::TimeFn;
+use crate::view::{DocView, Leaf};
+use rust_decimal::Decimal;
 use serde_json::{Map, Value as Json};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -278,11 +280,16 @@ impl Expr {
     /// Whether `doc` satisfies the expression. A comparison on a field the
     /// document lacks is false, so `not` of it is true.
     pub fn matches(&self, doc: &Json) -> bool {
+        self.matches_view(DocView::Json(doc))
+    }
+
+    /// [`Expr::matches`], for a JSON or a typed document.
+    pub fn matches_view(&self, doc: DocView) -> bool {
         match self {
-            Expr::Test(t) => jsonpath::get(doc, &t.path).is_some_and(|v| t.cond.test(v)),
-            Expr::And(v) => v.iter().all(|e| e.matches(doc)),
-            Expr::Or(v) => v.iter().any(|e| e.matches(doc)),
-            Expr::Not(e) => !e.matches(doc),
+            Expr::Test(t) => doc.get(&t.path).is_some_and(|v| t.cond.test_leaf(v)),
+            Expr::And(v) => v.iter().all(|e| e.matches_view(doc)),
+            Expr::Or(v) => v.iter().any(|e| e.matches_view(doc)),
+            Expr::Not(e) => !e.matches_view(doc),
         }
     }
 
@@ -449,6 +456,10 @@ impl Query {
         self.expr.as_ref().is_none_or(|e| e.matches(doc))
     }
 
+    pub fn matches_view(&self, doc: DocView) -> bool {
+        self.expr.as_ref().is_none_or(|e| e.matches_view(doc))
+    }
+
     /// `user:* where age > 18 and role = "dev"`.
     pub fn describe(&self) -> String {
         match &self.expr {
@@ -562,7 +573,10 @@ struct Acc {
     /// Values taken into account.
     n: u64,
     sum: crate::num::Sum,
-    best: Option<Json>,
+    /// The exact sum of the decimals of typed documents, if any.
+    decimals: Option<Decimal>,
+    /// The smallest or largest value, and the decimal it is when it is one.
+    best: Option<(Json, Option<Decimal>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -634,12 +648,22 @@ impl Aggregation {
 
     /// Folds one document in.
     pub fn add(&mut self, doc: &Json) -> Result<(), String> {
+        self.add_view(DocView::Json(doc))
+    }
+
+    /// [`Aggregation::add`], for the value of a document.
+    pub fn add_value(&mut self, v: &crate::value::Value) -> Result<(), String> {
+        DocView::of(v).map_or(Ok(()), |d| self.add_view(d))
+    }
+
+    /// [`Aggregation::add`], for a JSON or a typed document.
+    pub fn add_view(&mut self, doc: DocView) -> Result<(), String> {
         let key = match &self.group_by {
             Some((_, path, func)) => {
-                let v = jsonpath::get(doc, path);
+                let v = doc.get(path);
                 GroupKey(match func {
-                    Some(f) => v.and_then(|v| f.of(v)).map(Json::from).unwrap_or(Json::Null),
-                    None => v.cloned().unwrap_or(Json::Null),
+                    Some(f) => v.and_then(|v| f.of(&v.json())).map(Json::from).unwrap_or(Json::Null),
+                    None => v.map(group_value).unwrap_or(Json::Null),
                 })
             }
             None => GroupKey(Json::Null),
@@ -662,24 +686,33 @@ impl Aggregation {
                 acc.n += 1;
                 continue;
             }
-            let Some(v) = jsonpath::get(doc, &agg.path) else {
+            let Some(leaf) = doc.get(&agg.path) else {
                 continue;
             };
+            let dec = leaf.decimal().copied();
+            let v = leaf.json();
             match agg.func {
                 Func::Count => acc.n += 1,
                 Func::Sum | Func::Avg => {
-                    if let Json::Number(x) = v {
+                    if let Some(d) = dec {
+                        acc.n += 1;
+                        let total =
+                            acc.decimals.unwrap_or_default().checked_add(d).ok_or_else(|| {
+                                format!("{}: the sum is beyond what a decimal holds exactly", agg.name)
+                            })?;
+                        acc.decimals = Some(total);
+                    } else if let Json::Number(x) = v.as_ref() {
                         acc.n += 1;
                         acc.sum.push(x);
                     }
                 }
                 Func::Min | Func::Max => {
-                    if !(v.is_number() || v.is_string()) {
+                    if dec.is_none() && !(v.is_number() || v.is_string()) {
                         continue;
                     }
                     acc.n += 1;
-                    let better = acc.best.as_ref().is_none_or(|b| {
-                        let o = GroupKey(v.clone()).cmp(&GroupKey(b.clone()));
+                    let better = acc.best.as_ref().is_none_or(|(b, bd)| {
+                        let o = order_values((&v, dec.as_ref()), (b, bd.as_ref()));
                         if agg.func == Func::Min {
                             o == Ordering::Less
                         } else {
@@ -687,7 +720,7 @@ impl Aggregation {
                         }
                     });
                     if better {
-                        acc.best = Some(v.clone());
+                        acc.best = Some((v.into_owned(), dec));
                     }
                 }
             }
@@ -705,10 +738,13 @@ impl Aggregation {
             for (agg, acc) in self.aggs.iter().zip(b.accs) {
                 let v = match agg.func {
                     Func::Count => Json::from(acc.n),
+                    Func::Sum | Func::Avg if acc.decimals.is_some() => {
+                        decimal_total(&acc, agg).map_err(|e| format!("{}: {e}", agg.name))?
+                    }
                     Func::Sum => acc.sum.json().map_err(|e| format!("{}: {e}", agg.name))?,
                     Func::Avg if acc.n == 0 => Json::Null,
                     Func::Avg => num(acc.sum.total() / acc.n as f64),
-                    Func::Min | Func::Max => acc.best.unwrap_or(Json::Null),
+                    Func::Min | Func::Max => acc.best.map(|(v, _)| v).unwrap_or(Json::Null),
                 };
                 values.push((agg.name.clone(), v, acc.n));
             }
@@ -751,6 +787,71 @@ impl Aggregation {
         }
         Ok(aggs)
     }
+}
+
+/// The value a `group by` groups a document on. A decimal of a typed
+/// document groups with the JSON number equal to it, if one is (`10.50`
+/// with `10.5`), else under `{"$decimal": "0.1"}`: equal values in one
+/// group, values that differ (`0.1` the decimal, `0.1` the float) apart.
+fn group_value(v: Leaf) -> Json {
+    match v.decimal() {
+        Some(d) => decimal_key(d),
+        None => v.json().into_owned(),
+    }
+}
+
+fn decimal_key(d: &Decimal) -> Json {
+    let n = d.normalize();
+    if n.scale() == 0 {
+        if let Some(j) = crate::num::int_json(n.mantissa()) {
+            return j;
+        }
+    }
+    if let Ok(f) = n.to_string().parse::<f64>() {
+        let equal = crate::doc::cmp_num(crate::doc::Num::Decimal(&n), crate::doc::Num::Float(f)) == Ordering::Equal;
+        if let (true, Some(num)) = (equal, serde_json::Number::from_f64(f)) {
+            return Json::Number(num);
+        }
+    }
+    let mut m = Map::new();
+    m.insert("$decimal".into(), Json::String(n.to_string()));
+    Json::Object(m)
+}
+
+/// The order of two values for `min` and `max`: numbers, decimals of typed
+/// documents among them, by their exact values, before texts.
+fn order_values(a: (&Json, Option<&Decimal>), b: (&Json, Option<&Decimal>)) -> Ordering {
+    use crate::num::NumKey;
+    let num = |(j, d): (&Json, Option<&Decimal>)| match (d, j) {
+        (Some(d), _) => Some(NumKey::Decimal(*d)),
+        (None, Json::Number(n)) => Some(NumKey::Json(n.clone())),
+        _ => None,
+    };
+    match (num(a), num(b)) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => GroupKey(a.0.clone()).cmp(&GroupKey(b.0.clone())),
+    }
+}
+
+/// `sum` or `avg` over decimals, and the integers next to them, exactly; a
+/// float among them is refused (NATIVE_DOCUMENTS.md 2.2). `avg` divides the
+/// exact sum, rounded to the 28 decimals a decimal holds. Both come out as
+/// the decimal's text, as plain JSON carries decimals.
+fn decimal_total(acc: &Acc, agg: &Agg) -> Result<Json, String> {
+    let ints = acc
+        .sum
+        .exact_int()
+        .ok_or("decimals and floats do not mix in a sum: the result would look exact without being so")?;
+    let beyond = || "the sum is beyond what a decimal holds exactly".to_string();
+    let ints = i64::try_from(ints).map(Decimal::from).map_err(|_| beyond())?;
+    let total = acc.decimals.unwrap_or_default().checked_add(ints).ok_or_else(beyond)?;
+    let value = match agg.func {
+        Func::Avg => total.checked_div(Decimal::from(acc.n)).ok_or_else(beyond)?,
+        _ => total,
+    };
+    Ok(Json::String(value.to_string()))
 }
 
 /// An aggregation result as JSON.

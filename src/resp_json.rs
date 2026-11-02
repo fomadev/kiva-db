@@ -17,7 +17,15 @@
 //! filters, which name several values, are refused.
 
 use super::*;
+use crate::doc::{self, Doc};
+use crate::docpath;
 use crate::jsonpath::{self, Seg};
+
+/// A stored document, to change: JSON, or a typed tree.
+enum Stored {
+    Json(Json),
+    Typed(Doc),
+}
 
 /// A parsed path, and whether it was written in the `$` form.
 struct Path {
@@ -123,13 +131,16 @@ impl Conn {
         Ok(self.get(k)?.map(|(v, m)| (to_json(v), m.expires_at)))
     }
 
-    /// The document at `k` and its expiry, to change it: refused when it holds
-    /// decimals, dates or times, which plain JSON would turn into texts.
-    fn json_doc_to_change(&mut self, k: &str) -> std::result::Result<Option<(Json, i64)>, Reply> {
-        match self.get(k)? {
-            Some((Value::Typed(_), _)) => Err(Reply::err(crate::value::typed_unchangeable(k).to_string())),
-            found => Ok(found.map(|(v, m)| (to_json(v), m.expires_at))),
-        }
+    /// The document at `k` and its expiry, to change it: a typed one as its
+    /// tree, so that the values a change does not touch keep their types.
+    fn doc_to_change(&mut self, k: &str) -> std::result::Result<Option<(Stored, i64)>, Reply> {
+        Ok(self.get(k)?.map(|(v, m)| {
+            let stored = match v {
+                Value::Typed(d) => Stored::Typed(d),
+                other => Stored::Json(to_json(other)),
+            };
+            (stored, m.expires_at)
+        }))
     }
 
     /// Answers one value per path: a list of the matches for a `$` path
@@ -175,11 +186,20 @@ impl Conn {
                     self.put(&k, to_value(value), exp)?;
                     return Ok(Reply::ok());
                 }
-                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
+                let Some((stored, exp)) = self.doc_to_change(&k)? else {
                     return Err(Reply::err("new objects must be created at the root"));
                 };
-                jsonpath::set(&mut doc, &p.segs, value).map_err(Reply::err)?;
-                self.put(&k, to_value(doc), exp)?;
+                let next = match stored {
+                    Stored::Json(mut doc) => {
+                        jsonpath::set(&mut doc, &p.segs, value).map_err(Reply::err)?;
+                        to_value(doc)
+                    }
+                    Stored::Typed(mut d) => {
+                        docpath::set(&mut d, &p.segs, doc::from_json(&value)).map_err(Reply::err)?;
+                        Value::typed(d)?
+                    }
+                };
+                self.put(&k, next, exp)?;
                 Ok(Reply::ok())
             }
             "JSON.GET" => {
@@ -241,15 +261,19 @@ impl Conn {
                 arity(args, 2)?;
                 let k = key(&args[1])?;
                 let p = path_at(args, 2)?;
-                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else { return Ok(Reply::Int(0)) };
+                let Some((stored, exp)) = self.doc_to_change(&k)? else { return Ok(Reply::Int(0)) };
                 if p.root() {
                     self.sess.kv_del(&k)?;
                     return Ok(Reply::Int(1));
                 }
-                if !jsonpath::delete(&mut doc, &p.segs) {
+                let next = match stored {
+                    Stored::Json(mut doc) => jsonpath::delete(&mut doc, &p.segs).then(|| to_value(doc)),
+                    Stored::Typed(mut d) => docpath::delete(&mut d, &p.segs).then(|| Value::typed(d)).transpose()?,
+                };
+                let Some(next) = next else {
                     return Ok(Reply::Int(0));
-                }
-                self.put(&k, to_value(doc), exp)?;
+                };
+                self.put(&k, next, exp)?;
                 Ok(Reply::Int(1))
             }
             "JSON.TYPE" => {
@@ -270,8 +294,38 @@ impl Conn {
                     Json::Number(n) => n,
                     _ => return Err(Reply::err("expected a number")),
                 };
-                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
+                let Some((stored, exp)) = self.doc_to_change(&k)? else {
                     return Err(Reply::err("could not perform this operation on a key that doesn't exist"));
+                };
+                let mut doc = match stored {
+                    Stored::Json(doc) => doc,
+                    Stored::Typed(mut d) => {
+                        if p.root() || docpath::get(&d, &p.segs).is_none() {
+                            return missing(&p);
+                        }
+                        let by = docpath::increment(docpath::get(&d, &p.segs), &by, &text(&args[3])?);
+                        let next = if name == "JSON.NUMINCRBY" {
+                            docpath::incr(&mut d, &p.segs, &by)
+                        } else {
+                            docpath::mul(&mut d, &p.segs, &by)
+                        }
+                        .map_err(Reply::err)?;
+                        self.put(&k, Value::typed(d)?, exp)?;
+                        // A decimal as its exact digits, never a rounded double.
+                        let (shown, text) = match &next {
+                            Doc::Decimal(x) => (Reply::bulk(x.to_string()), x.to_string()),
+                            other => {
+                                let j = doc::to_plain_json(other);
+                                (number(&j), j.to_string())
+                            }
+                        };
+                        return Ok(match (self.resp3, p.dollar) {
+                            (true, true) => Reply::array(vec![shown]),
+                            (true, false) => shown,
+                            (false, true) => Reply::bulk(format!("[{text}]")),
+                            (false, false) => Reply::bulk(text),
+                        });
+                    }
                 };
                 let next = if name == "JSON.NUMINCRBY" {
                     if get(&doc, &p).is_none() {
@@ -340,8 +394,35 @@ impl Conn {
                 let p = path(&args[2])?;
                 let first = if insert { 4 } else { 3 };
                 let values = args[first..].iter().map(|a| json_arg(a)).collect::<std::result::Result<Vec<_>, _>>()?;
-                let Some((mut doc, exp)) = self.json_doc_to_change(&k)? else {
+                let Some((stored, exp)) = self.doc_to_change(&k)? else {
                     return Err(Reply::err("could not perform this operation on a key that doesn't exist"));
+                };
+                let mut doc = match stored {
+                    Stored::Json(doc) => doc,
+                    Stored::Typed(mut d) => {
+                        let Some(Doc::Array(arr)) =
+                            (if p.root() { Some(&mut d) } else { docpath::get_mut(&mut d, &p.segs) })
+                        else {
+                            return Ok(self.per_path(&p, Some(Reply::nil())));
+                        };
+                        let values: Vec<Doc> = values.iter().map(doc::from_json).collect();
+                        if insert {
+                            let at = int(&args[3])?;
+                            let len = arr.len() as i64;
+                            let at = if at < 0 { len + at } else { at };
+                            if !(0..=len).contains(&at) {
+                                return Err(Reply::err("index out of bounds"));
+                            }
+                            for (i, v) in values.into_iter().enumerate() {
+                                arr.insert(at as usize + i, v);
+                            }
+                        } else {
+                            arr.extend(values);
+                        }
+                        let len = arr.len() as i64;
+                        self.put(&k, Value::typed(d)?, exp)?;
+                        return Ok(self.per_path(&p, Some(Reply::Int(len))));
+                    }
                 };
                 let Some(Json::Array(arr)) =
                     (if p.root() { Some(&mut doc) } else { jsonpath::get_mut(&mut doc, &p.segs) })
