@@ -26,7 +26,6 @@ use crate::config::Config;
 use crate::error::{KivaError, Result};
 use crate::format::{parse_header, FLAG_ENCRYPTED, REC_HEADER_LEN};
 use ring::aead::{Aad, LessSafeKey, Nonce, Tag, UnboundKey, AES_256_GCM, NONCE_LEN};
-use ring::rand::{SecureRandom, SystemRandom};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -97,7 +96,6 @@ impl Key {
 pub struct Keys {
     pub current: Key,
     old: Vec<Key>,
-    rng: SystemRandom,
 }
 
 impl std::fmt::Debug for Keys {
@@ -150,11 +148,12 @@ pub fn parse_key(text: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-/// A new random master key, as 64 hexadecimal characters.
-pub fn generate_key() -> String {
+/// A new random master key, as 64 hexadecimal characters. Fails, rather
+/// than giving a weaker key, when the system generator does.
+pub fn generate_key() -> Result<String> {
     let mut key = [0u8; 32];
-    SystemRandom::new().fill(&mut key).expect("the system random generator works");
-    key.iter().map(|b| format!("{b:02x}")).collect()
+    crate::util::fill_random(&mut key)?;
+    Ok(key.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn read_key_file(path: &str, setting: &str) -> Result<[u8; 32]> {
@@ -165,7 +164,7 @@ fn read_key_file(path: &str, setting: &str) -> Result<[u8; 32]> {
 
 impl Keys {
     pub fn new(current: &[u8; 32], old: &[[u8; 32]]) -> Keys {
-        Keys { current: Key::derive(current), old: old.iter().map(Key::derive).collect(), rng: SystemRandom::new() }
+        Keys { current: Key::derive(current), old: old.iter().map(Key::derive).collect() }
     }
 
     /// The identifier of the key new records are sealed with.
@@ -205,10 +204,10 @@ impl Keys {
         std::iter::once(&self.current).chain(&self.old).find(|k| k.id == id)
     }
 
-    fn nonce(&self) -> [u8; NONCE_LEN] {
+    fn nonce() -> Result<[u8; NONCE_LEN]> {
         let mut n = [0u8; NONCE_LEN];
-        self.rng.fill(&mut n).expect("the system random generator works");
-        n
+        crate::util::fill_random(&mut n)?;
+        Ok(n)
     }
 
     fn aad(domain: Domain, extra: &[u8], id: [u8; 4]) -> Vec<u8> {
@@ -219,9 +218,11 @@ impl Keys {
     }
 
     /// Encrypts `data` in place with the current key and appends the trailer.
-    pub fn seal(&self, domain: Domain, extra: &[u8], data: &mut Vec<u8>) {
+    /// Without a nonce from the system generator, `data` is left as it was
+    /// and nothing is encrypted: a nonce must never be predictable or reused.
+    pub fn seal(&self, domain: Domain, extra: &[u8], data: &mut Vec<u8>) -> Result<()> {
         let key = &self.current;
-        let nonce = self.nonce();
+        let nonce = Self::nonce()?;
         let tag = key
             .aead
             .seal_in_place_separate_tag(
@@ -233,6 +234,7 @@ impl Keys {
         data.extend_from_slice(tag.as_ref());
         data.extend_from_slice(&nonce);
         data.extend_from_slice(&key.id);
+        Ok(())
     }
 
     /// Decrypts what [`Keys::seal`] produced; returns the plaintext.
@@ -286,9 +288,9 @@ pub fn encode_record(
     flags: u8,
     timestamp: i64,
     expires_at: i64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let Some(keys) = keys else {
-        return crate::format::encode_record(key, value, ty, flags, timestamp, expires_at);
+        return Ok(crate::format::encode_record(key, value, ty, flags, timestamp, expires_at));
     };
     let k = key.as_bytes();
     let flags = flags | FLAG_ENCRYPTED;
@@ -303,11 +305,11 @@ pub fn encode_record(
     let mut body = Vec::with_capacity(k.len() + value.len() + TRAILER);
     body.extend_from_slice(k);
     body.extend_from_slice(value);
-    keys.seal(Domain::Record, &buf[4..REC_HEADER_LEN], &mut body);
+    keys.seal(Domain::Record, &buf[4..REC_HEADER_LEN], &mut body)?;
     buf.extend_from_slice(&body);
     let crc = crc32fast::hash(&buf[4..]);
     buf[..4].copy_from_slice(&crc.to_le_bytes());
-    buf
+    Ok(buf)
 }
 
 /// The key and stored value of a whole record whose checksum was verified,
@@ -347,7 +349,7 @@ mod tests {
     #[test]
     fn records_round_trip_and_reject_any_change() {
         let k = keys(1);
-        let rec = encode_record(Some(&k), "user:1", b"secret value", 1, 0, 1700, 0);
+        let rec = encode_record(Some(&k), "user:1", b"secret value", 1, 0, 1700, 0).unwrap();
         assert!(crate::format::verify_record(&rec));
         assert!(!rec.windows(6).any(|w| w == b"user:1"), "the key is not in clear");
         assert!(!rec.windows(6).any(|w| w == b"secret"), "the value is not in clear");
@@ -364,13 +366,13 @@ mod tests {
         assert_eq!(open_record(None, &rec), Err(OpenError::NoKey));
         assert_eq!(open_record(Some(&keys(2)), &rec), Err(OpenError::UnknownKey(k.current.id)));
         // The same plaintext never gives the same bytes twice.
-        assert_ne!(rec, encode_record(Some(&k), "user:1", b"secret value", 1, 0, 1700, 0));
+        assert_ne!(rec, encode_record(Some(&k), "user:1", b"secret value", 1, 0, 1700, 0).unwrap());
     }
 
     #[test]
     fn an_old_key_still_reads_after_a_rotation() {
         let old = keys(1);
-        let rec = encode_record(Some(&old), "a", b"1", 1, 0, 0, 0);
+        let rec = encode_record(Some(&old), "a", b"1", 1, 0, 0, 0).unwrap();
         let rotated = Keys::new(&[2; 32], &[[1; 32]]);
         assert_eq!(open_record(Some(&rotated), &rec).unwrap().1, b"1");
         assert_ne!(rotated.current.id, old.current.id);
@@ -385,20 +387,64 @@ mod tests {
 
     #[test]
     fn keys_are_64_hex_characters() {
-        let k = generate_key();
+        let k = generate_key().unwrap();
         assert_eq!(parse_key(&format!("  {k}\n")).unwrap().len(), 32);
         assert!(parse_key("abc").is_err());
         assert!(parse_key(&"g".repeat(64)).is_err());
-        assert_ne!(generate_key(), k);
+        assert_ne!(generate_key().unwrap(), k);
     }
 
     #[test]
     fn domains_do_not_mix() {
         let k = keys(3);
         let mut data = b"hint body".to_vec();
-        k.seal(Domain::Hint, b"id", &mut data);
+        k.seal(Domain::Hint, b"id", &mut data).unwrap();
         assert_eq!(k.open(Domain::Hint, b"id", &data).unwrap(), b"hint body");
         assert_eq!(k.open(Domain::Graphs, b"id", &data), Err(OpenError::Tampered));
         assert_eq!(k.open(Domain::Hint, b"other", &data), Err(OpenError::Tampered));
+    }
+
+    #[test]
+    fn a_broken_generator_encrypts_nothing_and_makes_no_key() {
+        use crate::util::tests::with_failing_random;
+        let k = keys(4);
+        let mut data = b"secret body".to_vec();
+        let err = with_failing_random(|| k.seal(Domain::Hint, b"id", &mut data)).unwrap_err();
+        assert!(err.to_string().starts_with("ERR_RANDOM_UNAVAILABLE"), "{err}");
+        assert!(!err.to_string().contains("secret"));
+        assert_eq!(data, b"secret body", "left as it was, no trailer with a made-up nonce");
+        assert!(with_failing_random(|| encode_record(Some(&k), "a", b"1", 1, 0, 0, 0)).is_err());
+        assert!(with_failing_random(generate_key).is_err());
+        // A record that is not encrypted needs no random bytes.
+        assert!(with_failing_random(|| encode_record(None, "a", b"1", 1, 0, 0, 0)).is_ok());
+    }
+
+    #[test]
+    fn an_encrypted_write_refused_by_the_generator_changes_nothing() {
+        use crate::engine::{Engine, EngineOptions};
+        use crate::util::tests::with_failing_random;
+        use crate::value::Value;
+        let dir = std::env::temp_dir().join(format!("kivadb_crypt_random_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.kiva");
+        let opts = || EngineOptions { keys: Some(Arc::new(keys(5))), ..EngineOptions::default() };
+        let e = Engine::open(&path, opts()).unwrap();
+        e.put("a", &Value::Str("kept".into()), 0, false).unwrap();
+        let len = std::fs::metadata(&path).unwrap().len();
+
+        assert!(with_failing_random(|| e.put("b", &Value::Str("new".into()), 0, false)).is_err());
+        assert!(with_failing_random(|| e.put("a", &Value::Str("changed".into()), 0, false)).is_err());
+        assert!(with_failing_random(|| e.delete("a")).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len, "nothing appended");
+        assert!(e.get("b").unwrap().is_none());
+        assert!(matches!(e.get("a").unwrap(), Some((Value::Str(s), _)) if s == "kept"));
+
+        drop(e);
+        let e = Engine::open(&path, opts()).unwrap();
+        assert!(matches!(e.get("a").unwrap(), Some((Value::Str(s), _)) if s == "kept"));
+        assert!(e.get("b").unwrap().is_none());
+        drop(e);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

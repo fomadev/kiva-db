@@ -312,38 +312,61 @@ pub fn glob_prefix(pattern: &str) -> &str {
 /// value. Identifiers made later sort after the earlier ones (by the second,
 /// then by the counter within one process), and two processes, on one
 /// machine or several, do not share the random part.
-pub fn new_id() -> String {
+/// The random parts are drawn when the first identifier is made; if the
+/// generator fails then, no identifier is made.
+pub fn new_id() -> crate::Result<String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::OnceLock;
     static PROCESS: OnceLock<[u8; 5]> = OnceLock::new();
     static COUNTER: OnceLock<AtomicU32> = OnceLock::new();
-    let process = PROCESS.get_or_init(|| {
-        let r = random_bytes(5);
-        [r[0], r[1], r[2], r[3], r[4]]
-    });
-    let counter = COUNTER.get_or_init(|| {
-        let r = random_bytes(3);
-        AtomicU32::new(u32::from_be_bytes([0, r[0], r[1], r[2]]))
-    });
+    let process = match PROCESS.get() {
+        Some(p) => p,
+        None => {
+            let mut r = [0u8; 5];
+            fill_random(&mut r)?;
+            PROCESS.get_or_init(|| r)
+        }
+    };
+    let counter = match COUNTER.get() {
+        Some(c) => c,
+        None => {
+            let mut r = [0u8; 3];
+            fill_random(&mut r)?;
+            COUNTER.get_or_init(|| AtomicU32::new(u32::from_be_bytes([0, r[0], r[1], r[2]])))
+        }
+    };
     let n = counter.fetch_add(1, Ordering::Relaxed) & 0x00ff_ffff;
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as u32;
     let mut bytes = Vec::with_capacity(12);
     bytes.extend_from_slice(&secs.to_be_bytes());
     bytes.extend_from_slice(process);
     bytes.extend_from_slice(&n.to_be_bytes()[1..]);
-    hex_encode(&bytes)
+    Ok(hex_encode(&bytes))
 }
 
-pub fn random_bytes(n: usize) -> Vec<u8> {
-    let mut v = vec![0u8; n];
-    if getrandom::getrandom(&mut v).is_err() {
-        // Extremely unlikely; fall back to a time-derived value rather than panic.
-        let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        for (i, b) in v.iter_mut().enumerate() {
-            *b = (t >> ((i % 16) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
-        }
+/// Fills `buf` from the operating system's cryptographic generator. When it
+/// fails, the failure is reported and nothing replaces it: bytes made from
+/// the clock or the process would be predictable, and they serve as salts,
+/// keys, nonces and identifiers. The error names no byte of `buf`.
+pub fn fill_random(buf: &mut [u8]) -> crate::Result<()> {
+    #[cfg(test)]
+    if tests::RANDOM_FAILS.with(|f| f.get()) {
+        return Err(random_failed("simulated failure"));
     }
-    v
+    getrandom::getrandom(buf).map_err(|e| random_failed(&e.to_string()))
+}
+
+fn random_failed(why: &str) -> crate::KivaError {
+    crate::KivaError::Other(format!(
+        "ERR_RANDOM_UNAVAILABLE: the operating system's random generator failed ({why}); nothing was done"
+    ))
+}
+
+/// `n` bytes from the operating system's cryptographic generator.
+pub fn random_bytes(n: usize) -> crate::Result<Vec<u8>> {
+    let mut v = vec![0u8; n];
+    fill_random(&mut v)?;
+    Ok(v)
 }
 
 /// Takes an exclusive lock on `file`, waiting up to half a second: a lock
@@ -362,9 +385,10 @@ pub fn lock_exclusive(file: &std::fs::File) -> bool {
     }
 }
 
-pub fn random_u64() -> u64 {
-    let b = random_bytes(8);
-    u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+pub fn random_u64() -> crate::Result<u64> {
+    let mut b = [0u8; 8];
+    fill_random(&mut b)?;
+    Ok(u64::from_le_bytes(b))
 }
 
 pub fn is_loopback(bind: &str) -> bool {
@@ -416,8 +440,36 @@ pub fn drift_text(drift_ms: i64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// Makes [`fill_random`] fail on this thread, as a broken generator would.
+        pub(crate) static RANDOM_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Runs `f` with the generator failing on this thread.
+    pub(crate) fn with_failing_random<T>(f: impl FnOnce() -> T) -> T {
+        RANDOM_FAILS.with(|r| r.set(true));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        RANDOM_FAILS.with(|r| r.set(false));
+        out.unwrap_or_else(|p| std::panic::resume_unwind(p))
+    }
+
+    #[test]
+    fn a_broken_generator_is_reported_and_never_replaced() {
+        let err = with_failing_random(|| random_bytes(16)).unwrap_err();
+        assert!(err.to_string().starts_with("ERR_RANDOM_UNAVAILABLE"), "{err}");
+        assert!(with_failing_random(random_u64).is_err());
+        let mut buf = [7u8; 12];
+        assert!(with_failing_random(|| fill_random(&mut buf)).is_err());
+        assert_eq!(buf, [7u8; 12], "nothing is written in place of random bytes");
+        // Working again, it gives fresh bytes each time.
+        let (a, b) = (random_bytes(16).unwrap(), random_bytes(16).unwrap());
+        assert_ne!(a, b);
+        assert_ne!(random_u64().unwrap(), random_u64().unwrap());
+        assert_eq!(new_id().unwrap().len(), 24);
+    }
 
     #[test]
     fn an_atomic_write_replaces_the_file_whole() {

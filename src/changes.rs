@@ -277,7 +277,10 @@ impl Journal {
             }
             segments.push(seg);
         }
-        let id = id.unwrap_or_else(crate::util::random_u64);
+        let id = match id {
+            Some(id) => id,
+            None => crate::util::random_u64()?,
+        };
         if segments.is_empty() {
             segments.push(new_segment(dir, id, last_seq + 1)?);
         }
@@ -361,7 +364,7 @@ impl Journal {
                 value: if keep_value { c.raw } else { &[] },
             });
             offsets.push((seq, buf.len() as u64, c.timestamp));
-            self.push_record(&mut buf, body);
+            self.push_record(&mut buf, body)?;
         }
         let last = changes.last().expect("not empty");
         self.write(&buf, &offsets)?;
@@ -388,19 +391,20 @@ impl Journal {
             value: &[],
         });
         let mut buf = Vec::new();
-        self.push_record(&mut buf, b);
+        self.push_record(&mut buf, b)?;
         self.write(&buf, &[])?;
         self.last_pos = Some((file_id, data_end));
         Ok(())
     }
 
-    fn push_record(&self, buf: &mut Vec<u8>, mut body: Vec<u8>) {
+    fn push_record(&self, buf: &mut Vec<u8>, mut body: Vec<u8>) -> Result<()> {
         if let Some(k) = &self.keys {
-            k.seal(Domain::Changes, &self.id.to_le_bytes(), &mut body);
+            k.seal(Domain::Changes, &self.id.to_le_bytes(), &mut body)?;
         }
         buf.extend_from_slice(&(body.len() as u32).to_le_bytes());
         buf.extend_from_slice(&crc32fast::hash(&body).to_le_bytes());
         buf.extend_from_slice(&body);
+        Ok(())
     }
 
     fn write(&mut self, buf: &[u8], offsets: &[(u64, u64, i64)]) -> Result<()> {

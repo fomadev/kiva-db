@@ -372,7 +372,7 @@ pub fn check(archive: &Path, near: &Path) -> Result<Checked> {
     }
 
     fs::create_dir_all(near)?;
-    let staging = near.join(format!(".kivadb-restore-{:016x}", crate::util::random_u64()));
+    let staging = near.join(format!(".kivadb-restore-{:016x}", crate::util::random_u64()?));
     fs::create_dir_all(&staging)?;
     let mut checked = Checked { manifest: Json::Null, staging: staging.clone(), lines };
 
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn a_log_is_checked_record_by_record() {
-        let dir = std::env::temp_dir().join(format!("kivadb-checklog-{:x}", crate::util::random_u64()));
+        let dir = std::env::temp_dir().join(format!("kivadb-checklog-{:x}", crate::util::random_u64().unwrap()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("store.kiva");
         let mut data = crate::format::file_header(7, crate::format::FORMAT_V1).to_vec();

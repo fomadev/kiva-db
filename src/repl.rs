@@ -161,12 +161,14 @@ impl ReplState {
         self.group.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Reads (or creates) this node's identity and group state from the configuration.
-    pub fn load_identity(&self, inst: &Instance) {
+    /// Reads (or creates) this node's identity and group state from the
+    /// configuration. A new identity needs the system generator: without
+    /// it, nodes could share one, and this fails.
+    pub fn load_identity(&self, inst: &Instance) -> crate::Result<()> {
         let mut cfg = inst.cfg_mut();
         let mut node = cfg.get("failover", "node_id");
         if node.is_empty() {
-            node = format!("{:016x}", crate::util::random_u64());
+            node = format!("{:016x}", crate::util::random_u64()?);
             let _ = cfg.set("failover", "node_id", &node);
         }
         let mut g = self.group();
@@ -174,6 +176,7 @@ impl ReplState {
         g.epoch = g.epoch.max(cfg.get_u64("failover", "epoch"));
         g.voted = g.voted.max(cfg.get_u64("failover", "voted"));
         g.known = cfg.get("failover", "nodes").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        Ok(())
     }
 
     pub fn node_id(&self) -> String {

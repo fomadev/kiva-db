@@ -184,7 +184,7 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
             let mut changed = false;
             if let Some(mut admin) = auth::get_user(&inst.system, auth::DEFAULT_ADMIN)? {
                 if admin.has_empty_password() {
-                    admin.set_password(&password);
+                    admin.set_password(&password)?;
                     auth::save_user(&inst.system, &admin)?;
                     inst.audit.log("system", "password of kiva set from KIVADB_ADMIN_PASSWORD", true);
                     changed = true;
@@ -646,7 +646,13 @@ fn main() {
         exit(report.exit_code());
     }
     if args.action == Some("keygen") {
-        println!("{}", kivadb::crypt::generate_key());
+        match kivadb::crypt::generate_key() {
+            Ok(key) => println!("{key}"),
+            Err(e) => {
+                eprintln!("Error: no key was made: {e}");
+                exit(1);
+            }
+        }
         eprintln!(
             "Keep this key safe and away from the data: without it, encrypted data cannot be read. \
              Give it to KivaDB in {} or in a file named by encryption.key_file.",

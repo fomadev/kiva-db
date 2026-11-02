@@ -200,9 +200,9 @@ fn syntax() -> Reply {
     Reply::err("syntax error")
 }
 
-/// A random index below `n`.
-fn pick(n: usize) -> usize {
-    (crate::util::random_u64() % n as u64) as usize
+/// A random index below `n`; an error reply when the system generator fails.
+fn pick(n: usize) -> std::result::Result<usize, Reply> {
+    crate::util::random_u64().map(|r| (r % n as u64) as usize).map_err(|e| Reply::err(e.to_string()))
 }
 
 /// How `ZUNIONSTORE` and friends combine the scores of one member.
@@ -358,13 +358,13 @@ impl Conn {
                     Some(c) if c < 0 => {
                         let all: Vec<&String> = set.keys().collect();
                         for _ in 0..c.unsigned_abs().min(1_000_000) {
-                            chosen.push(all[pick(all.len())].clone());
+                            chosen.push(all[pick(all.len())?].clone());
                         }
                     }
                     _ => {
                         let mut pool: Vec<String> = set.keys().cloned().collect();
                         for _ in 0..count.unwrap_or(1).min(pool.len() as i64) {
-                            let i = pick(pool.len());
+                            let i = pick(pool.len())?;
                             chosen.push(pool.swap_remove(i));
                         }
                     }
@@ -690,16 +690,16 @@ impl Conn {
                 let all: Vec<(String, f64)> = z.iter().map(|(m, s)| (m.clone(), score_of(s))).collect();
                 let mut chosen = Vec::new();
                 match count {
-                    None => return Ok(Reply::bulk(all[pick(all.len())].0.clone())),
+                    None => return Ok(Reply::bulk(all[pick(all.len())?].0.clone())),
                     Some(c) if c < 0 => {
                         for _ in 0..c.unsigned_abs().min(1_000_000) {
-                            chosen.push(all[pick(all.len())].clone());
+                            chosen.push(all[pick(all.len())?].clone());
                         }
                     }
                     Some(c) => {
                         let mut pool = all;
                         for _ in 0..(c as usize).min(pool.len()) {
-                            let i = pick(pool.len());
+                            let i = pick(pool.len())?;
                             chosen.push(pool.swap_remove(i));
                         }
                     }
@@ -978,6 +978,15 @@ mod tests {
 
     fn z(pairs: &[(&str, f64)]) -> Members {
         pairs.iter().map(|(m, s)| (m.to_string(), score_json(*s))).collect()
+    }
+
+    #[test]
+    fn a_broken_generator_gives_an_error_reply_not_a_member() {
+        match crate::util::tests::with_failing_random(|| pick(3)) {
+            Err(Reply::Error(e)) => assert!(e.starts_with("ERR ERR_RANDOM_UNAVAILABLE"), "{e}"),
+            other => panic!("expected an error reply, got {other:?}"),
+        }
+        assert!(pick(3).unwrap() < 3);
     }
 
     fn names(items: &[(String, f64)]) -> Vec<&str> {

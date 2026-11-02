@@ -1511,7 +1511,7 @@ impl Session {
     /// `prefix` followed by a new identifier: a key that does not exist.
     pub(crate) fn new_key(&mut self, prefix: &str) -> Result<String, String> {
         for _ in 0..8 {
-            let key = format!("{prefix}{}", crate::util::new_id());
+            let key = format!("{prefix}{}", crate::util::new_id().map_err(|e| e.to_string())?);
             validate_key_name(&key)?;
             if !self.kv_exists(&key)? {
                 return Ok(key);

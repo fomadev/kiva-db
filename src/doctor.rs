@@ -138,7 +138,11 @@ pub fn examine(home: &Path, running: Running) -> Report {
 }
 
 fn home_writable(r: &mut Report, home: &Path) {
-    let probe = home.join(format!(".doctor-{:016x}", crate::util::random_u64()));
+    let tag = match crate::util::random_u64() {
+        Ok(n) => n,
+        Err(e) => return r.add(Level::Fail, "Random generator", e.to_string(), None),
+    };
+    let probe = home.join(format!(".doctor-{tag:016x}"));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);

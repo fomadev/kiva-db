@@ -752,7 +752,7 @@ impl Session {
             if !is_admin && name != self.user_name() {
                 return Err("permission denied: you can only change your own password.".into());
             }
-            user.set_password(&password);
+            user.set_password(&password)?;
             auth::save_user(&self.inst.system, &user)?;
             out.say(format!("Password updated for '{name}'."));
             if password.is_empty() {

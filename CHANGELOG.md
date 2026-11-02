@@ -52,6 +52,7 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 ### Fixed
 
+* **Security:** when the operating system's random generator failed, KivaDB made password salts and identifiers from the clock instead, without saying so, and those values were predictable. It now refuses the operation with `ERR_RANDOM_UNAVAILABLE`: no account is created and no password is changed, an encrypted write is not made, `kivadb keygen` makes no key, and `HRANDFIELD`, `SRANDMEMBER`, `SPOP` and `ZRANDMEMBER` answer an error. Encryption no longer panics when the generator fails: the write is refused, and vector graphs are not saved rather than saved in clear. Existing accounts and data are unchanged.
 * `kivadb update` ignored the suffix of a pre-release, so that a release candidate never saw its release as newer. `2.0.0` is now newer than `2.0.0-rc.1`.
 * `CHANGELOG.md` held the markers of an unresolved merge in the section of 2.0.
 * A damaged `store.kiva.meta` was ignored in silence: the workspace opened without its secondary indexes, unique indexes and schemas, and a duplicate of a unique value was then accepted. The file is now written whole or not at all (a temporary file, synced, then renamed), and one that cannot be read stops the opening of the workspace with `ERR_DATA_CORRUPTED`, naming the file and the ways out; `kivadb doctor` reports it ([30.1](DOCUMENTATION.md#301-starting)).
