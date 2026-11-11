@@ -79,7 +79,7 @@ kivadb --help     every option
 
 Type `help` inside the shell for the list of commands.
 
-Prefer a window? **[Kiva Studio](https://github.com/fomadev/kiva-studio)** is the desktop client for Windows, Linux and macOS: data browser, query builder, similarity search, users and server health.
+Prefer a window? **[Kiva Studio](https://fomadev.github.io/projects/kiva-studio/)** is the desktop client for Windows, Linux and macOS: data browser, query builder, similarity search, users and server health.
 
 ## Documentation
 
