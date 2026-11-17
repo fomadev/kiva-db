@@ -540,3 +540,117 @@ A value of a typed document is judged as follows:
 - No command creates a native value yet: typed literals arrive in C4, extended JSON in C5.
 - Dates, times and datetimes are not a kind of their own in indexes and sorting (18.1).
 - A decimal is compared with the value of a condition, which is a JSON number. `where price = 0.1` therefore finds the decimal `0.1` only if the float `0.1` equals it, which it does not. Ranges work. Equality on such decimals needs decimal literals (C4).
+
+## 19. C4: preparation
+
+Nothing of this section is implemented. It prepares lot C4 (typed literals) so that its review starts from written rules; the code waits for the maintainer's approval.
+
+State of main when it was written (`6bd49e8`): C1 to C3 merged (#98), the design of the random functions merged (#99), and lot R0 merged (#100): `util::random_bytes` no longer falls back on the clock, a failure of the system generator is `ERR_RANDOM_UNAVAILABLE` and nothing is written in place of the random bytes. The CI of main (multi-architecture build, Node.js and Python drivers) is green on `e9b6035` and `6bd49e8`.
+
+### 19.1 What C4 must accept
+
+Typed values at any depth, in objects, arrays and sub-documents, mixed with untyped JSON values, by the grammar of [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) 5.2:
+
+```
+set account:1 {
+  "id": uuid "550e8400-e29b-41d4-a716-446655440000",
+  "age": int 25,
+  "balance": decimal "1250.50",
+  "created_at": datetime "2026-10-31T16:18:55Z",
+  "values": [int 8, float 0.5, decimal "0.10", date "2026-10-31"],
+  "owner": {"since": date "2020-01-15", "limits": [decimal "500", decimal "2500.00"]}
+}
+```
+
+| Literal | Stored as | Notes |
+| :--- | :--- | :--- |
+| `int 25` | `int` | refused with a fraction, an exponent, or beyond `i64` |
+| `float 0.5` | `float` | `float 8` is the float `8.0`; `NaN` and infinities refused |
+| `decimal "1250.50"`, `decimal 1250.50` | `decimal`, scale kept | read from its text, never through a float; more than 28 decimals refused, never rounded (2.2) |
+| `date "..."`, `time "..."`, `datetime "..."` | native `date`, `time`, `datetime` | session formats or ISO; a datetime without an offset is a wall clock of the session's zone |
+| `uuid "..."` | a **text**, in canonical form (lower case, with dashes) | see 19.2 |
+| `string`, `bool`, `null`, `object`, `array`, `number` | as the untyped value | `number` is the untyped rule |
+
+A document whose leaves are all JSON types after parsing (`{"age": int 25}`) is written in JSON, as today (3.4, H-format): `int 8` and `8` write the same integer. A document holding a `decimal`, `date`, `time` or `datetime` is written in `KDOC`, and raises its file to format 3 (section 4).
+
+Read back with `json type`, each path of the example names its type: `id` is a `string`, `age` an `int`, `balance` a `decimal`, `created_at` a `datetime`, and `values` an array of `int`, `float`, `decimal` and `date`.
+
+### 19.2 `uuid`: a checked text, not a type
+
+Decided by the maintainer on 2026-11-02, for 2.0.0:
+
+- `uuid "..."` is accepted in typed literals and in conditions. The text is checked (32 hexadecimal digits, with or without the four dashes; braces and other forms refused) and written in canonical form as a **string**: `uuid "550E8400E29B41D4A716446655440000"` stores `"550e8400-e29b-41d4-a716-446655440000"`.
+- No native `uuid` leaf, no `KDOC` tag, no schema type, no change of format. `json type` answers `string`.
+- A native `uuid` type (16 bytes, its own tag) is left to a later version. Adding it then needs a `KDOC` tag and its own compatibility rules, which this choice does not prevent.
+
+### 19.3 Exact conditions
+
+C4 accepts typed literals as the value of a condition:
+
+```
+get account:* where balance = decimal "1250.50"
+get account:* where balance in [decimal "0.10", decimal "1250.50"]
+get account:* where balance >= decimal "1000" and age = int 25
+```
+
+| Decision | Rule |
+| :--- | :--- |
+| Carrying | the condition value is the extended form `{"$decimal": "1250.50"}`, as moments already are (`{"$datetime": ...}`, accepted by `query::check_value`); `int` and `float` stay JSON numbers, a `float` always with a fraction |
+| Judging | a `decimal` value is `NumKey::Decimal`, compared, ordered and hashed by `doc::cmp_num` and `doc::num_class` (15.1), on JSON, MessagePack and `KDOC` documents alike |
+| Indexes | B-tree and hash lookups use the same `NumKey`. Each condition is tested with and without an index, and after a reopen, and must return the same keys |
+| Equality | `decimal "1250.50"` equals `decimal "1250.5"`, the JSON integer `1250` never, and a float only when the float is exactly that value |
+| `where price = 0.1` | unchanged: `0.1` is the float `0.1`, which is not the decimal `0.1` (18.6). It is **never** converted to a decimal behind the user's back. The documentation of conditions and Chapter 33 show `decimal "0.1"` as the way to find it |
+| `where price = float 0.1` | the same as `0.1`, written explicitly |
+| `uuid "..."` | the canonical text: it finds the ids written by `uuid "..."` and the texts already in canonical form |
+| Structured requests (REST, binary protocol) | `{"$decimal": "..."}` in their conditions comes with extended JSON (C5); until then they take JSON numbers |
+
+### 19.4 Increments with a typed operand
+
+The type of the operand is written, and read the same way on every path:
+
+| Command | Operand |
+| :--- | :--- |
+| `json incr k .balance decimal "-100.25"` | the decimal `-100.25` |
+| `json incr k .ratio float 0.1` | the float `0.1`; refused against a decimal, naming both (2.2) |
+| `json incr k .count int 3` | the integer `3` |
+| `json incr k .balance -100.25` (untyped) | the rule of C3, `docpath::increment`: read as a decimal when the target is a decimal, otherwise as the JSON number it is; a number with an exponent stays a float |
+
+The untyped rule stays, since scripts written for the candidates use it, and is documented next to the typed form. It is tested on each path that takes an untyped number: the shell, `.kva` files, Redis `JSON.NUMINCRBY` and `JSON.NUMMULTBY` (which have no typed form), and the Lua helpers when C5 adds them. A typed operand never changes kind: a `decimal` stays exact, a `float` stays a float.
+
+### 19.5 Commands and parser
+
+| Decision | Rule |
+| :--- | :--- |
+| Commands | `set`, `update`, `add`, `json set`, `json append`, `json insert`, `json incr`, the conditions of `get where`, `count`, the aggregates and `del where`, and `.kva` files |
+| Not in C4 | REST bodies, the binary protocol, Redis `JSON.SET`, Lua tables, the drivers: plain JSON until C5 and C6 ([TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) 5.4) |
+| Plain JSON first | `serde_json` reads the token first, as today (`exec::json_literal`); only when it fails and the token holds a type word in a value position does the typed parser run. A literal without types gives the same document as before, by construction |
+| Parser | recursive descent over the `Kind::Json` token, producing `Doc` directly; never a search and replace, never inside strings or keys |
+| Errors | line, column and path: `line 3, column 18 (.values[3]): '31-02-2026' is not a date` |
+| Limits | depth 128 (`doc::MAX_DEPTH`) and the existing size limits; a key given twice keeps the last value |
+| Display | `get` and `json get` show typed leaves in the session's formats; plain JSON for programs is unchanged |
+
+### 19.6 A change of behaviour to approve
+
+Today `json set o:1 .day date "2026-10-31"` on a JSON document writes the ISO **text** `"2026-10-31"` (`time_expr`, then `to_json`). Section 5 says C4 stores a native `date` instead. On a JSON document of an existing workspace, this rewrites the document in `KDOC` and raises its file to format 3, after which `2.0.0-rc.2` no longer opens it (4.3).
+
+Queries give the same answers either way, since a native date is judged as its ISO text (18.1). The choice is about files and going back:
+
+| Option | Effect |
+| :--- | :--- |
+| **A. Native, as section 5 says (proposed)** | one rule everywhere: a typed literal is a native value. Listed in the release notes as a change from the candidates |
+| B. Text in JSON documents, native in typed ones | no format raise by this command, but the same command gives two types depending on the document, which this design refuses elsewhere |
+
+### 19.7 Tests to write
+
+- Round trip of the example of 19.1, and of every type at depths 1, 2 and 128 (the limit), in objects and arrays, through write, read, reopen, compaction, backup and restore, and replication.
+- A document whose typed leaves are JSON types only (`int`, `float`, `string`) stays JSON, and its file keeps its format.
+- Refusals, each with its line, column and path: a fraction in `int`, a decimal with 29 decimals, an invalid date, a skipped wall-clock hour, a malformed `uuid`, `[int 8, datetime created_at "..."]`.
+- A type word inside a string or a key is text: `{"int 8": "decimal 1"}` reads as plain JSON.
+- `where balance = decimal "1250.50"`, `in`, ranges, `and` and `or`, with and without a B-tree and a hash index, and after a reopen: the same keys. `where price = 0.1` still does not match the decimal `0.1`.
+- `json incr` with `decimal`, `float`, `int` and untyped operands, on decimal, float and integer targets, in the shell and over Redis.
+- A unique index over `decimal "10.50"` and the JSON `10.5`: one duplicate (U-num).
+- The full suite, clippy, the Node.js and Python driver tests, and the multi-OS CI.
+
+### 19.8 Out of C4
+
+Extended JSON in REST and the protocols, and `kiva.decimal()` in Lua (C5); the drivers (C6); `int`, `float` and `decimal` keys (N2); `convert ... to date`, and the replication and backup checks (C7); the random functions R1 to R4. C4 prepares no candidate, tag or release.
