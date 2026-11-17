@@ -629,7 +629,7 @@ The untyped rule stays, since scripts written for the candidates use it, and is 
 | Limits | depth 128 (`doc::MAX_DEPTH`) and the existing size limits; a key given twice keeps the last value |
 | Display | `get` and `json get` show typed leaves in the session's formats; plain JSON for programs is unchanged |
 
-### 19.6 A change of behaviour to approve
+### 19.6 A change of behaviour, approved
 
 Today `json set o:1 .day date "2026-10-31"` on a JSON document writes the ISO **text** `"2026-10-31"` (`time_expr`, then `to_json`). Section 5 says C4 stores a native `date` instead. On a JSON document of an existing workspace, this rewrites the document in `KDOC` and raises its file to format 3, after which `2.0.0-rc.2` no longer opens it (4.3).
 
@@ -637,8 +637,10 @@ Queries give the same answers either way, since a native date is judged as its I
 
 | Option | Effect |
 | :--- | :--- |
-| **A. Native, as section 5 says (proposed)** | one rule everywhere: a typed literal is a native value. Listed in the release notes as a change from the candidates |
+| **A. Native, as section 5 says (chosen)** | one rule everywhere: a typed literal is a native value. Listed in the release notes as a change from the candidates |
 | B. Text in JSON documents, native in typed ones | no format raise by this command, but the same command gives two types depending on the document, which this design refuses elsewhere |
+
+**Decision.** The maintainer chose option A on 2026-11-17: in C4, a typed literal written by `json set`, `json append` or `json insert` is a native value, in a JSON document as in a typed one. The release notes and Chapter 33 list it as a change from the candidates, with its consequence: the first native value written into a workspace raises its file to format 3, which `2.0.0-rc.2` no longer opens (4.3). A test checks that `json set o:1 .day date "2026-10-31"` on a JSON document stores a native `date`, rewrites the document in `KDOC`, and that `get o:* where day = date "2026-10-31"` finds it as before.
 
 ### 19.7 Tests to write
 
