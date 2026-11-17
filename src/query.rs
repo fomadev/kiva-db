@@ -158,7 +158,11 @@ pub fn split_time_fn(field: &str) -> (Option<TimeFn>, &str) {
 /// `in`, a list of them; for `like` and `ilike`, a text pattern.
 pub fn check_value(op: CmpOp, value: &Json) -> Result<(), String> {
     // A moment (`{"$datetime": ...}`, `{"$time": ...}`) counts as one value.
-    let scalar = |v: &Json| !matches!(v, Json::Array(_) | Json::Object(_)) || crate::time::tagged(v).is_some();
+    let scalar = |v: &Json| {
+        !matches!(v, Json::Array(_) | Json::Object(_))
+            || crate::time::tagged(v).is_some()
+            || crate::num::cond_decimal(v).is_some()
+    };
     match op {
         CmpOp::In => match value.as_array() {
             Some(list) if list.is_empty() => Err("'in' needs at least one value: in [\"Goma\", \"Bukavu\"]".into()),
@@ -415,6 +419,10 @@ impl fmt::Display for Expr {
         match self {
             Expr::Test(t) => match t.cond.func {
                 Some(func) => write!(f, "{}({}) {} {}", func.name(), t.cond.field, t.cond.op.symbol(), t.cond.value),
+                None if crate::num::cond_decimal(&t.cond.value).is_some() => {
+                    let d = crate::num::cond_decimal(&t.cond.value).expect("a decimal");
+                    write!(f, "{} {} decimal \"{d}\"", t.cond.field, t.cond.op.symbol())
+                }
                 None if crate::time::tagged(&t.cond.value).is_some() => {
                     write!(f, "{} {} {}", t.cond.field, t.cond.op.symbol(), crate::time::show_value(&t.cond.value))
                 }

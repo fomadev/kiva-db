@@ -329,6 +329,15 @@ impl SKey {
         }
     }
 
+    /// The key of the value of a condition: as [`SKey::from_json`], and a
+    /// `decimal "..."` by its exact value.
+    pub fn from_cond(j: &Json) -> Option<SKey> {
+        match crate::num::cond_decimal(j) {
+            Some(d) => Some(SKey::Num(crate::num::NumKey::Decimal(d))),
+            None => SKey::from_json(j),
+        }
+    }
+
     pub fn from_json(j: &Json) -> Option<SKey> {
         match j {
             Json::Null => Some(SKey::Null),
@@ -796,9 +805,14 @@ pub fn compare_json(a: &Json, op: CmpOp, b: &Json) -> bool {
     }
     // `now() - 7 days`, `time "08:00"`: moments compared as moments, whatever
     // the form of the text in the document.
-    let ord = match crate::time::tagged(b) {
-        Some((tag, text)) => crate::time::compare_tagged(a, tag, text),
-        None => plain_order(a, b, op),
+    let ord = match (crate::num::cond_decimal(b), crate::time::tagged(b)) {
+        // `decimal "0.10"`: a number of the document by its exact value.
+        (Some(d), _) => match a {
+            Json::Number(n) => Some(crate::num::NumKey::Decimal(d).cmp_json(n).reverse()),
+            _ => None,
+        },
+        (None, Some((tag, text))) => crate::time::compare_tagged(a, tag, text),
+        (None, None) => plain_order(a, b, op),
     };
     verdict(ord, op)
 }
@@ -810,7 +824,7 @@ fn compare_decimal(d: &rust_decimal::Decimal, op: CmpOp, b: &Json) -> bool {
         (CmpOp::In, Json::Array(list)) => return list.iter().any(|v| compare_decimal(d, CmpOp::Eq, v)),
         (CmpOp::In | CmpOp::Like | CmpOp::ILike, _) => return false,
         (_, Json::Number(n)) => Some(crate::num::NumKey::Decimal(*d).cmp_json(n)),
-        _ => None,
+        (_, b) => crate::num::cond_decimal(b).map(|e| d.cmp(&e)),
     };
     verdict(ord, op)
 }
@@ -4736,14 +4750,14 @@ impl Engine {
         }
         match cond.op {
             CmpOp::Eq => {
-                if let Some(set) = SKey::from_json(&cond.value).and_then(|sk| idx.map.get(&sk)) {
+                if let Some(set) = SKey::from_cond(&cond.value).and_then(|sk| idx.map.get(&sk)) {
                     f(set);
                 }
                 return;
             }
             CmpOp::In => {
                 for v in cond.value.as_array().into_iter().flatten() {
-                    if let Some(set) = SKey::from_json(v).and_then(|sk| idx.map.get(&sk)) {
+                    if let Some(set) = SKey::from_cond(v).and_then(|sk| idx.map.get(&sk)) {
                         if !f(set) {
                             return;
                         }
@@ -4785,7 +4799,7 @@ impl Engine {
             }
             _ => {}
         }
-        let Some(sk) = SKey::from_json(&cond.value) else {
+        let Some(sk) = SKey::from_cond(&cond.value) else {
             return;
         };
         // Only a B-tree is ever chosen for a range.
@@ -4826,6 +4840,9 @@ impl Engine {
             (SKey::Null, Json::Null) => Some(Equal),
             (SKey::Bool(a), Json::Bool(b)) => Some(a.cmp(b)),
             (SKey::Num(a), Json::Number(n)) => Some(a.cmp_json(n)),
+            (SKey::Num(a), v @ Json::Object(_)) => {
+                crate::num::cond_decimal(v).map(|d| a.cmp(&crate::num::NumKey::Decimal(d)))
+            }
             (SKey::Str(a), Json::String(b)) => Some(a.as_str().cmp(b.as_str())),
             _ => None,
         };
@@ -4855,9 +4872,9 @@ impl Engine {
         }
         match cond.op {
             CmpOp::Ne => false,
-            CmpOp::In => cond.value.as_array().is_some_and(|l| l.iter().all(|v| SKey::from_json(v).is_some())),
+            CmpOp::In => cond.value.as_array().is_some_and(|l| l.iter().all(|v| SKey::from_cond(v).is_some())),
             CmpOp::Like | CmpOp::ILike => cond.value.is_string(),
-            _ => SKey::from_json(&cond.value).is_some(),
+            _ => SKey::from_cond(&cond.value).is_some(),
         }
     }
 
@@ -5008,7 +5025,7 @@ impl Engine {
                 .split(", ")
                 .map(|f| {
                     let c = equal.iter().find(|c| c.field == f && pattern_covers(&s.pattern, &c.pattern))?;
-                    crate::time::tagged(&c.value).is_none().then(|| SKey::from_json(&c.value)).flatten()
+                    crate::time::tagged(&c.value).is_none().then(|| SKey::from_cond(&c.value)).flatten()
                 })
                 .collect();
             let keys: Vec<String> = s.map.get(&SKey::Tuple(values?)).into_iter().flatten().cloned().collect();

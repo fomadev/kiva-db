@@ -266,7 +266,8 @@ fn json_messagepack_and_kdoc_documents_answer_the_same_queries() {
     assert_eq!(ok(&mut s, "count where o:*.id >= 2"), "Count: 2");
     // A date reads as its ISO text until queries know native values (lot C3).
     assert!(ok(&mut s, "get where o:*.day = \"2026-10-31\"").contains("o:3"));
-    assert!(ok(&mut s, "get o:3").contains(r#""total":"10.50""#));
+    // The shell shows a typed document in the typed syntax (C4, NATIVE_DOCUMENTS.md 19.5).
+    assert!(ok(&mut s, "get o:3").contains(r#""total": decimal "10.50""#));
 
     // One unique index over the three encodings.
     ok(&mut s, "create unique index on o:*.email");
