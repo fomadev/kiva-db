@@ -1076,3 +1076,83 @@ C7 follows section 25 and the decisions F1 to F5, in two pull requests: the code
 - The rows of `get where` show a typed document as plain JSON; `get <key>` uses the typed syntax.
 - `sum` of decimals in the shell showed its total quoted (`Sum: "1250.60"`), since the aggregate gives it as a JSON text. Fixed after C7: `sum`, `avg`, `min` and `max` of decimals are shown as numbers (`Sum: 1250.60`), and a text field keeps its quotes; programs and REST still read the decimal's text, as plain JSON carries decimals.
 - The examples of the manual are not yet run by a test of their own (25.5); lot S can add one.
+
+## 27. S: preparation
+
+Nothing of this section is implemented. It prepares lot S, the last of section 13: the checks a candidate needs, then the candidate itself. The decisions of 27.8 are to take.
+
+State of main when it was written (`a97aa83`): C1 to C7, N2 and R0 merged, and the display of decimal aggregates fixed (#118). The CI of main is green. `Cargo.toml` says `2.0.0-rc.2`, the last tag is `v2.0.0-rc.2` (2026-10-29), and nothing written since C2 has been in a candidate.
+
+### 27.1 What section 13 gives S, read in the code
+
+| Piece | State |
+| :--- | :--- |
+| A home of 1.7.1 opened by main | **Done**: `tests/fixtures/v1.7.1` and `v1.7.1-encrypted`, made by the real 1.7.1 from `v1.7.1.kva`; `tests/compat.rs` and `tests/native.rs` (raised to format 3 only by a typed document) |
+| Going back to 1.7.1, and the replication between 1.x and 2.x refused | **Done**, against the real 1.7.1 in the CI (Linux, `KIVADB_V1_BIN`) |
+| `rc.2` refusing a home of format 3 and leaving it as it is; an `rc.2` replica refused before the snapshot; a home without typed documents opened by `rc.2` | **Done**, against the real `rc.2` in the CI (Linux, `KIVADB_RC2_BIN`, `tests/native.rs`) |
+| A home **written by `rc.2`** opened by main: dates (format 2), projects and grants of 2.0, schemas, the change journal, unique indexes, vectors | **Missing**: there is no fixture of `rc.2`, and the homes of the tests are written by main itself |
+| The path of a real upgrade, 1.7.1 then `rc.2` then main, on one home | **Missing** |
+| Crash tests | **Partly**: a torn last record, a killed process (`network.rs`), a crash at the first date (`compat.rs`) and at the first typed document (`native.rs`), a transaction cut (`changes.rs`). Not covered: a crash in the middle of `convert ... to <type>`, which writes many typed documents in one transaction and raises the file to format 3 |
+| Benchmarks | **Old**: `versions.md` compares 1.7.1 with main at `a15abdb`, before C2 (2026-10-28); `documents.md` measures `KDOC` alone (C2). Neither measures main as it is now, with typed documents, the comparisons of C3 and the exact numbers of N2 |
+| The examples of the manual | **Not run**: about 340 `kiva>` lines, none read by a test (25.5, 26.3) |
+| The pages of a release | **Stale**: `docs/v2/IMPLEMENTATION_MATRIX.md` has no row for the native values and gives the drivers 1.2.0 and 1.0.0; `docs/v2/RELEASE.md` says the release publishes the Node.js driver 1.2.0 (it is 1.3.0) |
+| A candidate prepared from main | **Not started** |
+
+### 27.2 Compatibility with `rc.2`
+
+The users of a candidate run `rc.2` today. What they wrote must open in the next version, and nothing tests that. As for 1.7.1:
+
+- **a fixture** `tests/fixtures/v2.0.0-rc.2`, made once by the published `rc.2` executable (checked against its `SHA256SUMS.txt`) from a script `v2.0.0-rc.2.kva` kept beside it: dates, datetimes and times in keys and documents (format 2), a project with grants and a default workspace, a schema, unique and secondary indexes, an expiry, a vector index, a change journal with a cursor;
+- **a test** that opens a copy and finds all of it, reads the journal from its cursor, writes a typed document (format 3) and a `decimal` key, and runs `doctor`, which says format 2 then 3; the fixture itself is never changed, as for 1.7.1;
+- **the path of an upgrade** in the CI (Linux, where both old executables are already fetched): a home written by 1.7.1, opened and written by `rc.2`, then opened by main, with `doctor` and every value checked at each step.
+
+### 27.3 Crash tests
+
+One test of its own: `convert order:*.created_at to datetime` on a few hundred documents, the file cut at each record of the transaction (as `a_crash_while_the_first_typed_document_is_written_loses_nothing_else` does), then opened again. Either every document is converted, or none is and the texts are as before; the other keys are never lost. When the header was raised to format 3 before the crash, the file says format 3 with no typed record in it, which an older KivaDB refuses as it would after the conversion; Chapter 33 says so.
+
+### 27.4 Benchmarks
+
+- `benches/versions.rs` run again with main as it is now against 1.7.1, in the same way (3 rounds at 2 000 and 20 000 documents, 2 at 100 000), and `versions.md` rewritten from those runs, the old ones kept in `runs/`.
+- One case added: the same orders as typed documents (`KDOC`) and as JSON, written, read and queried, so that the cost of the native values is measured against what they replace.
+- The machine: the 2-core Windows laptop of the earlier runs, since it is the one that has them. A run on Linux was wanted (17); the CI runners are shared, and their figures move too much to be published as measurements. The limit stays in `CHANGELOG.md` ("Known limits").
+
+### 27.5 The examples of the manual
+
+A test `tests/manual.rs` that reads `DOCUMENTATION.md` and runs its examples:
+
+- each `text` block whose lines start with `kiva>` is run in a shell session (`Session`, as in `tests/commands.rs`), the blocks of one chapter one after the other in the same home, since an example builds on the one before;
+- the answer of each command is compared line by line with the lines under it; `...` in an answer stands for a part that changes (a time, an identifier, a duration);
+- a block that cannot run in a test (a server to start, a second machine, the network, a file outside the home, a password typed in) is preceded by `<!-- not run: <reason> -->`, and the test counts the blocks left out, so that the count only goes down by choice;
+- first the chapters of the shell, where most examples are (5, 6, 9, 10, 11, 13, 14, 16, 26: about 250 `kiva>` lines); the others follow when a block of theirs changes.
+
+What the test finds wrong is fixed in the manual, or in the code when the manual says what was meant.
+
+### 27.6 The pages of a release
+
+- `IMPLEMENTATION_MATRIX.md`: rows for the native values (C1 to C7, N2, with their tests and sections), the drivers at 1.3.0 and 1.1.0, the benchmarks of 27.4.
+- `RELEASE.md`: the Node.js driver 1.3.0, the Python driver 1.1.0, and, in the checklist of a candidate, the runs of 27.2 and the test of 27.5.
+- `CHANGELOG.md`: its "Known limits" read again against 26.3 and the decimal aggregates (#118).
+
+### 27.7 The candidate
+
+`RELEASE.md` gives the steps. What S prepares, in a pull request of its own, merged after the others:
+
+- `version = "2.0.0-rc.3"` in `Cargo.toml` and `Cargo.lock`;
+- the checklist of `RELEASE.md` gone through, and its result written in the pull request: the CI of main green on the three systems with both old executables, `CHANGELOG.md` complete, the upgrade tried on a copy of a real home of 1.7.1 following Chapter 33.
+
+The tag `v2.0.0-rc.3` is pushed by the maintainer, when the maintainer decides; S pushes none. A candidate publishes neither the drivers nor `latest`, and `kivadb update` keeps 1.7.1 (`RELEASE.md`). Kiva Studio is needed for the release, not for a candidate (`RELEASE.md`, step 4).
+
+### 27.8 Decisions to take
+
+1. **G1, `rc.2`**: a fixture made by the published `rc.2` and its test, and the path 1.7.1 → `rc.2` → main in the CI (27.2). Recommended; the alternative is the path in the CI only, with no fixture kept in the repository.
+2. **G2, crash**: the crash in the middle of `convert` (27.3). Recommended.
+3. **G3, benchmarks**: main against 1.7.1 again on the laptop, with a case of typed documents; no figure from the CI runners (27.4). Recommended.
+4. **G4, the manual**: `tests/manual.rs` on the chapters of the shell, with `<!-- not run -->` and a count of the blocks left out (27.5). Recommended; the alternative is a check by hand before each candidate.
+5. **G5, the pages of a release**: updated in S (27.6). Recommended.
+6. **G6, the candidate**: `2.0.0-rc.3` prepared from main after G1 to G5, the tag left to the maintainer (27.7). Recommended, since storage format 3 and the drivers' extended mode have reached no user yet; the alternative is `2.0.0` directly, which then needs Kiva Studio first.
+
+Pull requests: the tests of G1 and G2; the test of the manual and what it finds (G4); the benchmarks and the pages (G3, G5); the candidate (G6).
+
+### 27.9 Out of S
+
+Kiva Studio (needed by the release, not the candidate); the publication of the drivers on npm and PyPI; the random functions R1 to R4; the pushing of any tag.
