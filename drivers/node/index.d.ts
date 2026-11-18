@@ -18,6 +18,14 @@ export interface ConnectOptions {
    * passed to Node's `tls.connect` (for example `ca`).
    */
   tls?: boolean | ({ fingerprint?: string } & Record<string, unknown>);
+  /**
+   * "plain" (default): the JSON of 1.x. "extended" (KivaDB 2.0.0 and later):
+   * native values without loss: an integer beyond ±(2^53 - 1) as a BigInt,
+   * a decimal as text or as `decimal`, a datetime inside a document as a Date.
+   */
+  types?: "plain" | "extended";
+  /** In extended mode, the class decimals are read as (called `new decimal(text)`), e.g. Decimal of decimal.js. */
+  decimal?: new (text: string) => unknown;
 }
 
 export type KivaType =
@@ -30,7 +38,10 @@ export type KivaType =
   | "bytes"
   | "date"
   | "datetime"
-  | "time";
+  | "time"
+  | "int"
+  | "float"
+  | "decimal";
 
 export interface SetOptions {
   /** Seconds until the key expires; 0 removes an expiry. Omitted keeps the current one. */

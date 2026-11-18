@@ -12,6 +12,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
+| 1.3.0 | KivaDB 2.0.0 | `types: "extended"` (native values without loss): 2.0.0 or later |
 | 1.2.0 | KivaDB 2.0.0 | `date`, `datetime` (a `Date`) and `time`: 2.0.0 or later |
 | 1.1.0 | KivaDB 1.7.0 | `add`, and `in` / `like` / `ilike` in `query`: 1.7.0 or later |
 | 1.0.0 | KivaDB 1.6.0 | `semanticCached`: 1.6.0 or later |
@@ -57,7 +58,7 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 
 | Method | Does |
 | :--- | :--- |
-| `connect({host, port, user, password, timeout, tls})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }` |
+| `connect({host, port, user, password, timeout, tls, types, decimal})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }`; `types`: `"plain"` (default) or `"extended"` (see Native values) |
 | `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer`, a `datetime` as a `Date`, a `date` (`"2026-10-27"`) and a `time` (`"14:30:00"`) as text |
 | `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`, `Date` for a `datetime`). For a `date` or a `time`, give the text and the type: `set("born", "2004-05-09", { type: "date" })`. `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
 | `add(prefix, value, {ttl, type})` | Stores the value under a key KivaDB names: `add("place:", {name: "Goma"})` resolves to `{key: "place:6adf9c3c...", id: "6adf9c3c..."}`. The identifier has MongoDB's ObjectId format and sorts by creation time |
@@ -73,6 +74,28 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | `stats()`, `ping()`, `close()` | |
 
 Requests can be sent concurrently on one connection; answers come back in order.
+
+## Native values
+
+With `connect({ types: "extended" })` (KivaDB 2.0.0 and later), values keep their KivaDB types, inside documents too:
+
+| KivaDB | Read as | Written from |
+| :--- | :--- | :--- |
+| `int` within ±(2^53 - 1) | `number` | `number` |
+| `int` beyond | `BigInt` | `BigInt` (refused beyond 64 bits) |
+| `float` | `number` | `number` |
+| `decimal` | text, or an instance of the class given as `decimal` | an instance of that class |
+| `datetime` | `Date` | `Date` |
+| `date`, `time` | text | `set(key, text, { type: "date" })` for a key |
+
+```js
+const Decimal = require("decimal.js"); // or any class built from a text
+const db = await connect({ types: "extended", decimal: Decimal });
+await db.set("acc:1", { balance: new Decimal("1250.50"), opened: new Date() });
+(await db.get("acc:1")).balance; // Decimal 1250.50, exact
+```
+
+The driver depends on no decimal library. A key of the data that starts with `$` is kept as it is. Without `types`, the driver answers as before: plain JSON, a decimal as text. In conditions, a `Date`, a `BigInt` and an instance of the `decimal` class are compared exactly in both modes: `query("acc:*", { field: "balance", cmp: ">", value: new Decimal("1000") })`.
 
 ## Errors
 

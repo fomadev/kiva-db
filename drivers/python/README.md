@@ -16,6 +16,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
+| 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`): 2.0.0 or later |
 | 1.0.0 | KivaDB 2.0.0 | `date`, `time` and `datetime` values, `order_by` and `after` in `query`, `explain(analyze=True)` and `changes`: 2.0.0 or later |
 
 The other methods work with any server from 1.7.0. A minor version adds methods, a patch fixes them; a major version changes how existing ones behave, and says how in the changelog of the repository.
@@ -70,12 +71,15 @@ With a certificate from an authority (your own domain), `tls=True` is enough, or
 | `datetime.datetime` with a zone | `datetime` | `datetime` in UTC |
 | `datetime.date` | `date` | `date` |
 | `datetime.time` without a zone | `time` | `time` |
+| `decimal.Decimal` | `decimal` | `Decimal` (with `types="extended"`) |
 
 * **A naive `datetime`** (without `tzinfo`) is refused with a `ValueError`: it would mean another instant on every machine. Give it a zone: `value.replace(tzinfo=datetime.timezone.utc)`, `zoneinfo.ZoneInfo("Africa/Kinshasa")`, or `value.astimezone()` for the machine's own.
 * **KivaDB keeps datetimes to the millisecond:** microseconds are cut. A datetime comes back in UTC: the same instant, compared equal to the one written.
 * **A `time` with a zone** is refused: a KivaDB time is a time of day, without one.
 * **Inside a document** (a `dict` or a `list`), datetimes, dates and times are written as ISO 8601 text (`"2026-10-27T13:30:00.250Z"`), the form KivaDB compares as moments. They come back as that text: the document does not say which texts were moments. Bytes cannot go inside a document.
 * `type=` forces a type: `db.set("born", "2004-05-09", type="date")`.
+* **With `connect(..., types="extended")`** (KivaDB 2.0.0 and later), every type is kept inside documents too: `Decimal`, `date`, `time` and aware `datetime` are stored as native values and come back as themselves, and a key can hold a `Decimal`. A `Decimal` that is not finite or has more than 28 digits is refused, and so is an `int` beyond 64 bits (store it as a `Decimal`). Without `types`, a `Decimal` is refused, so that none is stored as a text unnoticed.
+* **In conditions**, a `Decimal`, `date`, `time` or aware `datetime` is compared exactly in both modes: `db.query("acc:*", {"field": "balance", "cmp": ">", "value": Decimal("1000")})`.
 
 ## API
 

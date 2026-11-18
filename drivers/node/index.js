@@ -20,6 +20,172 @@ class KivaError extends Error {
   }
 }
 
+// Extended JSON (docs/architecture/NATIVE_DOCUMENTS.md, section 23): asked
+// for with connect({ types: "extended" }), it carries every type of KivaDB
+// without loss. Plain JSON, the default, is what 1.x drivers always read.
+
+const I64_MIN = -(2n ** 63n);
+const I64_MAX = 2n ** 63n - 1n;
+
+function setOwn(o, k, v) {
+  if (k === "__proto__") Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true });
+  else o[k] = v;
+}
+
+/**
+ * JSON.parse that keeps integers exact: one beyond ±(2^53 - 1) becomes a
+ * BigInt. (The reviver of JSON.parse sees the source text only from
+ * Node.js 21, so the driver parses extended answers itself.)
+ */
+function parseExtended(text) {
+  let i = 0;
+  const fail = () => {
+    throw new SyntaxError(`Unexpected token in JSON at position ${i}`);
+  };
+  const ws = () => {
+    while (i < text.length && (text[i] === " " || text[i] === "\t" || text[i] === "\n" || text[i] === "\r")) i++;
+  };
+  const string = () => {
+    const start = i++;
+    while (i < text.length && text[i] !== '"') i += text[i] === "\\" ? 2 : 1;
+    if (i >= text.length) fail();
+    i++;
+    return JSON.parse(text.slice(start, i));
+  };
+  const NUMBER = /-?(?:0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/y;
+  const number = () => {
+    NUMBER.lastIndex = i;
+    const m = NUMBER.exec(text);
+    if (!m) fail();
+    i = NUMBER.lastIndex;
+    if (m[1] === undefined && m[2] === undefined) {
+      const n = Number(m[0]);
+      if (!Number.isSafeInteger(n)) return BigInt(m[0]);
+      return n;
+    }
+    return Number(m[0]);
+  };
+  const value = () => {
+    ws();
+    const c = text[i];
+    if (c === "{") {
+      i++;
+      const o = {};
+      ws();
+      if (text[i] === "}") return i++, o;
+      for (;;) {
+        ws();
+        if (text[i] !== '"') fail();
+        const k = string();
+        ws();
+        if (text[i++] !== ":") fail();
+        setOwn(o, k, value());
+        ws();
+        const d = text[i++];
+        if (d === "}") return o;
+        if (d !== ",") fail();
+      }
+    }
+    if (c === "[") {
+      i++;
+      const a = [];
+      ws();
+      if (text[i] === "]") return i++, a;
+      for (;;) {
+        a.push(value());
+        ws();
+        const d = text[i++];
+        if (d === "]") return a;
+        if (d !== ",") fail();
+      }
+    }
+    if (c === '"') return string();
+    for (const [word, v] of [["true", true], ["false", false], ["null", null]]) {
+      if (text.startsWith(word, i)) return (i += word.length), v;
+    }
+    return number();
+  };
+  const v = value();
+  ws();
+  if (i !== text.length) fail();
+  return v;
+}
+
+/** A value read in extended JSON as JavaScript: tags become their values, `$$` keys `$` keys. */
+function fromExtended(v, decimal) {
+  if (Array.isArray(v)) return v.map((x) => fromExtended(x, decimal));
+  if (v === null || typeof v !== "object") return v;
+  const keys = Object.keys(v);
+  if (keys.length === 1 && typeof v[keys[0]] === "string") {
+    const text = v[keys[0]];
+    switch (keys[0]) {
+      case "$decimal":
+        return decimal ? new decimal(text) : text;
+      case "$date":
+      case "$time":
+        return text;
+      case "$datetime":
+        return new Date(text);
+    }
+  }
+  const o = {};
+  for (const k of keys) setOwn(o, k.startsWith("$$") ? k.slice(1) : k, fromExtended(v[k], decimal));
+  return o;
+}
+
+// How a part of a request is written: a document (`value`), a condition
+// (`where`), or the rest of the request.
+const PART = { DOC: 1, COND: 2, OTHER: 3 };
+
+/** JSON of a request, with BigInt, Date and decimals written as KivaDB reads them. */
+function writeJson(v, part, ctx) {
+  if (v === null || v === undefined) return "null";
+  switch (typeof v) {
+    case "bigint":
+      if (v < I64_MIN || v > I64_MAX) throw new KivaError(`${v} is beyond the 64-bit integers of KivaDB`);
+      return v.toString();
+    case "number":
+    case "boolean":
+    case "string":
+      return JSON.stringify(v);
+    case "function":
+    case "symbol":
+      return "null";
+  }
+  const tags = part === PART.COND || (part === PART.DOC && ctx.extended);
+  if (v instanceof Date) return tags ? JSON.stringify({ $datetime: v.toISOString() }) : JSON.stringify(v);
+  if (ctx.decimal && v instanceof ctx.decimal) {
+    return tags ? JSON.stringify({ $decimal: String(v) }) : JSON.stringify(String(v));
+  }
+  if (typeof v.toJSON === "function") return writeJson(v.toJSON(), part, ctx);
+  if (Array.isArray(v)) return "[" + v.map((x) => writeJson(x, part, ctx)).join(",") + "]";
+  const escape = part === PART.DOC && ctx.extended;
+  const out = [];
+  for (const [k, x] of Object.entries(v)) {
+    if (x === undefined || typeof x === "function" || typeof x === "symbol") continue;
+    const key = escape && k.startsWith("$") ? "$" + k : k;
+    out.push(JSON.stringify(key) + ":" + writeJson(x, part, ctx));
+  }
+  return "{" + out.join(",") + "}";
+}
+
+/** A structured request built by the driver, as JSON. */
+function requestJson(request, ctx) {
+  const parts = [];
+  for (const [k, v] of Object.entries(request)) {
+    if (v === undefined) continue;
+    const part = k === "value" ? PART.DOC : k === "where" ? PART.COND : PART.OTHER;
+    parts.push(JSON.stringify(k) + ":" + writeJson(v, part, ctx));
+  }
+  return "{" + parts.join(",") + "}";
+}
+
+/** The major version in a HELLO answer ("KivaDB 2.0.0-rc.2"). */
+function serverMajor(hello) {
+  const m = /^KivaDB (\d+)\./.exec(hello);
+  return m ? Number(m[1]) : 0;
+}
+
 /** "AB:CD:..." or "abcd...": the same fingerprint, compared without case or colons. */
 function sameFingerprint(a, b) {
   const norm = (s) => String(s || "").replace(/^(sha256\/|SHA256:)/, "").replace(/:/g, "").toLowerCase();
@@ -43,6 +209,7 @@ class KivaClient extends EventEmitter {
     this._buffer = Buffer.alloc(0);
     this._waiting = [];
     this._closed = false;
+    this._ctx = { extended: false, decimal: undefined };
     socket.on("data", (chunk) => this._onData(chunk));
     socket.on("error", (err) => this._fail(err));
     socket.on("close", () => this._fail(new KivaError("The connection to KivaDB was closed.")));
@@ -51,9 +218,18 @@ class KivaClient extends EventEmitter {
   /**
    * Opens a connection and logs in.
    * @param {object} [options] host (localhost), port (2911), user ("kiva"), password (""), timeout (8000 ms),
-   *   tls: true, or { fingerprint } (the server's certificate, from `kivadb tls`), or Node TLS options such as { ca }
+   *   tls: true, or { fingerprint } (the server's certificate, from `kivadb tls`), or Node TLS options such as { ca },
+   *   types: "plain" (default) or "extended" (native values without loss; needs KivaDB 2.0.0),
+   *   decimal: a class built from a text, e.g. Decimal of decimal.js, for the decimals read in extended mode
    */
   static connect(options = {}) {
+    const types = options.types === undefined ? "plain" : options.types;
+    if (types !== "plain" && types !== "extended") {
+      return Promise.reject(new KivaError(`types is "plain" or "extended", not ${JSON.stringify(types)}.`));
+    }
+    if (options.decimal !== undefined && typeof options.decimal !== "function") {
+      return Promise.reject(new KivaError("decimal is a class built from a text, such as Decimal of decimal.js."));
+    }
     const host = options.host || "127.0.0.1";
     const port = options.port || 2911;
     const user = options.user || "kiva";
@@ -104,6 +280,10 @@ class KivaClient extends EventEmitter {
           const hello = (await client._call(CMD.HELLO)).payload.toString();
           if (!hello.startsWith("KivaDB")) throw new KivaError(`${host}:${port} is not a KivaDB server.`);
           client.server = hello.split("\n")[0];
+          if (types === "extended" && serverMajor(client.server) < 2) {
+            throw new KivaError(`types: "extended" needs KivaDB 2.0.0 or later; ${host}:${port} is ${client.server}.`);
+          }
+          client._ctx = { extended: types === "extended", decimal: options.decimal };
           if (hello.includes("auth=required") || password || user !== "kiva") {
             const r = await client._call(CMD.AUTH, Buffer.concat([Buffer.from(user), Buffer.from([0]), Buffer.from(password)]));
             if (r.status !== ST.OK) throw new KivaError(r.payload.toString().replace(/^permission denied: /, ""));
@@ -162,7 +342,25 @@ class KivaClient extends EventEmitter {
     return output;
   }
 
-  /** Sends a structured request ({op: ...}) and returns the JSON answer. */
+  /**
+   * A request the driver builds: in extended mode it asks for extended JSON
+   * and reads native values; conditions carry native values in both modes.
+   */
+  async _api(request) {
+    const ctx = this._ctx;
+    const req = ctx.extended ? { ...request, types: "extended" } : request;
+    const r = await this._call(CMD.API, Buffer.from(requestJson(req, ctx)));
+    const text = r.payload.toString();
+    if (r.status !== ST.OK) throw new KivaError(text.replace(/^permission denied: /, ""));
+    return ctx.extended ? parseExtended(text) : JSON.parse(text);
+  }
+
+  /** A value of an answer, as JavaScript. */
+  _value(v) {
+    return this._ctx.extended ? fromExtended(v, this._ctx.decimal) : v;
+  }
+
+  /** Sends a structured request ({op: ...}) as written and returns the JSON answer. */
   async api(request) {
     const r = await this._call(CMD.API, Buffer.from(JSON.stringify(request)));
     const text = r.payload.toString();
@@ -179,9 +377,9 @@ class KivaClient extends EventEmitter {
    * as a Date; a date ("2026-10-27") and a time ("14:30:00") as text.
    */
   async get(key) {
-    const r = await this.api({ op: "get", key });
+    const r = await this._api({ op: "get", key });
     if (!r.found) return undefined;
-    return fromWire(r.type, r.value);
+    return fromWire(r.type, this._value(r.value));
   }
 
   /**
@@ -189,11 +387,11 @@ class KivaClient extends EventEmitter {
    * @param {object} [options] ttl (seconds), mode ("upsert" | "create" | "update"), type (to force one)
    */
   async set(key, value, options = {}) {
-    const type = options.type || typeOf(value);
+    const type = options.type || this._typeOf(value);
     const req = { op: "put", key, type, value: toWire(type, value) };
     if (options.mode) req.mode = options.mode;
     if (options.ttl !== undefined) req.ttl = options.ttl;
-    await this.api(req);
+    await this._api(req);
   }
 
   /**
@@ -205,10 +403,10 @@ class KivaClient extends EventEmitter {
    * @returns {Promise<{key: string, id: string}>}
    */
   async add(prefix, value, options = {}) {
-    const type = options.type || typeOf(value);
+    const type = options.type || this._typeOf(value);
     const req = { op: "add", prefix, type, value: toWire(type, value) };
     if (options.ttl) req.ttl = options.ttl;
-    const r = await this.api(req);
+    const r = await this._api(req);
     return { key: r.key, id: r.id };
   }
 
@@ -223,8 +421,8 @@ class KivaClient extends EventEmitter {
    * @returns {Promise<{key: string, value: any}[]>}
    */
   async query(pattern, where, options = {}) {
-    const r = await this.api({ op: "query", target: pattern, where, limit: options.limit || 100 });
-    return r.rows;
+    const r = await this._api({ op: "query", target: pattern, where, limit: options.limit || 100 });
+    return r.rows.map((row) => ({ key: row.key, value: this._value(row.value) }));
   }
 
   /** Deletes a key; resolves to whether it existed. */
@@ -298,6 +496,17 @@ class KivaClient extends EventEmitter {
     await this.exec(`subscribe "${String(pattern).replace(/"/g, "")}"`);
   }
 
+  /** The KivaDB type of a JavaScript value; in extended mode, a BigInt is an int and a decimal a decimal. */
+  _typeOf(value) {
+    const { extended, decimal } = this._ctx;
+    if (decimal && value instanceof decimal) {
+      if (!extended) throw new KivaError('A decimal is written with connect({ types: "extended" }).');
+      return "decimal";
+    }
+    if (typeof value === "bigint" && extended) return "int";
+    return typeOf(value);
+  }
+
   close() {
     this._closed = true;
     this._socket.end();
@@ -342,4 +551,4 @@ function parseEvent(text) {
   return { event, key: event === "reset" ? null : key, type: type ? type.replace(/[()]/g, "") : null, raw: text };
 }
 
-module.exports = { KivaClient, KivaError, connect: KivaClient.connect };
+module.exports = { KivaClient, KivaError, connect: KivaClient.connect, _parseExtended: parseExtended };
