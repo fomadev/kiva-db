@@ -231,7 +231,7 @@ fn a_backup_taken_during_writes_is_a_consistent_state() {
     assert!(count > 0, "nothing was saved");
     for i in 0..count {
         let v = ok(&mut s2, &format!("get n:{i:05}"));
-        assert_eq!(v, format!("n:{i:05}: {i} [number]"), "keys must be a prefix of the writes");
+        assert_eq!(v, format!("n:{i:05}: {i} [int]"), "keys must be a prefix of the writes");
     }
 }
 

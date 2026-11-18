@@ -71,7 +71,7 @@ fn a_kva_file_runs_command_by_command() {
     assert!(text.contains("OK: user:1 saved.") && text.contains("OK: classe:1 saved."), "{text}");
     assert!(text.contains("user:1.nom: Fordi [string]") && text.contains("classe:1[2]: 3eme [string]"), "{text}");
     let check = kivadb(&home, &["-e", "get user:1.age and ageM"], None);
-    assert_eq!(out(&check), "user:1.age: 22 [number]\nageM: 24 [number]\n");
+    assert_eq!(out(&check), "user:1.age: 22 [int]\nageM: 24 [int]\n");
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn commands_go_on_over_several_lines_until_their_document_closes() {
     std::fs::write(&file, "set from_file [\n  1,\n  2\n]\n").unwrap();
     let o = kivadb(&home, &[], Some(&format!("source \"{}\"\nget from_file[1]\nset broken oops\n", file.display())));
     assert_eq!(o.status.code(), Some(1));
-    assert!(out(&o).contains("OK: from_file saved.\nfrom_file[1]: 2 [number]"), "{}", out(&o));
+    assert!(out(&o).contains("OK: from_file saved.\nfrom_file[1]: 2 [int]"), "{}", out(&o));
 }
 
 #[test]

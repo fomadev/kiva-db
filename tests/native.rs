@@ -70,7 +70,7 @@ fn format_of(file: &Path) -> u32 {
 /// What 1.7.1 wrote in its fixture, read back, with its indexes, workspaces and accounts.
 fn the_values_of_1_7_1_are_all_there(s: &mut Session) {
     assert_eq!(ok(s, "get greeting"), "greeting: hello [string]");
-    assert_eq!(ok(s, "get n:count"), "n:count: 41 [number]");
+    assert_eq!(ok(s, "get n:count"), "n:count: 41 [int]");
     assert_eq!(ok(s, "get list"), "list: [1,2,3] [array]");
     assert_eq!(ok(s, "get blob"), "blob: 0x00010203 [bytes]");
     assert!(ok(s, "get long").starts_with("long: kivadb kivadb"));

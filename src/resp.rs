@@ -495,6 +495,7 @@ fn value_of(bytes: &[u8]) -> Value {
 fn bytes_of(v: &Value) -> Option<Vec<u8>> {
     Some(match v {
         Value::Str(s) | Value::Num(s) => s.as_bytes().to_vec(),
+        Value::Decimal(d) => d.to_string().into_bytes(),
         Value::Bool(b) => b.to_string().into_bytes(),
         Value::Null => Vec::new(),
         Value::Bytes(b) => b.clone(),
@@ -1062,6 +1063,16 @@ impl Conn {
             "INCRBYFLOAT" => {
                 arity(args, 3)?;
                 let k = key(&args[1])?;
+                // A decimal key is added to exactly: the step is read as a
+                // decimal from its text (NUMERIC_TYPES.md 10.4).
+                if let Some((Value::Decimal(cur), m)) = self.get(&k)? {
+                    let text = std::str::from_utf8(&args[2]).unwrap_or("");
+                    let step =
+                        crate::doc::parse_decimal(text).map_err(|_| Reply::err("value is not a valid decimal"))?;
+                    let next = cur.checked_add(step).ok_or_else(|| Reply::err("increment would overflow a decimal"))?;
+                    self.put(&k, Value::Decimal(next), m.expires_at)?;
+                    return Ok(Reply::bulk(next.to_string()));
+                }
                 let step = float(&args[2])?;
                 let (cur, exp) = match self.get(&k)? {
                     None => (0.0, 0),
@@ -1651,6 +1662,10 @@ impl Conn {
     fn counter(&mut self, k: &str) -> std::result::Result<(i64, i64), Reply> {
         match self.get(k)? {
             None => Ok((0, 0)),
+            // `decimal "5"` stays a decimal: INCR would write it back as an int.
+            Some((Value::Decimal(_), _)) => {
+                Err(Reply::err("value is a decimal: use INCRBYFLOAT, which adds to it exactly"))
+            }
             Some((v, m)) => {
                 let b = bytes_of(&v).ok_or_else(Reply::wrong_type)?;
                 let s = std::str::from_utf8(&b).map_err(|_| Reply::err("value is not an integer or out of range"))?;

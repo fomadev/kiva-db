@@ -60,7 +60,7 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 fn the_values_of_1_7_1_are_all_there(s: &mut Session) {
     assert_eq!(ok(s, "get greeting"), "greeting: hello [string]");
-    assert_eq!(ok(s, "get n:count"), "n:count: 41 [number]");
+    assert_eq!(ok(s, "get n:count"), "n:count: 41 [int]");
     assert_eq!(ok(s, "get flag and nothing"), "flag: true [boolean]\nnothing: null [null]");
     assert_eq!(ok(s, "get list"), "list: [1,2,3] [array]");
     assert_eq!(ok(s, "get blob"), "blob: 0x00010203 [bytes]");
@@ -244,7 +244,7 @@ fn a_file_holding_the_types_of_2_0_is_refused_by_1_x_instead_of_cut() {
     }
     let inst = open(&home);
     let mut s = Session::new(inst, true, None);
-    assert_eq!(ok(&mut s, "get born and after"), "born: 2004-05-09 [date]\nafter: 2 [number]");
+    assert_eq!(ok(&mut s, "get born and after"), "born: 2004-05-09 [date]\nafter: 2 [int]");
     the_values_of_1_7_1_are_all_there(&mut s);
 }
 

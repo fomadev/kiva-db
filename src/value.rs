@@ -28,6 +28,14 @@ pub enum Type {
     DateTime = 9,
     /// A time of day: `14:30:00`.
     Time = 10,
+    /// An integer of 64 bits. Never stored with this code: an `int` key is a
+    /// `number` (code 2) written as an integer (NUMERIC_TYPES.md 10.2, K2).
+    /// Used as a type written in a command (`set int n 42`).
+    Int = 11,
+    /// A float, as `Int`: stored as a `number` written with a fraction.
+    Float = 12,
+    /// An exact decimal, stored with this code (format 3).
+    Decimal = 13,
 }
 
 impl Type {
@@ -43,6 +51,9 @@ impl Type {
             Type::Date => "date",
             Type::DateTime => "datetime",
             Type::Time => "time",
+            Type::Int => "int",
+            Type::Float => "float",
+            Type::Decimal => "decimal",
         }
     }
 
@@ -50,7 +61,10 @@ impl Type {
         Some(match s {
             "string" => Type::String,
             "number" => Type::Number,
-            "boolean" => Type::Boolean,
+            "boolean" | "bool" => Type::Boolean,
+            "int" => Type::Int,
+            "float" => Type::Float,
+            "decimal" => Type::Decimal,
             "null" => Type::Null,
             "array" => Type::Array,
             "object" => Type::Object,
@@ -74,6 +88,8 @@ impl Type {
             8 => Type::Date,
             9 => Type::DateTime,
             10 => Type::Time,
+            // 11 and 12 are reserved (`Int`, `Float` are stored as code 2).
+            13 => Type::Decimal,
             _ => return None,
         })
     }
@@ -85,6 +101,31 @@ impl Type {
     /// `date`, `datetime` or `time`.
     pub fn is_temporal(self) -> bool {
         matches!(self, Type::Date | Type::DateTime | Type::Time)
+    }
+
+    /// Whether a value is of this type as a command writes it: `int` and
+    /// `float` are the kinds of a `number` (NUMERIC_TYPES.md 10.2), and
+    /// `number` takes any number written without `decimal`.
+    pub fn accepts(self, v: &Value) -> bool {
+        match (self, v) {
+            (Type::Int, Value::Num(s)) => num_kind(s) == "int",
+            (Type::Float, Value::Num(s)) => num_kind(s) == "float",
+            (t, v) => t == v.ty(),
+        }
+    }
+}
+
+/// The kind of a stored number, from its text (NUMERIC_TYPES.md 10.3): an
+/// integer within 64 bits is an `int`, a fraction or an exponent a float
+/// holds exactly a `float`; anything else, written before 2.0.0, a legacy
+/// `number`, kept as it was.
+pub fn num_kind(s: &str) -> &'static str {
+    if s.parse::<i64>().is_ok() {
+        "int"
+    } else if s.contains(['.', 'e', 'E']) && crate::num::exact_f64(s).is_some() {
+        "float"
+    } else {
+        "number"
     }
 }
 
@@ -135,6 +176,8 @@ pub enum Value {
     Date(NaiveDate),
     DateTime(DateTime<Utc>),
     Time(NaiveTime),
+    /// An exact decimal key, code 13 (NUMERIC_TYPES.md 10.2).
+    Decimal(rust_decimal::Decimal),
 }
 
 impl Value {
@@ -152,6 +195,16 @@ impl Value {
             Value::Date(_) => Type::Date,
             Value::DateTime(_) => Type::DateTime,
             Value::Time(_) => Type::Time,
+            Value::Decimal(_) => Type::Decimal,
+        }
+    }
+
+    /// The name of its type as `typeof`, `get` and `json type` say it: `int`,
+    /// `float` or `decimal` for a number (`number` for a legacy one).
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Value::Num(s) => num_kind(s),
+            other => other.ty().name(),
         }
     }
 
@@ -225,6 +278,7 @@ impl Value {
             Value::Date(d) => time::date_text(*d).into_bytes(),
             Value::DateTime(t) => time::iso(*t).into_bytes(),
             Value::Time(t) => time::time_text(*t).into_bytes(),
+            Value::Decimal(d) => d.to_string().into_bytes(),
         })
     }
 
@@ -284,6 +338,12 @@ impl Value {
                 Value::DateTime(time::parse_datetime(&text(raw)?, &time::Zone::Utc).map_err(KivaError::Corrupted)?)
             }
             Type::Time => Value::Time(time::parse_time(&text(raw)?).map_err(KivaError::Corrupted)?),
+            Type::Decimal => Value::Decimal(
+                doc::parse_decimal(&text(raw)?).map_err(|e| KivaError::Corrupted(format!("stored decimal: {e}")))?,
+            ),
+            Type::Int | Type::Float => {
+                return Err(KivaError::Corrupted(format!("a [{}] is never stored with its own code", ty.name())))
+            }
         })
     }
 
@@ -307,6 +367,7 @@ impl Value {
             // In the zone of the session.
             Value::DateTime(t) => time::shown_instant(*t),
             Value::Time(t) => time::shown_time(*t),
+            Value::Decimal(d) => d.to_string(),
         }
     }
 
@@ -322,6 +383,8 @@ impl Value {
             Value::Date(d) => Json::String(time::date_text(*d)),
             Value::DateTime(t) => Json::String(time::iso(*t)),
             Value::Time(t) => Json::String(time::time_text(*t)),
+            // Plain JSON carries a decimal as its text (NATIVE_DOCUMENTS.md 7.1).
+            Value::Decimal(d) => Json::String(d.to_string()),
         }
     }
 

@@ -88,7 +88,7 @@ fn text_and_binary_protocols() {
     assert_eq!((code, String::from_utf8_lossy(&ev).as_ref()), (ST_EVENT, "set order:7 (number)"));
 
     // Both transports share the same data, and `exit` closes the connection.
-    assert_eq!(call(&mut bin, CMD_EXEC, b"get order:7"), (ST_OK, "+order:7: 99 [number]".into()));
+    assert_eq!(call(&mut bin, CMD_EXEC, b"get order:7"), (ST_OK, "+order:7: 99 [int]".into()));
     assert_eq!(call(&mut bin, CMD_EXEC, b"exit").0, ST_BYE);
     assert!(read_frame(&mut bin).is_err());
 }
@@ -334,7 +334,7 @@ fn replication_and_failover() {
     let rep = replica.engine("default").unwrap();
     assert_eq!(rep.len(), 201);
     assert!(!rep.contains("stale"));
-    assert_eq!(ok(&mut r, "get seed:042.n"), "seed:042.n: 42 [number]");
+    assert_eq!(ok(&mut r, "get seed:042.n"), "seed:042.n: 42 [int]");
     assert!(rep.meta("temp").unwrap().expires_at > 0);
 
     // Live stream: sets, updates, deletes, transactions.
@@ -347,7 +347,7 @@ fn replication_and_failover() {
     assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
     assert_eq!(
         ok(&mut r, "get live and seed:000 and t1 and t2"),
-        "live: two [string]\nseed:000: (nil)\nt1: 1 [number]\nt2: 2 [number]"
+        "live: two [string]\nseed:000: (nil)\nt1: 1 [int]\nt2: 2 [int]"
     );
     assert!(fails(&mut m, "wait 2 300").contains("only 1 of 2"));
 
@@ -417,7 +417,7 @@ fn command_line_and_shared_terminals() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).replace('\r', ""),
-        "OK: a saved.\nOK: be saved.\na: 4 [number]\nbe: f [string]\n"
+        "OK: a saved.\nOK: be saved.\na: 4 [int]\nbe: f [string]\n"
     );
     let out = kivadb(dir.path()).args(["-e", "update a \"x\""]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
@@ -439,7 +439,7 @@ fn command_line_and_shared_terminals() {
         line.trim_end().to_string()
     };
     send("get a");
-    assert_eq!(recv(), "a: 4 [number]");
+    assert_eq!(recv(), "a: 4 [int]");
     send("subscribe from_*");
     assert_eq!(recv(), "Subscribed to 'from_*' in workspace 'default'. Changes will be announced as they happen.");
 
@@ -449,15 +449,15 @@ fn command_line_and_shared_terminals() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("kiva (admin) @ workspace 'default'"));
     assert_eq!(recv(), "[event] set from_two (number)");
     send("get a and from_two");
-    assert_eq!(recv(), "a: 5 [number]");
-    assert_eq!(recv(), "from_two: 2 [number]");
+    assert_eq!(recv(), "a: 5 [int]");
+    assert_eq!(recv(), "from_two: 2 [int]");
     drop(send);
     drop(stdin);
     assert!(first.wait().unwrap().success());
 
     // After both are gone the data is still there.
     let out = kivadb(dir.path()).args(["-e", "get a and from_two"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&out.stdout).replace('\r', ""), "a: 5 [number]\nfrom_two: 2 [number]\n");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).replace('\r', ""), "a: 5 [int]\nfrom_two: 2 [int]\n");
 }
 
 #[test]
@@ -549,7 +549,7 @@ fn start_status_stop() {
     let mut db = kivadb::client::Client::connect(format!("127.0.0.1:{port}")).unwrap();
     db.set("from_code", &kivadb::Value::Num("7".into()), 0).unwrap();
     let (_, text) = run(&["-e", "get from_code", "-e", "set from_shell 1"]);
-    assert_eq!(text, "from_code: 7 [number]\nOK: from_shell saved.\n");
+    assert_eq!(text, "from_code: 7 [int]\nOK: from_shell saved.\n");
     assert_eq!(db.get("from_shell").unwrap(), Some(kivadb::Value::Num("1".into())));
     assert!(run(&["serve"]).1.contains("already running"));
 
@@ -559,7 +559,7 @@ fn start_status_stop() {
     assert!(db.ping().is_err());
     assert_eq!(run(&["status"]).0, Some(1));
     // Data written while it ran is there after a stop.
-    assert_eq!(run(&["-e", "get from_code and from_shell"]).1, "from_code: 7 [number]\nfrom_shell: 1 [number]\n");
+    assert_eq!(run(&["-e", "get from_code and from_shell"]).1, "from_code: 7 [int]\nfrom_shell: 1 [int]\n");
     assert!(std::fs::read_to_string(dir.path().join("server.log")).unwrap().contains("TCP protocol"));
 }
 
@@ -767,7 +767,7 @@ fn replication_covers_every_workspace() {
     ok(&mut r, "workspace switch sales");
     assert_eq!(
         ok(&mut r, "get order:99.total and order:00 and order:01.total"),
-        "order:99.total: 99 [number]\norder:00: (nil)\norder:01.total: 1000 [number]"
+        "order:99.total: 99 [int]\norder:00: (nil)\norder:01.total: 1000 [int]"
     );
     ok(&mut r, "workspace switch default");
     assert_eq!(ok(&mut r, "get config:mode"), "config:mode: maintenance [string]");
@@ -793,7 +793,7 @@ fn replication_covers_every_workspace() {
     assert!(ok(&mut r, "triggers").contains("on_evt"));
     assert!(ok(&mut r, "script list").contains("count"));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(ok(&mut r, "get fired"), "fired: 1 [number]", "not run again on the replica");
+    assert_eq!(ok(&mut r, "get fired"), "fired: 1 [int]", "not run again on the replica");
 
     // Workspaces created and removed on the master follow.
     ok(&mut m, "workspace switch default");

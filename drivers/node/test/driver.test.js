@@ -102,7 +102,7 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     assert.equal(await db.del("s"), true);
     assert.equal(await db.del("s"), false);
     await assert.rejects(db.exec('update n "text"'), /Cannot update \[number\]/);
-    assert.deepEqual(await db.exec("get n and ghost"), ["n: 3.5 [number]", "ghost: (nil)"]);
+    assert.deepEqual(await db.exec("get n and ghost"), ["n: 3.5 [float]", "ghost: (nil)"]);
   });
 
   await t.test("vector search", async () => {

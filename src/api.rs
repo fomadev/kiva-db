@@ -155,6 +155,20 @@ fn value_in(ty: Type, j: &Json) -> Result<Value> {
             }
             Value::Num(text)
         }
+        // `int` and `float` are numbers of these kinds; `decimal` is read from
+        // a text only, never through a float (NUMERIC_TYPES.md 10.4).
+        Type::Int => match j.as_i64() {
+            Some(i) => Value::Num(i.to_string()),
+            None => return Err(mismatch()),
+        },
+        Type::Float => match j.as_f64().filter(|f| f.is_finite()) {
+            Some(f) => Value::Num(format!("{:?}", if f == 0.0 { 0.0 } else { f })),
+            None => return Err(mismatch()),
+        },
+        Type::Decimal => match j {
+            Json::String(s) => Value::Decimal(crate::doc::parse_decimal(s).map_err(invalid)?),
+            _ => return Err(invalid("a decimal is sent as a text, such as \"1250.50\"")),
+        },
         Type::Boolean => Value::Bool(j.as_bool().ok_or_else(mismatch)?),
         Type::Null => Value::Null,
         Type::Array if j.is_array() => Value::Doc(j.clone()),
