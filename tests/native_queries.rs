@@ -67,7 +67,7 @@ fn shell_changes_keep_the_types_of_the_values_they_do_not_touch() {
     ok(&mut s, r#"json insert acc:1 .tags[0] "first""#);
     ok(&mut s, "json delete acc:1 .profile.levels[1][2]");
     assert_eq!(ok(&mut s, "json incr acc:1 .balance 10"), "acc:1.balance: 1260.50 [decimal]");
-    assert_eq!(ok(&mut s, "json incr acc:1 .profile.levels[1][0] 1"), "acc:1.profile.levels[1][0]: 8 [number]");
+    assert_eq!(ok(&mut s, "json incr acc:1 .profile.levels[1][0] 1"), "acc:1.profile.levels[1][0]: 8 [int]");
     let err = fails(&mut s, "json incr acc:1 .balance 1e-1");
     assert!(err.contains("do not mix"), "{err}");
     assert_eq!(

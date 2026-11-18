@@ -267,7 +267,7 @@ pub(crate) fn parse_value(t: &Token, forced: Option<Type>, key: &str) -> Result<
                 _ => {}
             }
             if is_valid_number(&t.text) {
-                return Ok(Value::Num(t.text.clone()));
+                return untyped_number(&t.text);
             }
             if let Some(b) = parse_bytes(&t.text) {
                 return Ok(Value::Bytes(b));
@@ -287,7 +287,22 @@ pub(crate) fn parse_value(t: &Token, forced: Option<Type>, key: &str) -> Result<
             if !is_valid_number(&t.text) {
                 return Err(format!("'{}' is not a valid number.", t.text));
             }
-            Ok(Value::Num(t.text.clone()))
+            untyped_number(&t.text)
+        }
+        // `set int n 42`, `set float n 8` (stored `8.0`), `set decimal n "1250.50"`.
+        Some(ty @ (Type::Int | Type::Float | Type::Decimal)) => {
+            if quoted && ty != Type::Decimal {
+                return Err("Numbers and Booleans must not be quoted.".into());
+            }
+            if !quoted && !bare {
+                return Err(format!("'{}' is not a valid {}.", t.text, ty.name()));
+            }
+            match crate::literal::scalar(ty.name(), &t.text, quoted)? {
+                Doc::Int(i) => Ok(Value::Num(i.to_string())),
+                Doc::Float(f) => Ok(Value::Num(float_text(f))),
+                Doc::Decimal(d) => Ok(Value::Decimal(d)),
+                other => Err(format!("'{}' is not a valid {} ({}).", t.text, ty.name(), other.type_name())),
+            }
         }
         Some(Type::Boolean) => {
             if !bare {
@@ -336,6 +351,33 @@ pub(crate) fn parse_value(t: &Token, forced: Option<Type>, key: &str) -> Result<
             temporal_literal(ty, &t.text)
         }
     }
+}
+
+/// A number written without a type, as a key (NUMERIC_TYPES.md 10.2): an
+/// integer within 64 bits is an `int`, a fraction or an exponent a `float`,
+/// kept as written. What neither holds exactly is refused, never rounded.
+fn untyped_number(text: &str) -> Result<Value, String> {
+    if !text.contains(['.', 'e', 'E']) {
+        if text.parse::<i64>().is_err() {
+            return Err(format!(
+                "{text} is out of range for int (-9223372036854775808 to 9223372036854775807): \
+                 type the key as a decimal to keep it exact (set decimal <key> \"{text}\")"
+            ));
+        }
+    } else if crate::num::exact_f64(text).is_none() {
+        return Err(format!(
+            "{text} has more digits than a float holds: type the key as a decimal to keep it exact \
+             (set decimal <key> \"{text}\"), or as a float to round it (set float <key> {text})"
+        ));
+    }
+    Ok(Value::Num(text.to_string()))
+}
+
+/// The text of a float key: always with a fraction or an exponent, so that
+/// it reads back as a float (`8.0`, `1.75`, `1e300`); `-0` as `0.0`.
+fn float_text(f: f64) -> String {
+    let f = if f == 0.0 { 0.0 } else { f };
+    format!("{f:?}")
 }
 
 /// The text of a `date`, `datetime` or `time`, in the session's format or in
@@ -437,7 +479,7 @@ fn value_of<'a>(c: &mut Cur<'a>, forced: Option<Type>) -> Result<Pending<'a>, St
         Some(v) => {
             let v = v?;
             match forced {
-                Some(ty) if ty != v.ty() => Err(format!("Value is a {}, not a {}.", v.ty().name(), ty.name())),
+                Some(ty) if !ty.accepts(&v) => Err(format!("Value is a {}, not a {}.", v.ty().name(), ty.name())),
                 _ => Ok(Pending::Moment(v)),
             }
         }
@@ -738,6 +780,20 @@ fn project(doc: &Json, fields: &[String]) -> Json {
     Json::Object(m)
 }
 
+/// The type of a key and the name `typeof` gives it.
+struct KeyKind {
+    ty: Type,
+    name: &'static str,
+}
+
+impl KeyKind {
+    /// Whether the key is of the type a command names: `int` and `float`
+    /// are the kinds of a `number`.
+    fn is(&self, w: Type) -> bool {
+        self.ty == w || (w == Type::Int && self.name == "int") || (w == Type::Float && self.name == "float")
+    }
+}
+
 /// A value as the shell shows it: a typed document in the typed literal
 /// syntax, its dates and times in the session's formats, so that it can be
 /// typed back (NATIVE_DOCUMENTS.md 19.5).
@@ -751,7 +807,7 @@ fn shown(v: &Value) -> String {
 fn render_row(key: &str, value: &Value, fields: &Option<Vec<String>>) -> String {
     match (fields, value.json_doc()) {
         (Some(f), Some(doc)) => format!("{key}: {}", project(&doc, f)),
-        _ => format!("{key}: {} [{}]", shown(value), value.ty().name()),
+        _ => format!("{key}: {} [{}]", shown(value), value.kind_name()),
     }
 }
 
@@ -1333,7 +1389,7 @@ impl Session {
         };
         let actual = old.ty();
         if let Some(f) = forced {
-            if f != actual {
+            if !f.accepts(&old) {
                 return Err(format!("Type mismatch. '{key}' is a [{}].", actual.name()));
             }
         }
@@ -1402,11 +1458,11 @@ impl Session {
             None => out.say(format!("{name}: (nil)")),
             Some((v, _)) => {
                 if let Some(w) = want {
-                    if w != v.ty() {
-                        return Err(format!("Type mismatch. '{name}' is a [{}].", v.ty().name()));
+                    if !w.accepts(&v) {
+                        return Err(format!("Type mismatch. '{name}' is a [{}].", v.kind_name()));
                     }
                 }
-                out.say(format!("{name}: {} [{}]", shown(&v), v.ty().name()));
+                out.say(format!("{name}: {} [{}]", shown(&v), v.kind_name()));
             }
         }
         Ok(())
@@ -1414,17 +1470,27 @@ impl Session {
 
     fn has_one(&mut self, a: &[Token], out: &mut Out) -> R {
         let (want, key) = Self::typed_key(a, "has [type] <key>")?;
-        match (self.kv_type(&key)?, want) {
+        match (self.kind_of(&key)?, want) {
             (None, _) => out.say(format!("No: Key '{key}' does not exist.")),
             (Some(_), None) => out.say(format!("Yes: Key '{key}' exists.")),
-            (Some(actual), Some(w)) if actual == w => {
-                out.say(format!("Yes: Key '{key}' exists with type [{}].", actual.name()))
+            (Some(actual), Some(w)) if actual.is(w) => {
+                out.say(format!("Yes: Key '{key}' exists with type [{}].", actual.name))
             }
             (Some(actual), Some(w)) => {
-                out.say(format!("No: Key '{key}' exists but type is [{}] (expected [{}]).", actual.name(), w.name()))
+                out.say(format!("No: Key '{key}' exists but type is [{}] (expected [{}]).", actual.name, w.name()))
             }
         }
         Ok(())
+    }
+
+    /// The type of a key as `typeof` names it: a number by its kind (`int`,
+    /// `float`, or `number` for a legacy one), read from its text.
+    fn kind_of(&mut self, key: &str) -> Result<Option<KeyKind>, String> {
+        Ok(match self.kv_type(key)? {
+            None => None,
+            Some(Type::Number) => self.kv_get(key)?.map(|(v, _)| KeyKind { ty: Type::Number, name: v.kind_name() }),
+            Some(ty) => Some(KeyKind { ty, name: ty.name() }),
+        })
     }
 
     fn typeof_one(&mut self, a: &[Token], out: &mut Out) -> R {
@@ -1432,8 +1498,8 @@ impl Session {
             return Err("Usage: typeof <key>".into());
         };
         let key = key_for_read(k)?;
-        match self.kv_type(&key)? {
-            Some(ty) => out.say(format!(" -> {key} is a [{}]", ty.name())),
+        match self.kind_of(&key)? {
+            Some(kind) => out.say(format!(" -> {key} is a [{}]", kind.name)),
             None => out.say(format!(" -> {key} does not exist (nil)")),
         }
         Ok(())
@@ -1457,7 +1523,7 @@ impl Session {
     fn del_one(&mut self, a: &[Token], out: &mut Out) -> R {
         let (a, if_present) = strip_clause(a, &["if", "exists"]);
         let (want, key) = Self::typed_key(a, "del [type] <key> [if exists] | del all keys")?;
-        let Some(actual) = self.kv_type(&key)? else {
+        let Some(actual) = self.kind_of(&key)? else {
             if if_present {
                 out.say(format!("OK: {key} skipped (does not exist)"));
                 return Ok(());
@@ -1466,8 +1532,8 @@ impl Session {
             return Ok(());
         };
         if let Some(w) = want {
-            if w != actual {
-                return Err(format!("Type mismatch. Cannot delete '{key}' because it is a [{}].", actual.name()));
+            if !actual.is(w) {
+                return Err(format!("Type mismatch. Cannot delete '{key}' because it is a [{}].", actual.name));
             }
         }
         self.kv_del(&key)?;
@@ -1615,10 +1681,10 @@ impl Session {
             return Err(format!("Key '{key}' not found or already expired."));
         };
         if let Some(w) = want {
-            if w != value.ty() {
+            if !w.accepts(&value) {
                 return Err(format!(
                     "TypeError: Key '{key}' is of type '{}', expected '{}'",
-                    value.ty().name(),
+                    value.kind_name(),
                     w.name()
                 ));
             }
@@ -2123,11 +2189,11 @@ impl Session {
                 out.say(format!("{at}: (nil)"));
                 return Ok(());
             };
-            let ty = || Value::from_json(j.clone()).ty().name();
+            let ty = || show_leaf(&doc::from_json(j)).1;
             match sub.as_str() {
                 "get" => {
-                    let v = Value::from_json(j.clone());
-                    out.say(format!("{at}: {} [{}]", v.display(), v.ty().name()));
+                    let (shown, ty) = show_leaf(&doc::from_json(j));
+                    out.say(format!("{at}: {shown} [{ty}]"));
                 }
                 "type" => out.say(format!("{at}: [{}]", ty())),
                 "len" => match jsonpath::len(j) {
@@ -2278,7 +2344,8 @@ impl Session {
                 Change::Incr(by, _) => {
                     let v =
                         jsonpath::incr(&mut doc, &path, &by).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
-                    format!("{at}: {v} [number]")
+                    // By its kind, as `json type` names it (NUMERIC_TYPES.md 10.4).
+                    format!("{at}: {v} [{}]", crate::value::num_kind(&v.to_string()))
                 }
             };
             if !(doc.is_object() || doc.is_array()) {
@@ -2572,6 +2639,7 @@ fn doc_of(key: &str, value: Value) -> crate::error::Result<Json> {
 fn show_leaf(d: &Doc) -> (String, &'static str) {
     let v = match d {
         Doc::Decimal(x) => return (x.to_string(), "decimal"),
+        Doc::Int(_) | Doc::Float(_) => return (doc::to_extended_json(d).to_string(), d.type_name()),
         Doc::Date(x) => Value::Date(*x),
         Doc::DateTime(x) => Value::DateTime(*x),
         Doc::Time(x) => Value::Time(*x),
@@ -2585,7 +2653,7 @@ fn show_leaf(d: &Doc) -> (String, &'static str) {
 /// datetime as one, a decimal as its exact number, a part as a document.
 fn leaf_value(d: &Doc) -> Value {
     match d {
-        Doc::Decimal(x) => Value::Num(x.to_string()),
+        Doc::Decimal(x) => Value::Decimal(*x),
         Doc::Date(x) => Value::Date(*x),
         Doc::DateTime(x) => Value::DateTime(*x),
         Doc::Time(x) => Value::Time(*x),

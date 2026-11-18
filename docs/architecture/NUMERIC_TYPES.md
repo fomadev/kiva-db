@@ -298,3 +298,18 @@ Taken by the maintainer on 2026-11-18, for 2.0.0:
 1. **K2** (10.2): `int` and `float` keys stay code 2, in canonical text; only a `decimal` key gets code 13 and raises its file to format 3. Codes 11 and 12 stay reserved. This replaces the codes of 6.1.
 2. **Legacy fractions read as `float`** (10.3) when a float holds them exactly; other old numbers stay legacy numbers. This replaces the reading of 6.1.
 3. **`json type` of document leaves answers `int` and `float`** in N2 (10.4), as `typeof` does for keys.
+
+## 11. N2 as built
+
+N2 follows 10.8. What the code does, where it differs from section 10 or adds to it:
+
+- **Types.** `int`, `float` and `decimal` are type names of the shell, of REST (`{"type": ...}`) and of `has`, `get`, `del`, `typeof` (`has int n`); `bool` is an alias of `boolean`. Only `decimal` has a code of its own (13); a file holding one is format 3, kept by compaction. Codes 11 and 12 are read as unknown.
+- **Kinds.** An `int` or `float` key is a code-2 record whose canonical text gives its kind: an integer that fits `i64` is `int`; a text with a fraction or exponent that a float holds exactly is `float` (written by `set float` with a fraction always: `8.0`, `-0` as `0.0`); any other old text is a legacy `number`, read and shown as it was. `typeof`, `get`, `has`, `json get`, `json type`, `json incr`, Lua `kiva.typeof` and the type errors say the kind.
+- **Untyped writes.** An integer beyond `i64`, or a fraction a float would round, is refused for a key. The message says how to keep it: `type the key as a decimal to keep it exact (set decimal <key> "...")`, and for a fraction also `or as a float to round it (set float <key> ...)`. The forms quoted in 10.4 and 10.5 (`write decimal "..."`) are replaced by these, since `decimal` comes before the key.
+- **Decimals.** `set decimal d "1250.50"` and `set decimal d 1250.50` keep the digits as written; `print` computes with them exactly. In plain JSON (REST `get`, structured requests) a decimal is a text, and REST takes one only from a text.
+- **REST `get`** keeps `"type": "number"` for `int` and `float` keys, so that the drivers of 1.x read them unchanged; `"decimal"` for a decimal. The kinds reach the drivers in C6 and N3.
+- **Redis.** `SET` stores a text, as before N2, not a number by the untyped rule: the row of 10.4 that says so is corrected here. `GET` of a decimal gives its digits. `INCR` and its kin refuse a decimal (`use INCRBYFLOAT, which adds to it exactly`); `INCRBYFLOAT` adds its step, read as a decimal, exactly, and refuses a result a decimal cannot hold.
+- **Lua** reads a decimal as its text.
+- **Documents.** A number of a plain JSON document beyond `i64` stays a legacy `number` for `json type`, `get k.path` and `json incr`, as 10.3 says for keys.
+
+The tests are `tests/numeric_keys.rs`; the tests written before N2 now expect `[int]` and `[float]` where they expected `[number]`.

@@ -60,7 +60,7 @@ fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 
 fn the_values_of_1_7_1_are_all_there(s: &mut Session) {
     assert_eq!(ok(s, "get greeting"), "greeting: hello [string]");
-    assert_eq!(ok(s, "get n:count"), "n:count: 41 [number]");
+    assert_eq!(ok(s, "get n:count"), "n:count: 41 [int]");
     assert_eq!(ok(s, "get flag and nothing"), "flag: true [boolean]\nnothing: null [null]");
     assert_eq!(ok(s, "get list"), "list: [1,2,3] [array]");
     assert_eq!(ok(s, "get blob"), "blob: 0x00010203 [bytes]");
@@ -244,7 +244,7 @@ fn a_file_holding_the_types_of_2_0_is_refused_by_1_x_instead_of_cut() {
     }
     let inst = open(&home);
     let mut s = Session::new(inst, true, None);
-    assert_eq!(ok(&mut s, "get born and after"), "born: 2004-05-09 [date]\nafter: 2 [number]");
+    assert_eq!(ok(&mut s, "get born and after"), "born: 2004-05-09 [date]\nafter: 2 [int]");
     the_values_of_1_7_1_are_all_there(&mut s);
 }
 
@@ -314,7 +314,7 @@ fn a_home_used_by_2_0_without_its_new_types_goes_back_to_1_x() {
         assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(
             text.lines().collect::<Vec<_>>(),
-            ["user:4.name: Dan [string]", "late: 7 [number]", "greeting: (nil)", "Count: 3"]
+            ["user:4.name: Dan [string]", "late: 7 [int]", "greeting: (nil)", "Count: 3"]
         );
     }
 }
@@ -490,7 +490,7 @@ fn replication_never_crosses_major_versions() {
     };
     assert!(cli(&format!("replica of 127.0.0.1 {port}")).contains("Now replicating"));
     wait_until("1.7.1 to be refused", || cli("replica status").contains("cannot follow it"));
-    assert_eq!(cli("get kept"), "kept: 1 [number]\n");
+    assert_eq!(cli("get kept"), "kept: 1 [int]\n");
     cli("replica stop");
 
     // And a 2.0 replica of a 1.7.1 master keeps its own.

@@ -70,6 +70,8 @@ fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
             (Err(_), Some(f)) => LVal::Number(f),
             (Err(_), None) => LVal::String(lua.create_string(n)?),
         },
+        // A decimal as its text: Lua has no exact decimal (NUMERIC_TYPES.md 10.4).
+        Value::Decimal(d) => LVal::String(lua.create_string(d.to_string())?),
         Value::Bool(b) => LVal::Boolean(*b),
         Value::Null => LVal::Nil,
         Value::Doc(j) => json_to_lua(lua, j)?,
@@ -218,7 +220,14 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
         let del = scope.create_function(|_, key: String| cell.borrow_mut().kv_del(&key).map_err(lerr))?;
         let has = scope.create_function(|_, key: String| cell.borrow_mut().kv_exists(&key).map_err(lerr))?;
         let type_of = scope.create_function(|_, key: String| {
-            Ok(cell.borrow_mut().kv_type(&key).map_err(lerr)?.map(|t| t.name().to_string()))
+            // As `typeof` says it: a number by its kind (NUMERIC_TYPES.md 10.4).
+            let mut s = cell.borrow_mut();
+            Ok(match s.kv_type(&key).map_err(lerr)? {
+                Some(crate::value::Type::Number) => {
+                    s.kv_get(&key).map_err(lerr)?.map(|(v, _)| v.kind_name().to_string())
+                }
+                other => other.map(|t| t.name().to_string()),
+            })
         })?;
         let scan = scope.create_function(|lua, pattern: Option<String>| {
             let s = cell.borrow();

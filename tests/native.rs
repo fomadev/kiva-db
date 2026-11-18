@@ -70,7 +70,7 @@ fn format_of(file: &Path) -> u32 {
 /// What 1.7.1 wrote in its fixture, read back, with its indexes, workspaces and accounts.
 fn the_values_of_1_7_1_are_all_there(s: &mut Session) {
     assert_eq!(ok(s, "get greeting"), "greeting: hello [string]");
-    assert_eq!(ok(s, "get n:count"), "n:count: 41 [number]");
+    assert_eq!(ok(s, "get n:count"), "n:count: 41 [int]");
     assert_eq!(ok(s, "get list"), "list: [1,2,3] [array]");
     assert_eq!(ok(s, "get blob"), "blob: 0x00010203 [bytes]");
     assert!(ok(s, "get long").starts_with("long: kivadb kivadb"));
@@ -658,7 +658,7 @@ fn a_real_replica_of_2_0_0_rc_2_keeps_its_data_and_says_why_it_does_not_follow()
     };
     assert!(cli(&format!("replica of 127.0.0.1 {port}")).contains("Now replicating"));
     wait_until("rc.2 to be refused", || cli("replica status").contains("upgrade the replica to KivaDB"));
-    assert_eq!(cli("get kept"), "kept: 1 [number]\n");
+    assert_eq!(cli("get kept"), "kept: 1 [int]\n");
     assert_eq!(cli("get o:1"), "o:1: (nil)\n");
     cli("replica stop");
     drop(server);
@@ -684,6 +684,6 @@ fn a_home_without_typed_documents_still_opens_in_2_0_0_rc_2() {
     assert!(success, "{text}");
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
-        ["native:1.n: 2 [number]", "born: 2004-05-09 [date]", "greeting: hello [string]"]
+        ["native:1.n: 2 [int]", "born: 2004-05-09 [date]", "greeting: hello [string]"]
     );
 }

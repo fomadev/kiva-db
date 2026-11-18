@@ -98,7 +98,8 @@ pub fn parse_file_header(h: &[u8]) -> std::result::Result<(u64, u32), String> {
 
 /// The format a record of type `ty` with `flags` needs.
 pub fn format_for_record(ty: u8, flags: u8) -> u32 {
-    if flags & FLAG_KDOC != 0 {
+    // A KDOC document, or a decimal key (code 13, NUMERIC_TYPES.md 10.2).
+    if flags & FLAG_KDOC != 0 || ty == 13 {
         3
     } else if ty >= 8 {
         2

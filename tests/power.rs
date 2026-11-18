@@ -939,7 +939,7 @@ fn redis_clients_can_use_kivadb() {
     let mut s = Session::new(inst.clone(), true, None);
     assert_eq!(
         ok(&mut s, "get user:1.name and visits and queue"),
-        "user:1.name: Alice [string]\nvisits: 41 [number]\nqueue: [\"a\",\"b\"] [array]"
+        "user:1.name: Alice [string]\nvisits: 41 [int]\nqueue: [\"a\",\"b\"] [array]"
     );
     ok(&mut s, r#"set from_kiva {"lang": "ln"}"#);
     assert_eq!(r.cmd(&["HGET", "from_kiva", "lang"]), b("ln"));

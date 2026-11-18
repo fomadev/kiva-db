@@ -20,8 +20,8 @@ fn set_get_update_follow_the_typing_rules() {
     let dir = TempDir::new("typing");
     let mut s = kiva(&dir);
     assert_eq!(ok(&mut s, "set a 4 and string be 'f'"), "OK: a saved.\nOK: be saved.");
-    assert_eq!(ok(&mut s, "get a and be"), "a: 4 [number]\nbe: f [string]");
-    assert_eq!(ok(&mut s, "get number a"), "a: 4 [number]");
+    assert_eq!(ok(&mut s, "get a and be"), "a: 4 [int]\nbe: f [string]");
+    assert_eq!(ok(&mut s, "get number a"), "a: 4 [int]");
     assert!(fails(&mut s, "get string a").contains("Type mismatch"));
     assert_eq!(ok(&mut s, "get ghost"), "ghost: (nil)");
 
@@ -35,7 +35,7 @@ fn set_get_update_follow_the_typing_rules() {
     assert!(fails(&mut s, "set k 1 ttl 0").contains("TTL must be a positive integer"));
     assert!(fails(&mut s, "set k 'unclosed").contains("Unclosed quote"));
     ok(&mut s, "set `get` 1");
-    assert_eq!(ok(&mut s, "get `get`"), "get: 1 [number]");
+    assert_eq!(ok(&mut s, "get `get`"), "get: 1 [int]");
 
     // One bad segment does not stop the others.
     let out = s.execute("set x 1 and y oops and z 3");
@@ -49,14 +49,15 @@ fn set_get_update_follow_the_typing_rules() {
     assert!(fails(&mut s, "update a \"five\"").contains("Cannot update [number] with a value formatted as [string]"));
     assert!(fails(&mut s, "update ghost 1").contains("not found"));
     assert!(fails(&mut s, "update string a \"x\"").contains("Type mismatch"));
-    assert_eq!(ok(&mut s, "get a"), "a: 5 [number]");
+    assert_eq!(ok(&mut s, "get a"), "a: 5 [int]");
 
     assert_eq!(
         ok(&mut s, "typeof a and be and ghost"),
-        " -> a is a [number]\n -> be is a [string]\n -> ghost does not exist (nil)"
+        " -> a is a [int]\n -> be is a [string]\n -> ghost does not exist (nil)"
     );
-    assert_eq!(ok(&mut s, "has number a"), "Yes: Key 'a' exists with type [number].");
-    assert!(ok(&mut s, "has string a").starts_with("No: Key 'a' exists but type is [number]"));
+    assert_eq!(ok(&mut s, "has number a"), "Yes: Key 'a' exists with type [int].");
+    assert_eq!(ok(&mut s, "has int a"), "Yes: Key 'a' exists with type [int].");
+    assert!(ok(&mut s, "has string a").starts_with("No: Key 'a' exists but type is [int]"));
 
     assert!(fails(&mut s, "del string a").contains("Type mismatch"));
     assert_eq!(ok(&mut s, "del a and ghost"), "Deleted: a\nNot found: ghost");
@@ -73,7 +74,7 @@ fn if_not_exists_and_if_exists_make_commands_idempotent() {
     assert_eq!(ok(&mut s, "set a 1 if not exists"), "OK: a saved.");
     assert_eq!(ok(&mut s, "set a 2 if not exists"), "OK: a skipped (already exists)");
     assert_eq!(ok(&mut s, "SET a 3 If Not EXISTS"), "OK: a skipped (already exists)");
-    assert_eq!(ok(&mut s, "get a"), "a: 1 [number]");
+    assert_eq!(ok(&mut s, "get a"), "a: 1 [int]");
     assert!(fails(&mut s, "set a 4").contains("already exists"));
 
     // With a type, a TTL and `and` chains (the clause belongs to each segment).
@@ -140,7 +141,7 @@ fn structured_types() {
     ok(&mut s, r#"update colors ["black"]"#);
     // A null key accepts its first real value.
     ok(&mut s, "update empty 12");
-    assert_eq!(ok(&mut s, "get empty"), "empty: 12 [number]");
+    assert_eq!(ok(&mut s, "get empty"), "empty: 12 [int]");
 
     assert_eq!(ok(&mut s, r#"json set user .role "owner""#), "OK: user.role updated.");
     ok(&mut s, r#"json set user .address.zip 243"#);
@@ -185,16 +186,16 @@ fn change_and_bump() {
     let mut s = kiva(&dir);
     ok(&mut s, r#"set active_id 7 and legacy "old" and other 1"#);
     assert_eq!(ok(&mut s, "change active_id to session_id"), "Renamed: active_id -> session_id (Type preserved)");
-    assert_eq!(ok(&mut s, "get active_id and session_id"), "active_id: (nil)\nsession_id: 7 [number]");
+    assert_eq!(ok(&mut s, "get active_id and session_id"), "active_id: (nil)\nsession_id: 7 [int]");
     assert!(fails(&mut s, "change session_id to other").contains("already exists"));
     assert!(fails(&mut s, "change ghost to x").contains("not found"));
     assert!(fails(&mut s, "change string session_id to x").contains("Type mismatch for source key"));
     assert!(fails(&mut s, "change session_id to string x").contains("Cannot change type without providing a new value"));
     assert_eq!(ok(&mut s, "change string legacy to number code 1044"), "Migrated: legacy -> code (Type: number)");
-    assert_eq!(ok(&mut s, "get legacy and code"), "legacy: (nil)\ncode: 1044 [number]");
+    assert_eq!(ok(&mut s, "get legacy and code"), "legacy: (nil)\ncode: 1044 [int]");
     // A failed migration leaves the source untouched.
     assert!(fails(&mut s, "change code to boolean flag maybe").contains("has been preserved"));
-    assert_eq!(ok(&mut s, "get code and flag"), "code: 1044 [number]\nflag: (nil)");
+    assert_eq!(ok(&mut s, "get code and flag"), "code: 1044 [int]\nflag: (nil)");
 
     ok(&mut s, r#"set sess "x" ttl 100"#);
     assert!(ok(&mut s, "bump sess add 50").contains("add 50s"));
@@ -350,7 +351,7 @@ fn pinned_values_stay_in_memory_and_the_memory_bound_refuses_new_keys() {
     assert!(ok(&mut s, "memory").contains("(3 values)"));
     ok(&mut s, "del conf:c");
     assert!(ok(&mut s, "memory").contains("(2 values)"));
-    assert_eq!(ok(&mut s, "get conf:a.x"), "conf:a.x: 2 [number]");
+    assert_eq!(ok(&mut s, "get conf:a.x"), "conf:a.x: 2 [int]");
 
     // Pinned patterns are saved with the workspace.
     drop(s);
@@ -460,9 +461,9 @@ fn json_changes_arrays_numbers_and_awkward_paths_in_place() {
     assert_eq!(ok(&mut s, r#"json append doc .new 1"#), "OK: doc.new now has 1 elements.");
     assert_eq!(ok(&mut s, "json delete doc .tags[-1]"), "Deleted: doc.tags[-1]");
     assert_eq!(ok(&mut s, "json get doc .tags"), r#"doc.tags: ["z","a","b","c"] [array]"#);
-    assert_eq!(ok(&mut s, "json incr doc .n 41"), "doc.n: 42 [number]");
-    assert_eq!(ok(&mut s, "json incr doc .n -0.5"), "doc.n: 41.5 [number]");
-    assert_eq!(ok(&mut s, "json incr doc .stats.views 1"), "doc.stats.views: 1 [number]");
+    assert_eq!(ok(&mut s, "json incr doc .n 41"), "doc.n: 42 [int]");
+    assert_eq!(ok(&mut s, "json incr doc .n -0.5"), "doc.n: 41.5 [float]");
+    assert_eq!(ok(&mut s, "json incr doc .stats.views 1"), "doc.stats.views: 1 [int]");
     assert_eq!(ok(&mut s, r#"json set doc '["a.b"]' true"#), r#"OK: doc["a.b"] updated."#);
     assert_eq!(ok(&mut s, r#"json get doc ["a.b"]"#), r#"doc["a.b"]: true [boolean]"#);
     assert_eq!(ok(&mut s, "json type doc .m"), "doc.m: [object]");
@@ -482,9 +483,9 @@ fn json_changes_arrays_numbers_and_awkward_paths_in_place() {
     // Inside a transaction the change waits for the commit.
     ok(&mut s, "begin");
     ok(&mut s, "json incr doc .stats.views 1");
-    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 2 [number]");
+    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 2 [int]");
     ok(&mut s, "rollback");
-    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 1 [number]");
+    assert_eq!(ok(&mut s, "json get doc .stats.views"), "doc.stats.views: 1 [int]");
 }
 
 #[test]
@@ -509,8 +510,8 @@ fn field_changes_from_two_clients_never_undo_each_other() {
     for w in workers {
         w.join().unwrap();
     }
-    assert_eq!(ok(&mut s, "json get counter .a"), "counter.a: 300 [number]");
-    assert_eq!(ok(&mut s, "json get counter .b"), "counter.b: 300 [number]");
+    assert_eq!(ok(&mut s, "json get counter .a"), "counter.a: 300 [int]");
+    assert_eq!(ok(&mut s, "json get counter .b"), "counter.b: 300 [int]");
 }
 
 #[test]
@@ -664,7 +665,7 @@ fn numbers_are_compared_and_added_exactly() {
     let sorted = ok(&mut s, "get where n:*.v > 0 order by v desc limit 1");
     assert!(sorted.starts_with("n:2:"), "{sorted}");
     assert_eq!(ok(&mut s, "sum n:*.v where v > 0"), "Sum: 36028797018963968 (4 matches)");
-    assert_eq!(ok(&mut s, "json incr n:1 .v 1"), "n:1.v: 9007199254740993 [number]");
+    assert_eq!(ok(&mut s, "json incr n:1 .v 1"), "n:1.v: 9007199254740993 [int]");
 
     // A unique index tells them apart, and still takes 1 and 1.0 for one value.
     ok(&mut s, "create unique index on u:*.v");
@@ -684,13 +685,16 @@ fn numbers_are_compared_and_added_exactly() {
     ok(&mut s, r#"set r:3 {"v": 9223372036854775807}"#);
     assert!(fails(&mut s, "sum r:*.v").contains("beyond the 64-bit integers"));
 
-    // A key keeps its text; programs get it exactly, as a number or as that text.
-    ok(&mut s, &format!("set big {big}"));
+    // An integer beyond i64 is refused untyped and kept exactly as a decimal;
+    // programs get it exactly, as a number or as its text (NUMERIC_TYPES.md 10).
+    assert!(fails(&mut s, &format!("set big {big}")).contains(&format!(r#"set decimal <key> "{big}""#)));
+    ok(&mut s, &format!(r#"set decimal big "{big}""#));
     ok(&mut s, "set price 1250.50");
     let get = |s: &mut Session, k: &str| kivadb::api::handle(s, &serde_json::json!({"op": "get", "key": k})).unwrap();
     assert_eq!(get(&mut s, "big")["value"], serde_json::json!(big));
     assert_eq!(get(&mut s, "price")["value"], serde_json::json!(1250.5));
-    assert!(fails(&mut s, "print big").contains("cannot be held exactly"));
+    // A decimal is computed with exactly.
+    assert_eq!(ok(&mut s, "print big"), big);
     assert_eq!(ok(&mut s, "print price + 1"), "1251.5");
 
     // A schema's maximum is checked exactly.
@@ -727,12 +731,9 @@ fn transactions() {
     // Read-your-writes inside, invisible outside.
     assert_eq!(
         ok(&mut a, "get balance and user:1 and other"),
-        "balance: 50 [number]\nuser:1: Alice [string]\nother: (nil)"
+        "balance: 50 [int]\nuser:1: Alice [string]\nother: (nil)"
     );
-    assert_eq!(
-        ok(&mut b, "get balance and user:1 and other"),
-        "balance: 100 [number]\nuser:1: (nil)\nother: 1 [number]"
-    );
+    assert_eq!(ok(&mut b, "get balance and user:1 and other"), "balance: 100 [int]\nuser:1: (nil)\nother: 1 [int]");
     ok(&mut a, "savepoint sp1");
     ok(&mut a, r#"set user:2 "Bob""#);
     assert!(ok(&mut a, "transaction status").contains("Savepoints: 1\nModified keys: 4"));
@@ -741,14 +742,14 @@ fn transactions() {
     assert_eq!(ok(&mut a, "commit"), "Transaction committed (3 keys written).");
     assert_eq!(
         ok(&mut b, "get balance and user:1 and user:2 and other"),
-        "balance: 50 [number]\nuser:1: Alice [string]\nuser:2: (nil)\nother: (nil)"
+        "balance: 50 [int]\nuser:1: Alice [string]\nuser:2: (nil)\nother: (nil)"
     );
 
     // Explicit rollback.
     ok(&mut a, "begin");
     ok(&mut a, "update balance 0");
     assert_eq!(ok(&mut a, "rollback"), "Transaction rolled back.");
-    assert_eq!(ok(&mut a, "get balance"), "balance: 50 [number]");
+    assert_eq!(ok(&mut a, "get balance"), "balance: 50 [int]");
     assert!(fails(&mut a, "commit").contains("no active transaction"));
     assert!(ok(&mut a, "transaction status").contains("NONE"));
 
@@ -757,7 +758,7 @@ fn transactions() {
     ok(&mut a, "update balance 1");
     assert!(fails(&mut a, "update balance \"text\"").contains("Transaction rolled back"));
     assert!(a.txn.is_none());
-    assert_eq!(ok(&mut a, "get balance"), "balance: 50 [number]");
+    assert_eq!(ok(&mut a, "get balance"), "balance: 50 [int]");
 
     // Two sessions touching the same key: the second commit loses.
     ok(&mut a, "begin");
@@ -767,7 +768,7 @@ fn transactions() {
     ok(&mut b, r#"set side "effect""#);
     ok(&mut a, "commit");
     assert!(fails(&mut b, "commit").contains("ERR_TRANSACTION_CONFLICT"));
-    assert_eq!(ok(&mut b, "get balance and side"), "balance: 10 [number]\nside: (nil)");
+    assert_eq!(ok(&mut b, "get balance and side"), "balance: 10 [int]\nside: (nil)");
 }
 
 #[test]
@@ -785,10 +786,7 @@ fn committed_transactions_survive_a_restart() {
         inst.shutdown();
     }
     let mut s = kiva(&dir);
-    assert_eq!(
-        ok(&mut s, "get a and b and c and never"),
-        "a: 1 [number]\nb: two [string]\nc: [3] [array]\nnever: (nil)"
-    );
+    assert_eq!(ok(&mut s, "get a and b and c and never"), "a: 1 [int]\nb: two [string]\nc: [3] [array]\nnever: (nil)");
     assert!(ok(&mut s, "stats").contains("from hint file"));
 }
 
@@ -955,7 +953,7 @@ fn projects_group_workspaces_and_grants_name_them() {
     // user@workspace logs in straight into that workspace, as Redis URLs can say.
     let mut direct = Session::new(inst.clone(), false, None);
     ok(&mut direct, "auth app@school.places pw");
-    assert_eq!(ok(&mut direct, "get paid"), "paid: 1 [number]");
+    assert_eq!(ok(&mut direct, "get paid"), "paid: 1 [int]");
     let mut lost = Session::new(inst.clone(), false, None);
     assert!(fails(&mut lost, "auth app@travel.nowhere pw").contains("does not exist"));
     assert!(fails(&mut lost, "whoami").contains("authentication required"));
@@ -989,7 +987,7 @@ fn projects_group_workspaces_and_grants_name_them() {
     assert!(fails(&mut admin, "workspace move old_places to travel.places").contains("already exists"));
     ok(&mut admin, "workspace move old_places to travel.archive");
     ok(&mut r, "workspace switch travel.archive");
-    assert_eq!(ok(&mut r, "get kept"), "kept: 1 [number]");
+    assert_eq!(ok(&mut r, "get kept"), "kept: 1 [int]");
     assert!(fails(&mut r, "workspace switch old_places").contains("does not exist"));
     assert!(ok(&mut admin, "users").contains("*.places=read, travel.archive=read"));
 
@@ -1071,7 +1069,7 @@ fn a_workspace_move_stopped_at_any_step_is_finished_or_taken_back_at_the_next_st
             assert!(list.contains("travel.old") && !list.contains(" old "), "{steps}: {list}");
             assert_eq!(ok(&mut app, "whoami"), "app (editor) @ workspace 'travel.old'");
         }
-        assert_eq!(ok(&mut app, "get kept"), "kept: 1 [number]");
+        assert_eq!(ok(&mut app, "get kept"), "kept: 1 [int]");
         // Nobody else gained anything, and the record is gone.
         assert!(users.contains("*.places=write"), "{steps}: {users}");
         assert!(!users.lines().any(|l| l.contains("other") && l.contains("old")), "{steps}: {users}");
@@ -1102,7 +1100,7 @@ fn accounts_from_before_2_0_keep_their_personal_workspace() {
     let mut s = Session::new(inst.clone(), false, None);
     ok(&mut s, "auth old pw");
     assert_eq!(ok(&mut s, "whoami"), "old (editor) @ workspace 'u_old'");
-    assert_eq!(ok(&mut s, "get mine"), "mine: 1 [number]");
+    assert_eq!(ok(&mut s, "get mine"), "mine: 1 [int]");
     ok(&mut s, "set more 2");
     let mut admin = Session::new(inst, true, None);
     assert!(ok(&mut admin, "users").contains("u_old=write (default: u_old)"));
@@ -1362,16 +1360,13 @@ fn lua_scripts_and_triggers() {
     );
     assert_eq!(ok(&mut s, r#"eval 'print("hello", ARGV[1], ARGV[2])' world 42"#), "hello\tworld\t42\nOK");
     ok(&mut s, r#"eval 'kiva.set("made", {list = {1, 2, 3}, ok = true}); kiva.set("num", 1.5); kiva.del("txt")'"#);
-    assert_eq!(
-        ok(&mut s, "get made.list and num and txt"),
-        "made.list: [1,2,3] [array]\nnum: 1.5 [number]\ntxt: (nil)"
-    );
+    assert_eq!(ok(&mut s, "get made.list and num and txt"), "made.list: [1,2,3] [array]\nnum: 1.5 [float]\ntxt: (nil)");
     assert_eq!(ok(&mut s, r#"eval 'return kiva.incr("n", 10)'"#), "15");
     assert_eq!(ok(&mut s, r#"eval 'return #kiva.scan("user:*")'"#), "1");
 
     // Atomic: an error undoes everything the script wrote.
     assert!(fails(&mut s, r#"eval 'kiva.set("half", 1); kiva.del("n"); error("boom")'"#).contains("boom"));
-    assert_eq!(ok(&mut s, "get half and n"), "half: (nil)\nn: 15 [number]");
+    assert_eq!(ok(&mut s, "get half and n"), "half: (nil)\nn: 15 [int]");
     assert!(fails(&mut s, "eval 'this is not lua'").contains("ScriptError"));
     assert!(fails(&mut s, r#"eval 'kiva.set("123", 1)'"#).contains("purely numeric"));
 
@@ -1404,7 +1399,7 @@ fn lua_scripts_and_triggers() {
     std::fs::write(&bad, "return (((").unwrap();
     assert!(fails(&mut s, &format!("script load \"{}\" as \"bad\"", bad.display())).contains("syntax error"));
     assert!(ok(&mut s, r#"bench script "inc" iterations 50 counter"#).starts_with("SCRIPT inc: 50 ops"));
-    assert_eq!(ok(&mut s, "get counter"), "counter: 50 [number]");
+    assert_eq!(ok(&mut s, "get counter"), "counter: 50 [int]");
 
     // Triggers run the script with ARGV = {event, key}.
     let audit = dir.path().join("audit_log.lua");

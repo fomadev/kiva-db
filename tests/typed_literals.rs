@@ -81,8 +81,8 @@ fn typed_literals_keep_their_types_at_any_depth_through_reopening() {
     assert_eq!(ext(&inst, "account:1"), account());
     assert_eq!(enc(&inst, "account:1"), DocEnc::Kdoc);
     assert_eq!(ok(&mut s, "json type account:1 .id"), "account:1.id: [string]");
-    assert_eq!(ok(&mut s, "json type account:1 .age"), "account:1.age: [number]", "as in C3");
-    assert_eq!(ok(&mut s, "json type account:1 .values[1]"), "account:1.values[1]: [number]");
+    assert_eq!(ok(&mut s, "json type account:1 .age"), "account:1.age: [int]");
+    assert_eq!(ok(&mut s, "json type account:1 .values[1]"), "account:1.values[1]: [float]");
     assert_eq!(ok(&mut s, "json type account:1 .values[2]"), "account:1.values[2]: [decimal]");
     assert_eq!(ok(&mut s, "json get account:1 .owner.since"), "account:1.owner.since: 2020-01-15 [date]");
 
@@ -210,7 +210,7 @@ fn increments_take_a_typed_operand() {
     ok(&mut s, r#"set a:1 {"balance": decimal "1000.00", "ratio": float 0.5, "count": int 1}"#);
     assert_eq!(ok(&mut s, r#"json incr a:1 .balance decimal "-100.25""#), "a:1.balance: 899.75 [decimal]");
     assert_eq!(ok(&mut s, "json incr a:1 .balance decimal 0.25"), "a:1.balance: 900.00 [decimal]");
-    assert_eq!(ok(&mut s, "json incr a:1 .count int 3"), "a:1.count: 4 [number]");
+    assert_eq!(ok(&mut s, "json incr a:1 .count int 3"), "a:1.count: 4 [int]");
     assert_eq!(ok(&mut s, "json incr a:1 .balance int 1"), "a:1.balance: 901.00 [decimal]");
     assert!(ok(&mut s, "json incr a:1 .ratio float 0.25").starts_with("a:1.ratio: 0.75"));
     let e = fails(&mut s, "json incr a:1 .balance float 0.1");
@@ -231,7 +231,7 @@ fn increments_take_a_typed_operand() {
     assert_eq!(enc(&inst, "j:1"), DocEnc::Kdoc);
     // An int operand on a JSON document keeps it JSON.
     ok(&mut s, r#"set j:2 {"n": 10}"#);
-    assert_eq!(ok(&mut s, "json incr j:2 .n int 5"), "j:2.n: 15 [number]");
+    assert_eq!(ok(&mut s, "json incr j:2 .n int 5"), "j:2.n: 15 [int]");
     assert_eq!(enc(&inst, "j:2"), DocEnc::Json);
 }
 
