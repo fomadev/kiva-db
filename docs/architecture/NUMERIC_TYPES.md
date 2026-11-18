@@ -200,3 +200,99 @@ Today, an amount in a document is safe as an **integer number of the smallest un
 | N4 | Documents: A (schema type `decimal`), or C (its own design first) | Small (A) / very large (C) | None (A) / format 3 (C) |
 
 N1 can start as soon as it is approved. N2 is the storage change that waits for explicit approval. N4 waits for the decision of 6.3.
+
+## 10. N2: preparation
+
+Nothing of this section is implemented. It prepares lot N2 (numeric types of keys) so that its review starts from written rules; the code waits for the maintainer's approval.
+
+State of main when it was written (`1d56c98`): N1 (#93, exact numeric comparisons) and the lots C1 to C4 of [NATIVE_DOCUMENTS.md](NATIVE_DOCUMENTS.md) are merged. Documents hold `int`, `float` and `decimal` leaves (C2, C3) and the shell writes them (C4). Keys do not: a numeric key is still the type `number`.
+
+### 10.1 Keys today, read in the code
+
+| Part | Today | Where |
+| :--- | :--- | :--- |
+| Type codes | 1 to 10; an unknown code is refused at reading (`Type::from_u8`) | `src/value.rs` |
+| A numeric key | `Value::Num(String)`, code 2: the text as written, if it reads as a finite number (`1250.50`, `007`, a 41-digit integer) | `Value::encode`, `is_valid_number` |
+| Format of a file | a record of code 8 or more needs format 2, one with `FLAG_KDOC` format 3 (`format_for_record`) | `src/format.rs` |
+| `typeof`, `get` | `[number]`, the text as written | `exec::typeof_one`, `Value::display` |
+| REST and structured requests | `num_to_json`: an `i64`, a `u64`, or a float holding the value exactly (`1250.50` → `1250.5`), else the text | `src/value.rs`, `num::exact_json` |
+| REST input | `{"type": "number"}`, a JSON number or a text, kept as text | `api::value_in` |
+| Redis | `GET`: the text. `INCR`, `INCRBY`: `i64`, overflow refused. `INCRBYFLOAT`: refused when the stored text is not exactly a float (N1) | `src/resp.rs` |
+| Schemas | `int`, `float`, `decimal`, `number`, `integer` (C3) | `src/schema.rs` |
+| Documents | `json type` names an `int` or a `float` `number` (C3, C4); `decimal`, `date`, `time`, `datetime` by their names | `exec::show_leaf` |
+
+### 10.2 The decision to take: which writes raise a file to format 3
+
+Section 6.1 gives `int`, `float` and `decimal` keys the codes 11, 12 and 13. With the untyped rule of 4.1, `set n 42` would then write code 11, and **the first numeric key written after the upgrade would raise its file to format 3**, after which `2.0.0-rc.2` no longer opens it. Documents raise a file only when they hold a `decimal` or a date (NATIVE_DOCUMENTS.md 3.4): with 6.1, keys would undo that promise for almost every workspace.
+
+| Option | Codes | What raises format 3 | Going back to `rc.2` |
+| :--- | :--- | :--- | :--- |
+| K1. As 6.1 | `int` 11, `float` 12, `decimal` 13 | any numeric key written, `set n 42` included | lost at the first numeric write |
+| **K2. Proposed** | `int` and `float` stay code 2, written in canonical text (`42`, `8.0`, `1.75`); `decimal` gets code 13 | only a `decimal` key, as only a `decimal` does in a document | kept until a decimal or a native document value is written |
+
+Under K2 the kind of a code-2 key is read from its text by the untyped rule (4.1): an integer within `i64` is an `int`, a text with a fraction or an exponent a `float`. `float 8` is written `8.0`, so it reads back as a float, as in documents. Codes 11 and 12 are left unused (reserved), which keeps the choice open for a later version.
+
+What K2 gives for a key written by 2.0.0:
+
+| Written | Stored | `typeof` | REST |
+| :--- | :--- | :--- | :--- |
+| `set n 42` | `42`, code 2 | `int` | `42` (unchanged) |
+| `set n 1250.50` | `1250.50`, code 2, the text as written, as today | `float` | `1250.5` (unchanged) |
+| `set float n 8` | `8.0`, code 2 | `float` | `8.0` |
+| `set int n 42` | `42`, code 2 | `int` | `42` |
+| `set decimal n "1250.50"` | `1250.50`, code 13, file raised to format 3 | `decimal` | `"1250.50"`, a text, as plain JSON carries decimals (NATIVE_DOCUMENTS.md 7.1) |
+| `set n 12345678901234567890123` | refused: `out of range for int: write decimal "..." to keep it exact` | — | — |
+
+### 10.3 Keys written before 2.0.0
+
+A code-2 record of 1.x or a candidate is read as it is, never rewritten by a read or a compaction:
+
+| Text | Read as | Shown |
+| :--- | :--- | :--- |
+| `42`, `-7`, `007` | `int` | as written (`007`), as today |
+| `1250.50`, `2.5E-3`, `1e300` | `float`, when a float holds its value exactly (N1, `num::exact_f64`) | as written |
+| beyond `i64` (`12345678901234567890123`), or a fraction a float would round (`0.1000000000000000000001`) | a **legacy number**: `typeof` answers `number`, the text is kept, shown and sent as today, and arithmetic on it is refused with the hint to write it again as `decimal "..."` | as written |
+
+`kivadb doctor` counts the legacy numbers of each workspace (with C7).
+
+This differs from 6.1, which read an old fraction as a `decimal`. Under K2 a decimal is only what a user typed as one: an old `1250.50` key stays the number it was for programs (`1250.5` in REST), instead of becoming the text `"1250.50"` without a word.
+
+### 10.4 Commands, protocols, scripts
+
+| Path | `int` | `float` | `decimal` |
+| :--- | :--- | :--- | :--- |
+| Shell `set`, `update`, `rename` | `set int n 42`, untyped `42` | `set float n 1.75`, untyped `1.75` | `set decimal n "1250.50"` or `1250.50`, never untyped |
+| `typeof`, `get` | `[int]` | `[float]` | `[decimal]`, its digits as written |
+| REST, structured requests | JSON integer | JSON number | JSON text in plain JSON; `{"$decimal": ...}` in extended JSON (C5) |
+| REST input | `{"type": "int"}` | `{"type": "float"}` | `{"type": "decimal", "value": "1250.50"}`, from a text only; `{"type": "number"}` keeps the untyped rule |
+| Redis `GET`, `SET` | text | text | text; `SET` follows the untyped rule (Redis has no types), never a decimal |
+| `INCR`, `INCRBY`, `DECR`, `DECRBY` | exact, overflow refused | refused, as today for a text with a fraction | refused: `INCRBYFLOAT` adds to a decimal |
+| `INCRBYFLOAT` | refused when a float would round it (N1) | `f64` | exact: the step is read as a decimal from its text; a result beyond 28 digits refused |
+| Lua | integer | float | text; `kiva.decimal("...")` writes one (C5) |
+| `json type` in documents | `int` (was `number`) | `float` (was `number`) | `decimal` |
+
+`number` stays accepted wherever a type is written (`set number n 42`, `{"type": "number"}`, schemas) and means the untyped rule. `bool` is accepted as an alias of `boolean`.
+
+### 10.5 Visible changes, for the release notes
+
+- `typeof` and `json type` answer `int`, `float` or `decimal` instead of `number` (except for a legacy number, 10.3). A script testing `typeof ... = number` must change.
+- An untyped integer beyond `i64` is refused for a key, as it already is in a document.
+- Under K1 instead of K2: any numeric key written raises its file to format 3.
+
+### 10.6 Tests to write
+
+- Literals of section 8 for keys: `0`, `-0`, `i64::MIN`, `i64::MAX` and one past each (refused untyped, accepted as `decimal`), `007`, `1.0`, `1e3`, `.5` and `+1` refused, `1e400` refused, `decimal` with 28 and 29 digits, `decimal "-0.00"`.
+- A home of 1.7.1 and one of `rc.2` with `42`, `1250.50`, `007`, a 41-digit integer and `1e300`: read as `int`, `float`, `int`, legacy, `float`; texts unchanged; the files keep their formats after reads, `INCR`, compaction and untyped writes, and become format 3 only after `set decimal`; then `rc.2` refuses them (the published binary, as in `tests/native.rs`).
+- `typeof`, `get`, REST `get` and `set`, structured requests, Redis `GET`, `INCR`, `INCRBYFLOAT` on each kind, Lua, the change journal, replication and backup of a code-13 record.
+- `json type` of `int` and `float` leaves.
+- Transactions holding typed keys; `INCR` from two clients at once.
+
+### 10.7 Out of N2
+
+Extended JSON (`{"$decimal": ...}`) in REST and the protocols, and `kiva.decimal()` in Lua (C5); the drivers (C6, N3); `doctor` and the replication and backup checks (C7). N2 prepares no candidate, tag or release.
+
+### 10.8 To decide before N2 starts
+
+1. K2 (proposed) or K1 (10.2).
+2. Legacy fractions read as `float`, as proposed in 10.3, rather than as `decimal`, as 6.1 said.
+3. `json type` of document leaves answering `int` and `float` in N2 (10.4).
