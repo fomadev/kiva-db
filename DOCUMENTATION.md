@@ -522,7 +522,7 @@ OK: city saved.
 OK: active saved.
 kiva> get name and age and ghost
 name: Fordi [string]
-age: 30 [number]
+age: 30 [int]
 ghost: (nil)
 ```
 
@@ -591,7 +591,7 @@ kivadb -e "set visits 1" -e "get visits"
 
 ```text
 OK: visits saved.
-visits: 1 [number]
+visits: 1 [int]
 ```
 
 The exit code is `0` when every command succeeded and `1` when one of them reported an error.
@@ -702,7 +702,7 @@ Error: 'get' is a reserved keyword and cannot be used as a key.
 kiva> set `get` 1
 OK: get saved.
 kiva> get `get`
-get: 1 [number]
+get: 1 [int]
 ```
 
 ### 4.2 Values
@@ -752,9 +752,9 @@ Most data commands accept an optional type before the key. It turns the command 
 kiva> set number age 30
 OK: age saved.
 kiva> get string age
-Error: Type mismatch. 'age' is a [number].
+Error: Type mismatch. 'age' is a [int].
 kiva> del string age
-Error: Type mismatch. Cannot delete 'age' because it is a [number].
+Error: Type mismatch. Cannot delete 'age' because it is a [int].
 ```
 
 ### 4.5 Upper and lower case
@@ -769,11 +769,11 @@ A line that starts with `#` or `--` is ignored. Useful in command files.
 
 ## Chapter 5 — Data types
 
-KivaDB has ten types: string, number, boolean, null, array, object, bytes, and date, datetime and time ([5.8](#58-date-datetime-time)). `typeof` tells you the type of a key:
+KivaDB has these types: string, number (of the kind `int` or `float`), `decimal`, boolean, null, array, object, bytes, and date, datetime and time ([5.8](#58-date-datetime-time)). `typeof` tells you the type of a key, a number by its kind:
 
 ```text
 kiva> typeof age
- -> age is a [number]
+ -> age is a [int]
 ```
 
 ### 5.1 string
@@ -799,7 +799,8 @@ OK: debt saved.
 **Precision.** Numbers are compared by their value, exactly: `9007199254740993` and `9007199254740992` are two values, though a 64-bit float holds them as one, and `1` and `1.0` are one value. This holds in conditions, indexes, unique indexes, `order by`, `group by`, `min` and `max`, and in the bounds of a schema.
 
 * **In a document**, a number is a 64-bit integer (−9 223 372 036 854 775 808 to 18 446 744 073 709 551 615) or a 64-bit float. An integer beyond that range is refused, with the ways out: quote it to keep its digits as text, or add `.0` to store it as a rounded float. A number with a fraction or an exponent is a float.
-* **A key** keeps the text you wrote, whatever its size. Programs (REST, the drivers, the changes stream) receive it as a JSON number when one holds it exactly, and as that text otherwise (`"12345678901234567890123"`). Lua scripts get it the same way. `print` computes with 64-bit floats, so it refuses a number that one would round.
+* **A key** holds an `int` (a 64-bit integer) or a `float`, named by `typeof`, `get` and `has`: `set n 42` is an `int`, `set f 1.75` a `float`, and `set float g 8` keeps `8.0`. An integer beyond the 64-bit integers, or a fraction a float would round, is refused with the way to keep it: `set decimal <key> "..."`. Keys written before 2.0.0 keep their text; one that is neither kind is named `number`. `print` computes with 64-bit floats, so it refuses a number that one would round, except a `decimal`, which it computes with exactly.
+* **`decimal`** keeps the digits as written, up to 28 of them: `set decimal price "1250.50"` (or `1250.50`) shows `1250.50 [decimal]`, and `0.1 + 0.2` is `0.3`. It is the type for amounts of money. A key of type `decimal` raises its data file to storage format 3 ([19.4](#194-the-data-file-byte-by-byte)). Redis `INCRBYFLOAT` adds to it exactly; `INCR` refuses it. Inside documents, write `decimal "1250.50"` ([10.10](#1010-typed-values-in-documents)).
 * **Sums** of integers are exact (`sum` refuses a total beyond the 64-bit integers); a value with a fraction makes the sum a float. `json incr` stays exact on integers, and refuses to go beyond 64 bits.
 * **Data written before 2.0.0** keeps what it held. Integers beyond 64 bits were rounded when they were written into a document, without an error; those lost digits cannot be read back. Such values are written with an exponent (`1.2345678901234568e+22`), and `get where <pattern>.<field> >= 18446744073709551616.0 or <field> < -9223372036854775808.0` lists them. Keys and integers within 64 bits were kept exactly. Indexes are rebuilt each time a workspace opens, so they follow the new rules at once. One case changes a unique index: `0` and `-0.0` were two values for earlier versions and are one now, so a unique index may hold both. Nothing is lost, and KivaDB keeps working: the two documents stay as they are, an equality (`v = 0`) finds both, the index still refuses any new duplicate, and the workspace opens with `[WARN] the unique index on ... holds 0 twice (z:1 and z:2)` in the log. `kivadb doctor` lists such indexes without changing anything (`WARN  Data  ... z:1 and z:2 both hold 0`). **To repair**: change or delete one of the two documents (`json set z:2 .v 1`, or `del z:2`); the warning is gone at the next opening and from the doctor. Until then, `create unique index` on that field is refused, naming both documents, so drop the index only after the repair.
 
@@ -828,7 +829,7 @@ A `null` key has no type yet, so its first `update` may give it a value of any t
 kiva> update pending 12
 OK: pending updated.
 kiva> get pending
-pending: 12 [number]
+pending: 12 [int]
 ```
 
 ### 5.5 array
@@ -913,8 +914,8 @@ opens: 08:00:00 [time]
 
   A moment moves by `ms`, `seconds`, `minutes`, `hours`, `days` or `weeks` (singular or plural; `s`, `min`, `h`, `d`, `w` too). Months and years vary in length, so they are not units: write the date. A `date` moves by days or weeks only.
 * **Parts of a moment**: `year()`, `month()`, `day()`, `hour()`, `minute()`, `second()` and `weekday()` (1 for Monday to 7 for Sunday) are functions, not types. They work in `print` (`print month(created_at)`), in conditions and in `group by` ([11.1](#111-the-condition)). A datetime is read in your time zone: 23:30 UTC on 31 December is already 2027 in Kinshasa.
-* **In documents**, JSON has no date type: dates are text in ISO 8601. `json set order:1 .created_at now()` writes `"2026-10-27T13:30:00.250Z"` (UTC). Conditions compare such texts as moments when the value is one (`now() - 7 days`, `datetime "..."`), whatever their form: with or without `Z`, milliseconds or a zone.
-* **Programs** (REST, structured requests, Redis, the drivers) always get a datetime in ISO 8601, in UTC: `2026-10-27T13:30:00.000Z`. Each program shows it in the time zone of its own user. They write one as such a text, or as milliseconds since 1970.
+* **In documents**, a typed value is stored as a native date, time or datetime: `set order:1 {"created_at": now(), "due": date "2026-11-30"}`, and `json set order:1 .created_at now()` ([10.10](#1010-typed-values-in-documents)). A text stays a text: `"2026-10-27"` written without a type, and every document written before 2.0.0, which `convert` can turn into dates ([10.10](#1010-typed-values-in-documents)). Conditions compare both as moments when the value is one (`now() - 7 days`, `datetime "..."`), whatever their form: with or without `Z`, milliseconds or a zone.
+* **Programs** (REST, structured requests, Redis, the drivers) always get a datetime in ISO 8601, in UTC: `2026-10-27T13:30:00.000Z`. Each program shows it in the time zone of its own user. They write one as such a text, or as milliseconds since 1970. Inside documents, they get dates as texts, unless they ask for extended JSON, which keeps the types ([20.4](#204-structured-requests-for-tools)).
 
 ### 5.9 Time zones
 
@@ -1010,7 +1011,7 @@ get [type] <key>
 kiva> get motto
 motto: Kitoko [string]
 kiva> get number login_retry
-login_retry: 0 [number]
+login_retry: 0 [int]
 kiva> get ghost
 ghost: (nil)
 ```
@@ -1480,9 +1481,9 @@ post:1.tags[-1]: africa [string]
 kiva> json delete post:1 .tags[-1]
 Deleted: post:1.tags[-1]
 kiva> json incr post:1 .views 1
-post:1.views: 1 [number]
+post:1.views: 1 [int]
 kiva> json incr post:1 .stats.shares 1
-post:1.stats.shares: 1 [number]
+post:1.stats.shares: 1 [int]
 ```
 
 * `json append` adds at the end; a missing field becomes a new array.
@@ -1508,6 +1509,42 @@ stats
 `json len` counts the elements of an array, the fields of an object or the characters of a string. Without a path, `json get`, `json type`, `json len` and `json keys` look at the whole document.
 
 ---
+
+### 10.10 Typed values in documents
+
+A document may hold values that JSON has no type for: decimals, dates, times and datetimes. Write them with their type before the value, at any depth:
+
+```text
+kiva> set acc:1 {"name": "Ana", "balance": decimal "1250.50", "opened": date "2026-01-15", "at": now(), "rate": float 8, "tags": ["a", date "2027-01-01"]}
+OK: acc:1 saved.
+kiva> json type acc:1 .balance
+acc:1.balance: [decimal]
+kiva> json get acc:1 .opened
+acc:1.opened: 2026-01-15 [date]
+kiva> json set acc:1 .closes time "18:00"
+OK: acc:1.closes updated.
+kiva> json incr acc:1 .balance decimal "-100.25"
+acc:1.balance: 1150.25 [decimal]
+```
+
+* **Types**: `decimal "..."`, `date "..."`, `datetime "..."`, `time "..."`, and `int`, `float`, `string`, `bool`, `uuid "..."` (a checked text). `now()`, `today()` and `+ 30 days` work inside documents too ([5.8](#58-date-datetime-time)). They are read by `set`, `update`, `add`, `json set`, `json append`, `json insert`, `json incr` and `.kva` files.
+* **`get <key>` shows such a document in this syntax**, its dates in your formats, so that what is shown can be typed back. The rows of `get where` show it as plain JSON.
+* **In conditions**, a typed value compares exactly: `get where acc:*.balance = decimal "1250.5"` finds `1250.50`, with or without an index. A native date and the text `"2026-01-15"` are one value for queries and unique indexes.
+* **Storage**: a document holding one of these values is kept in KivaDB's binary encoding (`KDOC`), and the first one raises the data file to storage format 3, which 2.0.0-rc.2 and 1.x refuse ([19.4](#194-the-data-file-byte-by-byte)). `kivadb doctor` names the format of each workspace ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)).
+* **Programs** receive decimals and moments as texts, unless they ask for extended JSON ([20.4](#204-structured-requests-for-tools)).
+
+**From texts to typed values.** Documents written before 2.0.0, or by programs sending plain JSON, hold dates and amounts as texts. `convert` turns the texts of one field into typed values:
+
+```text
+kiva> convert order:*.created_at to datetime check
+Check: 1204 document(s) of order:* to convert to datetime (38 already datetime, 5 without created_at); nothing written.
+kiva> convert order:*.created_at to datetime
+Converted: 1204 document(s) of order:* to datetime (38 already datetime, 5 without created_at).
+```
+
+* The types are `date`, `datetime`, `time` and `decimal`. Texts are read in ISO only (`2026-10-31`, `08:30:00`, `1250.50`); a datetime must carry its offset (`2026-10-31T15:18:00Z`, `+01:00`), since a text without one has no time zone to be read in.
+* **All or nothing**: if one document holds a text that does not read, nothing is written, and the error names up to ten keys with their values. A document without the field, with `null`, or already of the type is left as it is. A number is not a text: it is named, not guessed.
+* `check` counts what would change and writes nothing. The conversion runs in one transaction (or in yours, if one is open); queries answer the same before and after.
 
 ## Chapter 11 — Queries and indexes
 
@@ -2307,7 +2344,7 @@ OK: account:a updated.
 kiva> rollback
 Transaction rolled back.
 kiva> get account:a
-account:a: 50 [number]
+account:a: 50 [int]
 ```
 
 Inside your transaction, `get`, `has`, `typeof`, `json` and `print` see your pending changes. Listing and query commands (`keys`, `scan`, `range`, `where`) show what is committed.
@@ -3220,9 +3257,11 @@ KivaDB 2.0.0 doctor, home /home/ana/.local/share/kivadb
   OK    Time zone   Africa/Kinshasa, now 2026-10-27T13:50:40.759Z
   OK    Replication master
   OK    Data        3 file(s), 18204 record(s), every checksum matches
+  OK    Data        workspace 'default': storage format 1 (opened by KivaDB 1.x and 2.x)
+  OK    Data        workspace 'shop.orders': storage format 3, native values (opened by KivaDB 2.0.0 and later, not 2.0.0-rc.2 or 1.x)
   OK    Server log  no recent error
 
-9 check(s) passed, 0 warnings, 1 problem.
+11 check(s) passed, 0 warnings, 1 problem.
 ```
 
 | Line | What is checked |
@@ -3410,7 +3449,7 @@ All integers are little-endian.
 | Field | Size | Content |
 | :--- | :--- | :--- |
 | magic | 4 | The letters `KIVA` |
-| format | 4 | Storage format number: `1`, or `2` once the file holds a `date`, `datetime` or `time` |
+| format | 4 | Storage format number: `1`, `2` once the file holds a `date`, `datetime` or `time` key, `3` once it holds a document with typed values or a `decimal` key |
 | file_id | 8 | A random number, changed at every compaction and reset |
 
 A file is raised from format 1 to format 2 the first time a `date`, `datetime` or `time` is written to it, just before that record. KivaDB 1.x reads only format 1: it refuses such a file with `unsupported storage format 2` instead of misreading the new records. A workspace that holds none of them stays at format 1, readable by 1.x. The values of these types are stored as text that sorts in time order: `2026-10-27`, `2026-10-27T14:30:00.000Z` (always UTC, to the millisecond), `08:00:00`.
@@ -3559,9 +3598,9 @@ SET creates the key or replaces it, whatever its previous type. A ttl of 0 means
 and the reply:
 
 ```text
-00 00 00 13    length = 19 (2 for the status + 17 for the payload)
+00 00 00 10    length = 16 (2 for the status + 14 for the payload)
 00 00          status = 0
-2B 61 67 65 3A 20 39 39 20 5B 6E 75 6D 62 65 72 5D    "+age: 99 [number]"
+2B 61 67 65 3A 20 39 39 20 5B 69 6E 74 5D    "+age: 99 [int]"
 ```
 
 A connection stays open for as many requests as you like. Replies come back in the order of the requests. Ready-made clients are in [Chapter 24](#chapter-24--connecting-from-your-programs).
@@ -3627,6 +3666,28 @@ An error comes back with status 1 and the message as payload, as for every reque
 
 ---
 
+**Extended JSON.** By default, values travel as plain JSON, as in 1.x: a decimal as its text (`"1250.50"`), a date or a datetime inside a document as its ISO text. A request with `"types": "extended"` keeps every type, both ways:
+
+| Value | Extended JSON |
+| :--- | :--- |
+| `int` | a JSON number without fraction |
+| `float` | a JSON number with a fraction or an exponent (`8.0`) |
+| `decimal` | `{"$decimal": "1250.50"}` |
+| `date`, `time`, `datetime` | `{"$date": "2026-10-31"}`, `{"$time": "08:30:00"}`, `{"$datetime": "2026-10-31T15:18:00.000Z"}` |
+| A key of the data that starts with `$` | written with the `$` doubled (`"$$ref"`) |
+
+```json
+{"op": "get", "key": "acc:1", "types": "extended"}
+```
+
+```json
+{"found": true, "key": "acc:1", "type": "object", "value": {"name": "Ana", "balance": {"$decimal": "1250.50"}, "opened": {"$date": "2026-01-15"}}, ...}
+```
+
+* `get`, the rows of `query` and `changes` answer in extended JSON; `put` and `add` read it, so a value read can be written back as it is, and put in a condition as it is. An answer names the kind of a number key (`"type": "int"`); plain JSON keeps `"number"`.
+* Without `types`, a `{"$decimal": "1"}` written by `put` stays an object with a key `$decimal`, as in 1.x. Conditions read these tags in both modes: `{"field": "balance", "cmp": "=", "value": {"$decimal": "1250.5"}}`.
+* `types` is `"plain"` or `"extended"`; another value is refused. Aggregates, `similar` and the semantic cache answer plain JSON. Redis clients always get plain JSON.
+
 ## Chapter 21 — The REST API
 
 The REST API lets anything that speaks HTTP use KivaDB: a browser, `curl`, any programming language. It listens on port **8080**.
@@ -3683,7 +3744,7 @@ curl http://localhost:8080/v1/key/user:1
 {"key":"user:1","type":"object","data":{"name":"Alice","role":"admin"},"ttl":null,"status":"ok","timestamp":1791791113}
 ```
 
-`ttl` is the number of seconds left, or `null`. Add `?path=.name` to read one field of a document. Values of type bytes are returned in base64.
+`ttl` is the number of seconds left, or `null`. Add `?path=.name` to read one field of a document. Values of type bytes are returned in base64. Add `?types=extended` to read and write in extended JSON ([20.4](#204-structured-requests-for-tools)): `GET /v1/key/acc:1?types=extended`, and `POST /v1/key/price?types=extended` with the body `{"$decimal": "9.90"}` writes a `decimal` key. `/v1/range`, `/v1/changes` and `/v1/api` take it too.
 
 **Delete** - `DELETE /v1/key/{key}`:
 
@@ -3959,7 +4020,7 @@ The data is the same as everywhere else in KivaDB:
 ```text
 kiva> get user:1.name and visits
 user:1.name: Alice [string]
-visits: 1 [number]
+visits: 1 [int]
 ```
 
 Unlike a default Redis, every write is in the data file before the answer: keys, counters and their expiry times survive a crash or a restart of the server. With `sync_writes = true`, they also survive a power failure, at a cost kept low by group commit ([17.2](#172-what-survives-what)). A failing Lua script leaves nothing behind ([23.5](#235-lua-scripts-eval)), and the same data is reachable as documents and vectors ([23.11](#2311-json-documents-redisjson-commands)).
@@ -4498,6 +4559,8 @@ event: del product:1
 
 `exec` sends any command of this manual and returns the output lines; it throws when the command reports an error.
 
+**Native values (driver 1.3.0, KivaDB 2.0.0).** `connect({ types: "extended" })` keeps every type, inside documents too: an integer beyond ±(2^53 - 1) comes back as a `BigInt`, a `decimal` as text or as an instance of the class given as `decimal` (`connect({ types: "extended", decimal: Decimal })` with decimal.js or any class built from a text; the driver depends on none), and a `Date` inside a document is stored as a `datetime`. In conditions, a `Date`, a `BigInt` and such a decimal compare exactly in both modes. Without `types`, the driver answers as before. Extended mode is refused, with the version found, by a server older than 2.0.0.
+
 ### 24.4 Python
 
 **With the official driver.** The package `kivadb` ([`drivers/python`](drivers/python)) speaks the binary protocol, needs only the standard library and is typed. It needs Python 3.10 or later. It is not on PyPI yet: `pip install path/to/kiva-db/drivers/python`. Its version numbers are its own, separate from the server's ([its README](drivers/python/README.md)):
@@ -4539,6 +4602,8 @@ call("DELETE", "/v1/key/city:1")
 ```
 
 When authentication is on, add the header `Authorization: Basic <base64 of "user:password">` to each request. Note that `urlopen` raises an exception for answers such as 404. The `redis` package works too, through the Redis protocol ([24.6](#246-redis-libraries)).
+
+**Native values (driver 1.1.0, KivaDB 2.0.0).** `kivadb.connect(..., types="extended")` keeps every type, inside documents too: `decimal.Decimal`, `date`, `time` and aware `datetime` are written as native values and come back as themselves, and a key can hold a `Decimal`. A `Decimal` that is not finite or has more than 28 digits is refused, and so is an `int` beyond 64 bits (store it as a `Decimal`). Without `types`, a `Decimal` is refused, so that none is stored as a text unnoticed. In conditions, these objects compare exactly in both modes: `db.query("acc:*", {"field": "balance", "cmp": ">", "value": Decimal("1000")})`.
 
 ### 24.5 Rust
 
@@ -4889,6 +4954,8 @@ The code goes between single quotes so that double quotes can be used inside. Wh
 | `kiva.typeof(key)` | The type name, or `nil` |
 | `kiva.scan([pattern])` | A list of key names (all keys without pattern) |
 | `kiva.incr(key [, amount])` | Adds to a number (1 by default), creating it at 0 if needed; returns the new value |
+| `kiva.decimal(text)`, `kiva.date(text)`, `kiva.time(text)`, `kiva.datetime(text)` | A typed value, read in ISO (a datetime with its offset), to store alone or inside a table |
+| `kiva.int(n)`, `kiva.float(x)` | A number of that kind: `kiva.float(8)` is stored as `8.0` |
 
 How values travel between KivaDB and Lua:
 
@@ -4901,6 +4968,8 @@ How values travel between KivaDB and Lua:
 | array | table with positions 1, 2, 3... |
 | object | table with named fields |
 | bytes | string |
+| decimal, date, time, datetime inside a document | a typed value: `tostring(v)` gives its text, `v:type()` its type |
+| a key of type decimal, date, time or datetime | its text |
 
 ```text
 kiva> eval 'kiva.set("visits", (kiva.get("visits") or 0) + 1) return kiva.get("visits")'
@@ -4912,6 +4981,15 @@ made.list: [1,2,3] [array]
 ```
 
 Lua tables count from 1: `kiva.get("colors")[1]` is the first colour. An empty Lua table is stored as an empty object.
+
+A typed value read from a document is written back with its type, so a script that changes one field keeps the others as they were:
+
+```text
+kiva> eval 'local a = kiva.get("acc:1"); a.name = "Anna"; kiva.set("acc:1", a); return a.balance + kiva.decimal("0.10")'
+1250.60
+```
+
+Decimals add, subtract, multiply and compare exactly with numbers and other decimals; dates and times compare with each other. `print`, `..` and `tostring` give their text. `==` compares two typed values (`kiva.decimal("10.50") == kiva.decimal("10.5")` is `true`), never a typed value and a string: compare `tostring(v)` with the text instead.
 
 ### 26.3 Arguments and print
 
@@ -5488,7 +5566,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `Error: database is locked by another process` | Another process has these files open. Check `kivadb status` |
 | `ERR_DATA_CORRUPTED: ...store.kiva.meta is damaged` | The file of index and schema definitions cannot be read (a disk error, or a copy cut short). KivaDB does not open the workspace without its unique indexes and schemas, which would no longer be enforced. Restore the file from a backup ([17.7](#177-backups)); or move it away, open the workspace, and create its indexes and schemas again. `kivadb doctor` reports it too |
 | `Error: invalid database file: missing KIVA signature` | The file is not a KivaDB data file. KivaDB does not touch it |
-| `Error: invalid database file: unsupported storage format N` | The file was written by a newer KivaDB (format 2: by 2.0, with dates in it). Use that version, or restore the backup made before upgrading |
+| `Error: invalid database file: unsupported storage format N` | The file was written by a newer KivaDB (format 2: by 2.0, with dates in it; format 3: by 2.0.0, with typed values in documents or a `decimal` key). Use that version, or restore the backup made before upgrading |
 | `kivadb start` says the server stopped right away | The reason is in the last lines of `server.log`, which are displayed |
 | `kivadb update`: `permission denied` | The executable is in a protected folder: `sudo kivadb update` (Linux, macOS) or a terminal run as administrator (Windows) |
 | `kivadb update`: `GitHub limits anonymous requests` | Too many requests from your network to GitHub in the last hour. Try again at the time shown |
@@ -5768,7 +5846,7 @@ KivaDB 2.0 opens the homes of 1.x as they are: there is no conversion to run and
 | Accounts | Migrated at the first start: each personal workspace `u_<name>` becomes a write grant and the account's default workspace ([16.4](#164-workspaces-and-grants)) |
 | New accounts | Reach **no workspace** until an admin grants them some ([16.3](#163-managing-accounts)) |
 | `compact` by an editor | Needs write access to every workspace of the project (`grant write on travel.*`), instead of the personal workspace |
-| Storage format | Stays `1`, until the first `date`, `datetime` or `time` is written to a workspace: that file moves to format `2`, which 1.x refuses ([19.4](#194-the-data-file-byte-by-byte)) |
+| Storage format | Stays `1`, until the first `date`, `datetime` or `time` key is written to a workspace: that file moves to format `2`, which 1.x refuses. The first document holding a typed value (`decimal "..."`, a date inside a document) or the first `decimal` key moves it to format `3`, which 2.0.0-rc.2 and 1.x refuse ([19.4](#194-the-data-file-byte-by-byte)). `kivadb doctor` names the format of each workspace |
 | Replication | A 2.x node and a 1.x node never follow each other ([33.5](#335-a-replication-group)) |
 
 These homes are kept in the repository and opened by every test run of 2.0 (`tests/compat.rs`): plain, compressed, encrypted, with indexes, a unique index, expiry, an HNSW graph, workspaces and accounts, all written by the 1.7.1 executable.
@@ -5823,6 +5901,8 @@ A node of 2.x and a node of 1.x **never follow each other**, in either direction
 
 The refusal comes before the snapshot, so the replica keeps its data. Without it, a 1.x replica stopped at the first date it received, after emptying its data for the snapshot; and a 2.0 replica received accounts of 1.x that it never migrated, so that they reached nothing on it, nor on it after a failover. `tests/compat.rs` checks both directions against the real 1.7.1 executable.
 
+A 2.0.0 master also refuses a replica of 2.0.0-rc.2 or earlier, before the snapshot: such a replica could not read the documents with typed values. In a group of candidates, upgrade the replicas first, then the master.
+
 So a group is upgraded as a whole, in one maintenance window, during which it does not answer.
 
 1. On every node, turn automatic failover off, so that a stopped master is not replaced: `config set failover.auto false`.
@@ -5842,16 +5922,22 @@ So a group is upgraded as a whole, in one maintenance window, during which it do
 | Reads the `users` structured request | The field `home` is now `default_workspace`, and may be `null` |
 | Reads `whoami` | `workspace` and `access` are `null` for a session in no workspace; `can_compact` is new |
 | Lets editors run `compact` | They need `grant write on <project>.*`; outside a project, only an admin compacts |
-| Stores dates as text (`"2026-10-27"`) | Nothing: a text stays a text, and conditions already compare ISO dates as moments. Use the new types for new data if you want them checked and shown in a time zone ([5.8](#58-date-datetime-time)) |
+| Stores dates as text (`"2026-10-27"`) | Nothing: a text stays a text, and conditions already compare ISO dates as moments. Use the new types for new data if you want them checked and shown in a time zone ([5.8](#58-date-datetime-time)); `convert <pattern>.<field> to date` turns existing texts into dates ([10.10](#1010-typed-values-in-documents)) |
 | Shows the creation dates of accounts | They are in the server's time zone (`time.zone`), not always the machine's |
-| Uses the Node.js driver | From 1.2.0, a JavaScript `Date` is stored as a `datetime` and comes back as a `Date` ([24.3](#243-nodejs)) |
+| Uses the Node.js driver | From 1.2.0, a JavaScript `Date` is stored as a `datetime` and comes back as a `Date`; from 1.3.0, `connect({ types: "extended" })` keeps decimals and big integers ([24.3](#243-nodejs)) |
+| Uses the Python driver | From 1.1.0, `connect(..., types="extended")` reads and writes `Decimal`, `date`, `time` and `datetime` inside documents ([24.4](#244-python)) |
+| Tests `typeof` of a number (`= number`), or reads `[number]` in the shell's answers | Numbers are named by their kind: `[int]` or `[float]`. REST and structured requests still answer `"type": "number"`, unless they ask for extended JSON ([5.2](#52-number)) |
+| Writes a key with an integer beyond 64 bits | Refused: write `set decimal <key> "..."` ([5.2](#52-number)) |
+| Used `json set k .day date "..."` with a candidate of 2.0 | It now stores a native date, not its text, and the file moves to format 3; queries answer the same ([10.10](#1010-typed-values-in-documents)) |
+| Has Lua scripts reading documents with decimals or dates | They get typed values: `tostring(v)` gives the text as before; arithmetic or `string.*` directly on such a value must use `tostring(v)` ([26.2](#262-the-kiva-functions)) |
+| Connects the shell of 1.x to a 2.0 server | It works, except on a `decimal` key, a type it does not know: use the shell of 2.0 |
 | Uses Kiva Studio | A version that knows 2.0 shows projects, grants on scopes, default workspaces and the new types; an older one connects, but shows the personal workspace model of 1.x ([24.7](#247-kiva-studio-the-graphical-client)) |
 
 Everything else (the command language of 1.x, the REST API, the binary protocol, the Redis commands) answers as before.
 
 ### 33.7 Going back to 1.x
 
-Going back is possible for a workspace that holds no `date`, `datetime` or `time`: its file is still at format 1, and 1.7.1 reads it. A workspace that received one is at format 2: 1.7.1 refuses it (`unsupported storage format 2`) and leaves it untouched, rather than cutting those records off. For those, restore the backup made before the upgrade: the writes made since are lost.
+Going back is possible for a workspace that holds no `date`, `datetime` or `time`: its file is still at format 1, and 1.7.1 reads it. `kivadb doctor` names the format of each workspace. A workspace at format 3 (typed values in documents, a `decimal` key) is refused by 1.7.1 and by 2.0.0-rc.2 alike, and comes back only from a backup made before. A workspace that received one is at format 2: 1.7.1 refuses it (`unsupported storage format 2`) and leaves it untouched, rather than cutting those records off. For those, restore the backup made before the upgrade: the writes made since are lost.
 
 The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each user back a `u_<name>` workspace reached without a grant, and ignores the grants on scopes such as `travel.*`. Check `users` after going back.
 
