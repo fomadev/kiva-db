@@ -659,6 +659,11 @@ impl Journal {
 /// A change as programs receive it: the value decoded (bytes in base64,
 /// dates as ISO 8601 in UTC), the moments as ISO 8601.
 pub fn to_json(c: &Change, cursor: &str) -> Json {
+    to_json_as(c, cursor, crate::api::Types::Plain)
+}
+
+/// [`to_json`] with the value in plain or extended JSON (NATIVE_DOCUMENTS.md 21.2).
+pub fn to_json_as(c: &Change, cursor: &str, types: crate::api::Types) -> Json {
     let op = match c.kind {
         ChangeKind::Set => "set",
         ChangeKind::Del => "delete",
@@ -668,6 +673,7 @@ pub fn to_json(c: &Change, cursor: &str) -> Json {
     let value = match (&c.value, ty) {
         (Some(raw), Some(ty)) => match crate::value::Value::decode(ty, raw, c.enc) {
             Ok(crate::value::Value::Bytes(b)) => Json::String(crate::util::b64_encode(&b)),
+            Ok(v) if types == crate::api::Types::Extended => crate::api::value_to_wire(&v, types),
             Ok(v) => v.to_json(),
             Err(_) => Json::Null,
         },
