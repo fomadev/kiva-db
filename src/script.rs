@@ -9,6 +9,7 @@
 //! script makes is buffered in a transaction that is committed only if the
 //! script finishes without error.
 
+use crate::doc::Doc;
 use crate::error::{KivaError, Result};
 use crate::session::Session;
 use crate::value::{fmt_f64, Value};
@@ -61,6 +62,189 @@ fn json_to_lua(lua: &Lua, j: &Json) -> mlua::Result<LVal> {
     })
 }
 
+/// A typed leaf in Lua: a decimal, a date, a time, a datetime, or a float
+/// made by `kiva.float` (NATIVE_DOCUMENTS.md 21.4, decision D4-b).
+/// `tostring` gives its canonical text, comparisons are exact, and it is
+/// written back as the type it is, alone or inside a table.
+#[derive(Clone)]
+struct Typed(Doc);
+
+/// The canonical text of a typed leaf.
+fn typed_text(d: &Doc) -> String {
+    match d {
+        Doc::Decimal(x) => x.to_string(),
+        Doc::Date(x) => crate::time::date_text(*x),
+        Doc::DateTime(x) => crate::time::iso(*x),
+        Doc::Time(x) => crate::time::time_text(*x),
+        Doc::Float(f) => format!("{:?}", if *f == 0.0 { 0.0 } else { *f }),
+        other => crate::doc::to_plain_json(other).to_string(),
+    }
+}
+
+/// A Lua value as a leaf of a document, for comparisons and arithmetic.
+fn leaf_of(v: &LVal) -> mlua::Result<Doc> {
+    Ok(match v {
+        LVal::Integer(i) => Doc::Int(*i),
+        LVal::Number(f) => Doc::Float(*f),
+        LVal::String(s) => Doc::Str(s.to_string_lossy().to_string()),
+        LVal::UserData(u) => u.borrow::<Typed>()?.0.clone(),
+        other => return Err(lerr(format!("cannot use a Lua {} with a typed value", other.type_name()))),
+    })
+}
+
+/// The result of arithmetic as Lua sees it: a decimal stays typed.
+fn leaf_to_lua(lua: &Lua, d: Doc) -> mlua::Result<LVal> {
+    Ok(match d {
+        Doc::Int(i) => LVal::Integer(i),
+        Doc::Float(f) => LVal::Number(f),
+        other => LVal::UserData(lua.create_userdata(Typed(other))?),
+    })
+}
+
+impl mlua::UserData for Typed {
+    fn add_methods<M: mlua::UserDataMethods<Self>>(m: &mut M) {
+        use mlua::MetaMethod;
+        m.add_meta_method(MetaMethod::ToString, |_, this, ()| Ok(typed_text(&this.0)));
+        m.add_method("type", |_, this, ()| Ok(this.0.type_name()));
+        m.add_meta_function(MetaMethod::Concat, |_, (a, b): (LVal, LVal)| {
+            let text = |v: &LVal| -> mlua::Result<String> {
+                Ok(match v {
+                    LVal::UserData(u) => typed_text(&u.borrow::<Typed>()?.0),
+                    LVal::String(s) => s.to_string_lossy().to_string(),
+                    LVal::Integer(i) => i.to_string(),
+                    LVal::Number(f) => fmt_f64(*f),
+                    other => return Err(lerr(format!("cannot concatenate a Lua {}", other.type_name()))),
+                })
+            };
+            Ok(text(&a)? + &text(&b)?)
+        });
+        let cmp = |a: &LVal, b: &LVal| -> mlua::Result<std::cmp::Ordering> {
+            let (x, y) = (leaf_of(a)?, leaf_of(b)?);
+            crate::doc::cmp_scalar(&x, &y)
+                .ok_or_else(|| lerr(format!("cannot compare a {} with a {}", x.type_name(), y.type_name())))
+        };
+        m.add_meta_function(MetaMethod::Eq, move |_, (a, b): (LVal, LVal)| {
+            Ok(cmp(&a, &b).map(|o| o.is_eq()).unwrap_or(false))
+        });
+        m.add_meta_function(MetaMethod::Lt, move |_, (a, b): (LVal, LVal)| Ok(cmp(&a, &b)?.is_lt()));
+        m.add_meta_function(MetaMethod::Le, move |_, (a, b): (LVal, LVal)| Ok(cmp(&a, &b)?.is_le()));
+        m.add_meta_function(MetaMethod::Add, |lua, (a, b): (LVal, LVal)| {
+            leaf_to_lua(lua, crate::doc::add(&leaf_of(&a)?, &leaf_of(&b)?).map_err(lerr)?)
+        });
+        m.add_meta_function(MetaMethod::Sub, |lua, (a, b): (LVal, LVal)| {
+            let neg = crate::doc::mul(&leaf_of(&b)?, &Doc::Int(-1)).map_err(lerr)?;
+            leaf_to_lua(lua, crate::doc::add(&leaf_of(&a)?, &neg).map_err(lerr)?)
+        });
+        m.add_meta_function(MetaMethod::Mul, |lua, (a, b): (LVal, LVal)| {
+            leaf_to_lua(lua, crate::doc::mul(&leaf_of(&a)?, &leaf_of(&b)?).map_err(lerr)?)
+        });
+    }
+}
+
+/// A typed document as Lua tables: its decimals and moments as [`Typed`]
+/// values, so that a script writing it back keeps their types.
+fn doc_to_lua(lua: &Lua, d: &Doc) -> mlua::Result<LVal> {
+    Ok(match d {
+        Doc::Null => LVal::Nil,
+        Doc::Bool(b) => LVal::Boolean(*b),
+        Doc::Int(i) => LVal::Integer(*i),
+        Doc::Float(f) => LVal::Number(*f),
+        Doc::Str(s) => LVal::String(lua.create_string(s)?),
+        Doc::Decimal(_) | Doc::Date(_) | Doc::DateTime(_) | Doc::Time(_) => {
+            LVal::UserData(lua.create_userdata(Typed(d.clone()))?)
+        }
+        Doc::Array(items) => {
+            let t = lua.create_table()?;
+            for (i, v) in items.iter().enumerate() {
+                t.raw_set(i + 1, doc_to_lua(lua, v)?)?;
+            }
+            LVal::Table(t)
+        }
+        Doc::Object(m) => {
+            let t = lua.create_table()?;
+            for (k, v) in m {
+                t.raw_set(k.as_str(), doc_to_lua(lua, v)?)?;
+            }
+            LVal::Table(t)
+        }
+    })
+}
+
+/// Whether a table holds a typed value at any depth.
+fn holds_typed(t: &Table, depth: usize) -> mlua::Result<bool> {
+    if depth > 64 {
+        return Err(lerr("table is nested too deeply"));
+    }
+    for pair in t.pairs::<LVal, LVal>() {
+        match pair?.1 {
+            LVal::UserData(u) if u.is::<Typed>() => return Ok(true),
+            LVal::Table(inner) if holds_typed(&inner, depth + 1)? => return Ok(true),
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+/// A Lua value as a leaf or part of a typed document.
+fn lua_to_doc(v: &LVal, depth: usize) -> mlua::Result<Doc> {
+    if depth > 64 {
+        return Err(lerr("table is nested too deeply"));
+    }
+    Ok(match v {
+        LVal::Nil => Doc::Null,
+        LVal::Boolean(b) => Doc::Bool(*b),
+        LVal::Integer(i) => Doc::Int(*i),
+        LVal::Number(f) if f.is_finite() => Doc::Float(*f),
+        LVal::Number(_) => return Err(lerr("cannot store NaN or infinity")),
+        LVal::String(s) => Doc::Str(s.to_string_lossy().to_string()),
+        LVal::UserData(u) => u.borrow::<Typed>()?.0.clone(),
+        LVal::Table(t) => {
+            let len = t.raw_len();
+            let mut total = 0usize;
+            for pair in t.pairs::<LVal, LVal>() {
+                pair?;
+                total += 1;
+            }
+            if len > 0 && total == len {
+                let mut a = Vec::with_capacity(len);
+                for i in 1..=len {
+                    a.push(lua_to_doc(&t.raw_get::<LVal>(i)?, depth + 1)?);
+                }
+                return Ok(Doc::Array(a));
+            }
+            let mut m = crate::doc::Members::new();
+            for pair in t.pairs::<LVal, LVal>() {
+                let (k, v) = pair?;
+                let key = match &k {
+                    LVal::String(s) => s.to_string_lossy().to_string(),
+                    LVal::Integer(i) => i.to_string(),
+                    LVal::Number(f) => fmt_f64(*f),
+                    other => {
+                        return Err(lerr(format!("table keys must be strings or numbers, not {}", other.type_name())))
+                    }
+                };
+                m.insert(key, lua_to_doc(&v, depth + 1)?);
+            }
+            Doc::Object(m)
+        }
+        other => return Err(lerr(format!("cannot store a Lua {}", other.type_name()))),
+    })
+}
+
+/// `kiva.decimal`, `kiva.date`, `kiva.time`, `kiva.datetime`: a typed value
+/// read from its text in ISO only, as extended JSON reads it.
+fn typed_helper(lua: &Lua, tag: &'static str) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |lua, v: LVal| {
+        let text = match &v {
+            LVal::String(s) => s.to_string_lossy().to_string(),
+            LVal::Integer(i) if tag == "$decimal" => i.to_string(),
+            other => return Err(lerr(format!("kiva.{} takes a text, not a Lua {}", &tag[1..], other.type_name()))),
+        };
+        let d = crate::doc::from_extended_json(&serde_json::json!({ tag: text })).map_err(lerr)?;
+        Ok(LVal::UserData(lua.create_userdata(Typed(d))?))
+    })
+}
+
 fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
     Ok(match v {
         Value::Str(s) => LVal::String(lua.create_string(s)?),
@@ -75,8 +259,8 @@ fn value_to_lua(lua: &Lua, v: &Value) -> mlua::Result<LVal> {
         Value::Bool(b) => LVal::Boolean(*b),
         Value::Null => LVal::Nil,
         Value::Doc(j) => json_to_lua(lua, j)?,
-        // Decimals, dates and times as their texts.
-        Value::Typed(d) => json_to_lua(lua, &crate::doc::to_plain_json(d))?,
+        // Decimals, dates and times as typed values (decision D4-b).
+        Value::Typed(d) => doc_to_lua(lua, d)?,
         Value::Bytes(b) => LVal::String(lua.create_string(b)?),
         Value::Date(_) | Value::DateTime(_) | Value::Time(_) => {
             LVal::String(lua.create_string(v.to_json().as_str().unwrap_or(""))?)
@@ -138,7 +322,17 @@ fn lua_to_value(v: &LVal) -> mlua::Result<Value> {
             Ok(text) => Value::Str(text.to_string()),
             Err(_) => Value::Bytes(s.as_bytes().to_vec()),
         },
+        // A table holding a typed value is a typed document.
+        LVal::Table(t) if holds_typed(t, 0)? => Value::typed(lua_to_doc(v, 0)?).map_err(lerr)?,
         LVal::Table(t) => Value::Doc(table_to_json(t, 0)?),
+        LVal::UserData(u) => match u.borrow::<Typed>()?.0.clone() {
+            Doc::Decimal(x) => Value::Decimal(x),
+            Doc::Date(x) => Value::Date(x),
+            Doc::DateTime(x) => Value::DateTime(x),
+            Doc::Time(x) => Value::Time(x),
+            Doc::Float(f) => Value::Num(format!("{:?}", if f == 0.0 { 0.0 } else { f })),
+            other => Value::from_json(crate::doc::to_plain_json(&other)),
+        },
         other => return Err(lerr(format!("cannot store a Lua {}", other.type_name()))),
     })
 }
@@ -150,7 +344,16 @@ fn render(v: &LVal) -> String {
         LVal::Integer(i) => i.to_string(),
         LVal::Number(f) => fmt_f64(*f),
         LVal::String(s) => s.to_string_lossy().to_string(),
-        LVal::Table(t) => table_to_json(t, 0).map(|j| j.to_string()).unwrap_or_else(|_| "<table>".into()),
+        LVal::Table(t) => match holds_typed(t, 0) {
+            Ok(true) => {
+                lua_to_doc(v, 0).map(|d| crate::doc::to_plain_json(&d).to_string()).unwrap_or_else(|_| "<table>".into())
+            }
+            _ => table_to_json(t, 0).map(|j| j.to_string()).unwrap_or_else(|_| "<table>".into()),
+        },
+        LVal::UserData(u) => match u.borrow::<Typed>() {
+            Ok(t) => typed_text(&t.0),
+            Err(_) => "<userdata>".into(),
+        },
         other => format!("<{}>", other.type_name()),
     }
 }
@@ -280,6 +483,30 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
         kiva.set("scan", scan.clone())?;
         kiva.set("keys", scan)?;
         kiva.set("incr", incr)?;
+        for (name, tag) in [("decimal", "$decimal"), ("date", "$date"), ("time", "$time"), ("datetime", "$datetime")] {
+            kiva.set(name, typed_helper(&lua, tag)?)?;
+        }
+        // `kiva.int` checks that its number is an integer; `kiva.float` keeps
+        // a float a float, even `8.0`.
+        kiva.set(
+            "int",
+            lua.create_function(|_, v: LVal| match v {
+                LVal::Integer(i) => Ok(i),
+                LVal::Number(f) if f.fract() == 0.0 && f.abs() < 9.2e18 => Ok(f as i64),
+                other => Err(lerr(format!("kiva.int takes an integer, not {}", render(&other)))),
+            })?,
+        )?;
+        kiva.set(
+            "float",
+            lua.create_function(|lua, v: LVal| {
+                let f = match v {
+                    LVal::Integer(i) => i as f64,
+                    LVal::Number(f) if f.is_finite() => f,
+                    other => return Err(lerr(format!("kiva.float takes a finite number, not {}", render(&other)))),
+                };
+                Ok(LVal::UserData(lua.create_userdata(Typed(Doc::Float(f)))?))
+            })?,
+        )?;
         globals.set("kiva", kiva)?;
 
         let print = scope.create_function(|_, values: MultiValue| {

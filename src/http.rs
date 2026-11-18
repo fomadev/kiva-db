@@ -5,6 +5,7 @@
 //! REST API, Prometheus metrics, interactive documentation and WebSocket
 //! notifications, on a small dependency-free HTTP/1.1 server.
 
+use crate::api::Types;
 use crate::error::{KivaError, Result};
 use crate::exec::validate_key_name;
 use crate::instance::{Instance, VERSION};
@@ -268,13 +269,15 @@ fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAdd
     write_response(&mut stream, &resp, cors);
 }
 
-fn value_json(key: &str, v: &Value, expires_at: i64) -> Json {
+fn value_json(key: &str, v: &Value, expires_at: i64, types: Types) -> Json {
     let ttl = if expires_at > 0 { json!(secs_left(expires_at)) } else { Json::Null };
-    let data = match v {
-        Value::Bytes(b) => Json::String(b64_encode(b)),
-        other => other.to_json(),
-    };
-    json!({ "key": key, "type": v.ty().name(), "data": data, "ttl": ttl })
+    let data = crate::api::value_to_wire(v, types);
+    json!({ "key": key, "type": crate::api::type_on_wire(v, types), "data": data, "ttl": ttl })
+}
+
+/// `?types=plain|extended` of a REST request (NATIVE_DOCUMENTS.md 21.2).
+fn types_of(req: &Request) -> Result<Types> {
+    Types::from_text(req.query.get("types").map(|s| s.as_str()))
 }
 
 fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
@@ -296,7 +299,10 @@ fn put_key(sess: &mut Session, key: &str, req: &Request) -> Result<Response> {
     if let Some(t) = req.query.get("ttl").and_then(|t| t.parse::<i64>().ok()) {
         ttl = t;
     }
-    let value = Value::from_json(value);
+    let value = match types_of(req)? {
+        Types::Plain => Value::from_json(value),
+        Types::Extended => crate::api::value_from_extended(&value)?,
+    };
     let ty = value.ty();
     let expires_at = deadline_in(ttl);
     sess.kv_put(key, value, expires_at, false)?;
@@ -311,7 +317,9 @@ fn changes(sess: &mut Session, req: &Request) -> Result<Response> {
     let q = |name: &str| req.query.get(name).map(|s| s.as_str());
     let limit = q("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(100);
     let wait = q("wait").and_then(|w| w.parse::<u64>().ok()).unwrap_or(0);
-    let read = crate::api::read_changes(sess, q("cursor").or(q("from")), q("consumer"), limit, q("pattern"), wait)?;
+    let types = types_of(req)?;
+    let read =
+        crate::api::read_changes(sess, q("cursor").or(q("from")), q("consumer"), limit, q("pattern"), wait, types)?;
     Ok(Response::ok(read))
 }
 
@@ -334,7 +342,7 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
                 match sess.lookup(&full).map_err(KivaError::Invalid)? {
                     Some((v, source)) => {
                         let exp = sess.kv_get(&source)?.map(|(_, m)| m.expires_at).unwrap_or(0);
-                        Ok(Response::ok(value_json(&full, &v, exp)))
+                        Ok(Response::ok(value_json(&full, &v, exp, types_of(req)?)))
                     }
                     None => Ok(Response::error(404, format!("key '{full}' not found"))),
                 }
@@ -383,10 +391,11 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
         }
         ("GET", "/v1/range") => {
             sess.check(Need::Read)?;
+            let types = types_of(req)?;
             let mut rows = Vec::new();
             for (k, e) in sess.engine.range(q("from"), q("to"), reverse, limit) {
                 if let Some((v, _)) = sess.engine.get(&k)? {
-                    rows.push(value_json(&k, &v, e.expires_at));
+                    rows.push(value_json(&k, &v, e.expires_at, types));
                 }
             }
             Ok(Response::ok(json!({ "count": rows.len(), "data": rows })))
@@ -420,7 +429,11 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
         }
         ("GET", "/v1/changes") => changes(sess, req),
         ("POST", "/v1/api") => {
-            let body: Json = crate::num::from_slice(&req.body).map_err(KivaError::Invalid)?;
+            let mut body: Json = crate::num::from_slice(&req.body).map_err(KivaError::Invalid)?;
+            // `?types=` stands for the request's own `types` when it has none.
+            if let (Some(t), Some(m)) = (req.query.get("types"), body.as_object_mut()) {
+                m.entry("types").or_insert_with(|| Json::String(t.clone()));
+            }
             let mut answer = crate::api::handle(sess, &body)?;
             answer["status"] = json!("ok");
             Ok(Response::json(200, answer))

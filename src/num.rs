@@ -269,7 +269,8 @@ pub fn check_integers(text: &[u8]) -> Result<(), String> {
                     return Err(format!(
                         "the integer {token} is beyond the 64-bit integers (-9223372036854775808 to \
                          18446744073709551615) and would be rounded: write it as a text (\"{token}\"), or with \
-                         a fraction (.0) to store it as a rounded float"
+                         a fraction (.0) to store it as a rounded float; in extended JSON, \
+                         {{\"$decimal\": \"{token}\"}} keeps it exact"
                     ));
                 }
             }

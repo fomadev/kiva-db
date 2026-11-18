@@ -797,3 +797,48 @@ Taken by the maintainer on 2026-11-18, for 2.0.0: the four recommendations. **D1
 ### 21.7 Out of C5
 
 The drivers' options and native objects (C6, and N3 for numbers); `doctor`, `convert ... to date`, the replication and backup checks, and what a 1.x client sees by `CMD_GET` (C7); Redis stays plain JSON. The random functions R1 to R4 are not in C5. C5 prepares no candidate, tag or release; the version stays `2.0.0-rc.2` until a candidate is authorised.
+
+## 22. C5 as built
+
+C5 follows section 21 and the decisions of 21.6. Programs still receive plain JSON unless a request asks for extended JSON; the 1.x drivers are unchanged.
+
+### 22.1 What changed
+
+| Path | Change |
+| :--- | :--- |
+| Structured requests (REST `/v1/api`, binary `CMD_API`) | `"types": "plain" \| "extended"` (`api::Types`); any other value, or a value that is not a text, is refused. `get`, `query` rows and `changes` answer in extended JSON when asked; `put` and `add` read their value with `doc::from_extended_json` |
+| `POST /v1/api?types=extended` | stands for the request's `types` when the body has none; the body's own `types` wins |
+| `GET /v1/key/{key}` (and `?path=`), `GET /v1/range`, `GET /v1/changes` | `?types=extended`; a wrong value is a 400 |
+| `PUT`/`POST /v1/key/{key}?types=extended` | the body (or the `value` of its envelope) read as extended JSON: `{"$decimal": "9.90"}` alone is a decimal key, a document with native leaves is stored as `KDOC` and raises its file to format 3; `{"$bytes": ...}` stays bytes |
+| `"type"` of answers | in extended JSON, the kind of a number key: `int`, `float`, or `number` for a legacy one; plain JSON keeps `number` |
+| Legacy numbers (D3) | a key or a number of a plain JSON document that is neither `int` nor `float` comes out `{"$decimal": "..."}` in extended JSON. Plain JSON documents cannot hold an integer beyond `u64` (programs' JSON is refused beyond the 64-bit integers), so the legacy numbers of documents are those between `i64::MAX` and `u64::MAX`. Plain JSON answers them as before |
+| Conditions of structured requests | `{"$date": "..."}` is read as its text, which is how a condition carries a date (C4), in both modes, so that every value read in extended JSON can be put in a condition as it is |
+| The refusal of an integer beyond the 64-bit integers | names the extended form too: `{"$decimal": "..."}` |
+| Lua (D4-b) | a typed document gives its decimals, dates, times and datetimes as typed values (`Typed` userdata); `kiva.decimal`, `kiva.date`, `kiva.time`, `kiva.datetime` (ISO only), `kiva.int`, `kiva.float`; a table holding a typed value is written as a typed document |
+
+### 22.2 Lua typed values
+
+- `tostring`, `print`, `..` and the value a script returns give the canonical text (`1250.50`, `2026-10-31T15:18:00.000Z`); `v:type()` names the type.
+- `+`, `-` and `*` are exact between decimals and numbers (`kiva.decimal("0.1") + kiva.decimal("0.2")` is `0.3`) and follow `doc::add` and `doc::mul`; a moment refuses arithmetic; `/` is not defined.
+- `<` and `<=` compare with typed values and numbers in the order of section 6.1. `==` compares two typed values exactly (`kiva.decimal("10.50") == kiva.decimal("10.5")`); Lua calls it only between two userdata, so a typed value is never `==` a string or a number: compare with `tostring(v) == "..."` or a typed value.
+- `kiva.float(8)` stays a float when written (`8.0 [float]`); `kiva.int` returns a Lua integer and refuses a fraction.
+
+### 22.3 Tests
+
+`tests/extended_json.rs`:
+
+- plain and extended answers of `get` for a typed document, keys of each kind, a legacy key and a plain document with a `$` key and a legacy number; `types` refused when wrong;
+- plain writes stay plain (format kept, a `$decimal` key stays a key); extended writes read back equal and raise the file to format 3; `$$` keys, refused `$` keys, a tag holding a non-text, a type mismatch, an integer beyond `i64`; typed scalars written tagged;
+- a value read in extended JSON put back in `=` (with and without an index) and in `in`;
+- the change journal in both forms;
+- REST: `/v1/key` with and without `?types=extended`, `?path=`, a wrong `types`, extended `PUT` of a scalar and of an envelope, plain `PUT` unchanged, `/v1/range`, `/v1/changes`, `/v1/api?types=`;
+- Lua: a read-modify-write that keeps every type, texts, exact arithmetic and comparisons, each helper writing a key or a document, errors.
+
+The tests written before C5 are unchanged: plain JSON is what they read.
+
+### 22.4 Limits
+
+- Aggregates (`aggregate`), `similar`, `semantic`, the shell's `changes` command and the SSE events stay plain: they carry results or events, not stored values to write back.
+- `CMD_GET` and `CMD_SET` carry canonical bytes, not JSON (21.2); Redis stays plain JSON.
+- In Lua, a key of type `decimal`, `date`, `time` or `datetime` is still read as its text (`kiva.get`), as before C5, so a script that writes such a key back as it read it writes a string; D4-b covers the leaves of documents. A key keeps its type when written with the helpers.
+- The drivers' options and native objects are C6.

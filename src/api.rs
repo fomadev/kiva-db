@@ -44,7 +44,7 @@ fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
                  the fields go in the conditions"
             )));
         }
-        let expr = Expr::from_json(&req["where"], target).map_err(KivaError::Invalid)?;
+        let expr = Expr::from_json(&date_tags_as_text(&req["where"]), target).map_err(KivaError::Invalid)?;
         return Ok(Query { pattern: target.to_string(), expr: Some(expr) });
     }
     if aggregate && !single {
@@ -59,8 +59,21 @@ fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
     let (pattern, field) = crate::exec::split_target(target).map_err(KivaError::Invalid)?;
     let cmp = crate::engine::CmpOp::parse(req["cmp"].as_str().unwrap_or("="))
         .ok_or_else(|| invalid(format!("cmp must be one of {}", crate::engine::CmpOp::LIST)))?;
-    let cond = crate::engine::Cond::new(pattern, field, cmp, req["value"].clone());
+    let cond = crate::engine::Cond::new(pattern, field, cmp, date_tags_as_text(&req["value"]));
     Query::single(cond).map_err(KivaError::Invalid)
+}
+
+/// The conditions of a request with each `{"$date": "..."}` as its text,
+/// which is how a condition carries a date (C4: a date compares with its
+/// ISO text), so that a value read in extended JSON can be put in a
+/// condition as it is (NATIVE_DOCUMENTS.md 7.2).
+fn date_tags_as_text(j: &Json) -> Json {
+    match j {
+        Json::Object(m) if m.len() == 1 && m.get("$date").is_some_and(Json::is_string) => m["$date"].clone(),
+        Json::Object(m) => Json::Object(m.iter().map(|(k, v)| (k.clone(), date_tags_as_text(v))).collect()),
+        Json::Array(items) => Json::Array(items.iter().map(date_tags_as_text).collect()),
+        other => other.clone(),
+    }
 }
 
 /// `"order_by": "created_at desc"`, `"after"`, `"reverse"` and `"limit"` of a query.
@@ -188,6 +201,146 @@ fn value_in(ty: Type, j: &Json) -> Result<Value> {
     })
 }
 
+/// How values travel in a request and its answer (NATIVE_DOCUMENTS.md 21.2):
+/// plain JSON by default, extended JSON when the request asks for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Types {
+    #[default]
+    Plain,
+    Extended,
+}
+
+impl Types {
+    /// `"plain"`, `"extended"`, or nothing; any other value is refused, so
+    /// that a typo never gives plain JSON silently.
+    pub fn from_text(t: Option<&str>) -> Result<Types> {
+        match t {
+            None | Some("plain") => Ok(Types::Plain),
+            Some("extended") => Ok(Types::Extended),
+            Some(other) => Err(invalid(format!("\"types\" is \"plain\" or \"extended\", not \"{other}\""))),
+        }
+    }
+
+    /// The `types` field of a structured request.
+    pub fn of_request(req: &Json) -> Result<Types> {
+        match &req["types"] {
+            Json::Null => Ok(Types::Plain),
+            Json::String(s) => Types::from_text(Some(s)),
+            _ => Err(invalid("\"types\" is \"plain\" or \"extended\"")),
+        }
+    }
+}
+
+/// A value as a program receives it. Plain JSON is the answer of 2.0;
+/// extended JSON keeps every type (NATIVE_DOCUMENTS.md 21.3). Bytes travel
+/// as base64 in both.
+pub fn value_to_wire(v: &Value, types: Types) -> Json {
+    if types == Types::Plain {
+        return value_out(v);
+    }
+    use crate::doc::{to_extended_json, Doc};
+    match v {
+        Value::Bytes(b) => Json::String(b64_encode(b)),
+        Value::Typed(d) => to_extended_json(d),
+        Value::Doc(j) => extended_of_plain(j),
+        Value::Num(s) => number_extended(s),
+        Value::Decimal(d) => to_extended_json(&Doc::Decimal(*d)),
+        Value::Date(d) => to_extended_json(&Doc::Date(*d)),
+        Value::DateTime(t) => to_extended_json(&Doc::DateTime(*t)),
+        Value::Time(t) => to_extended_json(&Doc::Time(*t)),
+        other => other.to_json(),
+    }
+}
+
+/// The type of a value as an answer names it: in extended JSON, a number
+/// by its kind (`int`, `float`, `number` for a legacy one); in plain JSON
+/// `number`, as the drivers of 1.x read it.
+pub fn type_on_wire(v: &Value, types: Types) -> &'static str {
+    match types {
+        Types::Plain => v.ty().name(),
+        Types::Extended => v.kind_name(),
+    }
+}
+
+/// A number of a key or of a plain document in extended JSON: an `int` or
+/// a `float` as a JSON number, a legacy number (beyond `i64`, or a fraction
+/// a float does not hold) as `{"$decimal": ...}` when a decimal holds it,
+/// so that no parser rounds it (decision D3).
+fn number_extended(text: &str) -> Json {
+    match crate::value::num_kind(text) {
+        "int" | "float" => crate::value::Value::Num(text.to_string()).to_json(),
+        _ => match crate::doc::parse_decimal(text) {
+            Ok(d) => crate::doc::to_extended_json(&crate::doc::Doc::Decimal(d)),
+            Err(_) => crate::value::Value::Num(text.to_string()).to_json(),
+        },
+    }
+}
+
+/// A document stored in plain JSON, in extended JSON: its legacy numbers
+/// tagged, the `$` of its keys doubled.
+fn extended_of_plain(j: &Json) -> Json {
+    match j {
+        Json::Number(n) => number_extended(&n.to_string()),
+        Json::Array(items) => Json::Array(items.iter().map(extended_of_plain).collect()),
+        Json::Object(m) => Json::Object(
+            m.iter()
+                .map(|(k, v)| (if k.starts_with('$') { format!("${k}") } else { k.clone() }, extended_of_plain(v)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A value written in extended JSON, without a type: a document holding
+/// native leaves, or one tagged leaf (`{"$decimal": "1250.50"}` is a
+/// decimal). `{"$bytes": ...}` stays the bytes it is in plain JSON.
+pub fn value_from_extended(j: &Json) -> Result<Value> {
+    use crate::doc::Doc;
+    if let Some(m) = j.as_object() {
+        if m.len() == 1 && m.contains_key("$bytes") {
+            return Ok(Value::from_json(j.clone()));
+        }
+    }
+    let d = crate::doc::from_extended_json(j).map_err(invalid)?;
+    Ok(match d {
+        Doc::Array(_) | Doc::Object(_) => Value::typed(d)?,
+        Doc::Decimal(x) => Value::Decimal(x),
+        Doc::Date(x) => Value::Date(x),
+        Doc::DateTime(x) => Value::DateTime(x),
+        Doc::Time(x) => Value::Time(x),
+        Doc::Int(i) => Value::Num(i.to_string()),
+        Doc::Float(f) => Value::Num(format!("{:?}", if f == 0.0 { 0.0 } else { f })),
+        Doc::Str(s) => Value::Str(s),
+        Doc::Bool(b) => Value::Bool(b),
+        Doc::Null => Value::Null,
+    })
+}
+
+/// [`value_in`] for a request in `types`: in extended JSON a document is
+/// read with its tags, and a typed scalar may come tagged as it was read.
+fn value_in_as(ty: Type, j: &Json, types: Types) -> Result<Value> {
+    if types == Types::Plain {
+        return value_in(ty, j);
+    }
+    match ty {
+        Type::Array | Type::Object => {
+            let v = value_from_extended(j)?;
+            if v.ty() != ty {
+                return Err(invalid(format!("value is not a valid {}", ty.name())));
+            }
+            Ok(v)
+        }
+        Type::Decimal | Type::Date | Type::DateTime | Type::Time if j.is_object() => {
+            let v = value_from_extended(j)?;
+            if v.ty() != ty {
+                return Err(invalid(format!("value is not a valid {}", ty.name())));
+            }
+            Ok(v)
+        }
+        _ => value_in(ty, j),
+    }
+}
+
 fn ttl_of(expires_at: i64) -> Json {
     if expires_at > 0 {
         json!(secs_left(expires_at))
@@ -209,6 +362,7 @@ pub fn read_changes(
     limit: usize,
     pattern: Option<&str>,
     wait: u64,
+    types: Types,
 ) -> Result<Json> {
     use crate::engine::ChangesFrom;
     let consumer = consumer.filter(|c| !c.is_empty());
@@ -225,7 +379,7 @@ pub fn read_changes(
         let read = sess.engine.read_changes(from, limit, pattern, consumer)?;
         if !read.changes.is_empty() || read.more || std::time::Instant::now() >= until {
             let list: Vec<Json> =
-                read.changes.iter().map(|c| crate::changes::to_json(c, &read.cursor_of(c.seq))).collect();
+                read.changes.iter().map(|c| crate::changes::to_json_as(c, &read.cursor_of(c.seq), types)).collect();
             return Ok(json!({
                 "workspace": sess.ws,
                 "cursor": read.cursor,
@@ -248,6 +402,7 @@ pub fn read_changes(
 pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
     sess.use_zone();
     let op = str_field(req, "op")?;
+    let types = Types::of_request(req)?;
     match op {
         "whoami" => {
             sess.check(Need::Login)?;
@@ -296,8 +451,8 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 Some((v, meta)) => Ok(json!({
                     "found": true,
                     "key": key,
-                    "type": v.ty().name(),
-                    "value": value_out(&v),
+                    "type": type_on_wire(&v, types),
+                    "value": value_to_wire(&v, types),
                     "ttl": ttl_of(meta.expires_at),
                     "modified": meta.timestamp,
                     "msgpack": meta.msgpack,
@@ -308,7 +463,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
         "put" => {
             let key = str_field(req, "key")?;
             let ty = Type::from_name(str_field(req, "type")?).ok_or_else(|| invalid("unknown type"))?;
-            let value = value_in(ty, &req["value"])?;
+            let value = value_in_as(ty, &req["value"], types)?;
             let existing = sess.kv_get(key)?;
             match (req["mode"].as_str().unwrap_or("upsert"), &existing) {
                 ("create", Some(_)) => {
@@ -340,7 +495,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 None if req["value"].is_object() => Type::Object,
                 None => return Err(invalid("\"type\" is needed for a value that is not an array or an object")),
             };
-            let value = value_in(ty, &req["value"])?;
+            let value = value_in_as(ty, &req["value"], types)?;
             let expires_at = match req["ttl"].as_i64() {
                 Some(t) if t > 0 => deadline_in(t),
                 _ => 0,
@@ -361,7 +516,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             };
             let limit = req["limit"].as_u64().unwrap_or(100) as usize;
             let wait = req["wait"].as_u64().unwrap_or(0);
-            read_changes(sess, cursor, text("consumer")?, limit, text("pattern")?, wait)
+            read_changes(sess, cursor, text("consumer")?, limit, text("pattern")?, wait, types)
         }
         "del" => {
             let key = str_field(req, "key")?;
@@ -423,8 +578,12 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             let limit = req["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
             let opts = read_opts(req, &q, limit)?;
             let mut rows = Vec::new();
-            let (plan, _) = sess.engine.read_query(&q, &opts, |k, doc| {
-                rows.push(json!({ "key": k, "value": doc }));
+            let (plan, _) = sess.engine.read_query_values(&q, &opts, |k, doc| {
+                let value = match types {
+                    Types::Plain => doc.into_json_doc().unwrap_or_default(),
+                    Types::Extended => value_to_wire(&doc, types),
+                };
+                rows.push(json!({ "key": k, "value": value }));
                 Ok(())
             })?;
             Ok(json!({ "rows": rows, "plan": plan_json(&plan) }))
