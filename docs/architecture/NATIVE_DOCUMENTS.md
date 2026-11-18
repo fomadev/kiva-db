@@ -1079,7 +1079,7 @@ C7 follows section 25 and the decisions F1 to F5, in two pull requests: the code
 
 ## 27. S: preparation
 
-Nothing of this section is implemented. It prepares lot S, the last of section 13: the checks a candidate needs, then the candidate itself. The decisions of 27.8 are to take.
+Nothing of this section is implemented. It prepares lot S, the last of section 13: the checks a candidate needs, then the candidate itself. The decisions of 27.8 are taken.
 
 State of main when it was written (`a97aa83`): C1 to C7, N2 and R0 merged, and the display of decimal aggregates fixed (#118). The CI of main is green. `Cargo.toml` says `2.0.0-rc.2`, the last tag is `v2.0.0-rc.2` (2026-10-29), and nothing written since C2 has been in a candidate.
 
@@ -1150,6 +1150,8 @@ The tag `v2.0.0-rc.3` is pushed by the maintainer, when the maintainer decides; 
 4. **G4, the manual**: `tests/manual.rs` on the chapters of the shell, with `<!-- not run -->` and a count of the blocks left out (27.5). Recommended; the alternative is a check by hand before each candidate.
 5. **G5, the pages of a release**: updated in S (27.6). Recommended.
 6. **G6, the candidate**: `2.0.0-rc.3` prepared from main after G1 to G5, the tag left to the maintainer (27.7). Recommended, since storage format 3 and the drivers' extended mode have reached no user yet; the alternative is `2.0.0` directly, which then needs Kiva Studio first.
+
+Taken by the maintainer on 2026-11-18, for 2.0.0: the six recommendations, G1 to G6.
 
 Pull requests: the tests of G1 and G2; the test of the manual and what it finds (G4); the benchmarks and the pages (G3, G5); the candidate (G6).
 
