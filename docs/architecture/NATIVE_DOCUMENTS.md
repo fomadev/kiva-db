@@ -696,7 +696,7 @@ C4 lets the shell write native values: typed literals at any depth, exact condit
 
 ## 21. C5: preparation
 
-Nothing of this section is implemented. It prepares lot C5 (extended JSON for programs, Lua helpers) so that its review starts from written rules; the code waits for the maintainer's decisions (21.6).
+Nothing of this section is implemented. It prepares lot C5 (extended JSON for programs, Lua helpers) so that its review starts from written rules. The decisions of 21.6 are taken.
 
 State of main when it was written (`da48972`): C1 to C4 merged, lot R0 merged, and lot N2 merged (#106): `int`, `float` and `decimal` keys ([NUMERIC_TYPES.md](NUMERIC_TYPES.md) section 11). The CI of main is green on `da48972`.
 
@@ -791,6 +791,8 @@ Recommended: **D4-b**, since keeping types on every path is invariant 15.3 and C
 2. **D2, writes**: tags are read only in extended requests; plain writes stay plain (21.3). Recommended, since a plain program that stores objects with a `$decimal` key today keeps doing so.
 3. **D3, legacy numbers in extended JSON**: `{"$decimal": "..."}` (exact, but its kind changes from `number` to `decimal` when written back), or a bare JSON number (exact text, rounded by most parsers). Recommended: `{"$decimal": "..."}`.
 4. **D4, Lua reads**: D4-a texts or D4-b userdata (21.4). Recommended: D4-b.
+
+Taken by the maintainer on 2026-11-18, for 2.0.0: the four recommendations. **D1** extended JSON is asked per request; **D2** tags are read only in extended requests; **D3** a legacy number is written `{"$decimal": "..."}` in extended JSON; **D4-b** Lua reads decimals and moments of documents as typed userdata, and the change is listed in the release notes.
 
 ### 21.7 Out of C5
 
