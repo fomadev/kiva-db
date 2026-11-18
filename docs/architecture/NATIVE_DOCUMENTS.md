@@ -976,3 +976,77 @@ C6 follows section 23 and the decisions E1 to E6. Without the new option, both d
 - Node.js reads `date` and `time` as texts (JavaScript has no such types) and writes them as keys through `{ type }`; inside a document, a date or time text stays a text.
 - Node.js has no `changes` method yet; `similar`, `scan`, `stats` and the semantic cache answer plain JSON in both modes, as they carry no stored value to write back.
 - Nothing is published: the versions are raised in `package.json` and `pyproject.toml`, and npm publishes only on a version tag (the workflow of `drivers/node`), which waits for the maintainer.
+
+## 25. C7: preparation
+
+Nothing of this section is implemented. It prepares lot C7 (what a release needs around native values: checks, conversion, documentation), so that its review starts from written rules; the code waits for the maintainer's decisions (25.6).
+
+State of main when it was written (`69e9ebf`): C1 to C6, N2 and R0 merged; the `CHANGELOG.md` section of 2.0.0 covers them (#113). The CI of main is green.
+
+### 25.1 What section 13 gives C7, read in the code
+
+| Piece (section 13 and 4) | State |
+| :--- | :--- |
+| Replication: the `native` capability, a 2.0.0 master refusing an `rc.2` replica before the snapshot (4.1) | **Built in C2** (`repl.rs`: `NATIVE`, checked at the handshake); tested against the published `rc.2` binary (`tests/native.rs`) |
+| Backup manifest format 2 for an archive holding a file of format 3; an older KivaDB refusing it (4.2) | **Built in C2** (`backup.rs`, `storage_format`) |
+| `restore --check` decoding every `KDOC` record (4.2) | **Built in C2** (`backup.rs`: each `KDOC` payload is unpacked and decoded; an encrypted one is checked by its checksum) |
+| `doctor` reporting the storage format of each workspace (4.3) | **Missing**: `doctor` checks the records and the unique indexes (`doctor::data`, `doctor::unique`), not the formats |
+| `convert <pattern>.<field> to date` (5, 15.2) | **Missing**: `convert` knows only `to msgpack` and `to json` (`exec::cmd_convert`) |
+| `schema check` and `doctor` reporting a unique field that mixes date texts and native dates (15.2) | **Missing**, and its reason changed: C3 judges a native date as its ISO text, so a native date and the text `"2026-10-31"` are one value for a unique index (18.1, `CHANGELOG.md` "Known limits"). The risk U-kind no longer exists for dates; what remains is a field holding both kinds, which programs in extended mode read as a `Date` in one document and a text in another |
+| A 1.x client reading a `decimal` key by `CMD_GET` (21.1) | **Not decided**: it gets type 13, which it does not know |
+| Chapter 33 and the release notes | **Partly**: the notes come from `CHANGELOG.md`, now complete (#113); Chapter 33 speaks of format 2 only, and the manual documents none of C2 to C6 (no typed literal, `decimal`, extended JSON, Lua helper, driver option) |
+
+### 25.2 `doctor`: the storage format of each workspace
+
+One line per workspace in the "Data" check, from the header of its file, with the oldest version that opens it:
+
+```
+  ok    Data        workspace 'default': format 1 (KivaDB 1.x and 2.x)
+  ok    Data        workspace 'travel.places': format 3, native values (KivaDB 2.0.0 and later)
+```
+
+A summary line counts the workspaces of each format; nothing is a warning, since format 3 is normal for 2.0.0. The text is what Chapter 33 tells an administrator to check before going back (4.3).
+
+### 25.3 `convert <pattern>.<field> to <type>`
+
+So that a field written as ISO texts before 2.0.0 can hold native values, as section 5 says ("nothing converts it; `convert` converts explicitly"):
+
+| Rule | Statement |
+| :--- | :--- |
+| Types | `date`, `datetime`, `time`, `decimal`: the native types a text stands for. `int` and `float` are already numbers |
+| Reading | a `date`, `time` or `decimal` text in ISO only, as extended JSON reads it; a `datetime` text with its offset (`Z` or `+01:00`), since a text without one has no zone to be read in |
+| All or nothing | every document of the pattern whose field is a text is checked first; if one does not read as the type, nothing is written and the answer names up to 10 keys with their values. A document whose field is missing, `null`, or already of the type is left as it is |
+| Writing | the changed documents are written in one transaction, as typed documents (`KDOC`), raising the file to format 3 |
+| Answer | `Converted: 1 204 documents (38 already date, 5 without the field)` |
+| Preview | `convert <pattern>.<field> to date check` reads and reports the same counts and the keys that would refuse, and writes nothing |
+| Indexes | an index on the field is rebuilt as the documents are rewritten; the answers of queries do not change, since a native date compares as its text (18.1) |
+| Rights | as `convert ... to msgpack`: write access to the workspace |
+
+The preview replaces the report of 15.2: `convert ... check` shows how many documents of a field are texts and how many are native, which is the mixed field 15.2 wanted to find, and `doctor` does not read documents.
+
+### 25.4 A 1.x client and a `decimal` key
+
+The 1.x drivers use structured requests and receive a decimal key as its text (`"type": "decimal"`, `"value": "1250.50"`). Only `CMD_GET` (the Rust `client.rs`, that is the shell of 1.x connected to a 2.0 server) receives type 13. The server cannot tell a 1.x client from a 2.0 one: `HELLO` carries no client version. Two answers:
+
+- **document it**: Chapter 33 says that the shell of 1.x connected to a 2.0 server fails on a `decimal` key (a type it does not know), and that the shell of 2.0 reads it;
+- or send a decimal key by `CMD_GET` as type `number` (2) with its text: a 1.x client reads it, but loses the type, and the shell of 2.0 needs a new request to see it.
+
+Recommended: **document it**, since the decimal keys are new in 2.0.0 and mixing a 1.x shell with a 2.0 server is a transition case.
+
+### 25.5 Documentation
+
+- **Chapter 33**: format 3 next to format 2 (what raises a file, what refuses it: `rc.2` and 1.x, and `doctor` to check), the changes from the candidates listed in `CHANGELOG.md` (`json set` with a typed value, `int`/`float` instead of `number`, Lua typed values), the order of upgrade of a replication group with `rc.2` replicas, the drivers' option, and going back from format 3 (a backup only).
+- **The manual**: the native types in documents and typed literals (the chapter of documents), typed numeric keys (the chapter of types), extended JSON (20.4 and the REST chapter), the Lua helpers, `convert ... to <type>`, the driver option (24.3, 24.4), the error `unsupported storage format 3` in the table of errors.
+- Every example of these pages is run by a test, as the manual's examples already are where the tests read them.
+
+### 25.6 Decisions to take
+
+1. **F1, `doctor`**: one line per workspace with its format and the versions that open it (25.2). Recommended.
+2. **F2, `convert`**: `to date|datetime|time|decimal`, all or nothing, with `check` to preview (25.3). Recommended; the alternative is to leave old texts as they are and say so in Chapter 33.
+3. **F3, the report of 15.2**: replaced by `convert ... check` (25.3). Recommended.
+4. **F4, a 1.x client and a `decimal` key**: documented, not changed (25.4). Recommended.
+5. **F5, documentation**: Chapter 33 and the manual pages of 25.5 in C7, so that lot S starts from a complete manual. Recommended.
+
+### 25.7 Out of C7
+
+The compatibility runs with the published binaries, the crash tests and the benchmarks of a candidate (S); Kiva Studio; the publication of the drivers; the random functions R1 to R4. C7 prepares no candidate, tag or release.
