@@ -946,3 +946,33 @@ Taken by the maintainer on 2026-11-18, for 2.0.0: the six recommendations, E1 to
 ### 23.7 Out of C6
 
 Kiva Studio (its own repository, a condition of `docs/v2/RELEASE.md`); the `changes` request in the Node.js driver; Lua and Redis (C5); `doctor`, the replication and backup checks, and a 1.x client reading a decimal key by `CMD_GET` (C7). C6 prepares no candidate, tag or release.
+
+## 24. C6 as built
+
+C6 follows section 23 and the decisions E1 to E6. Without the new option, both drivers send and read exactly what they did before; their tests of before are unchanged.
+
+### 24.1 Node.js 1.3.0
+
+- `connect({ types, decimal })`: `types` is `"plain"` (default) or `"extended"`, anything else is refused before connecting; `decimal` is a class called `new decimal(text)`. Extended mode is refused when `HELLO` names a version before 2.0.0.
+- The requests the driver builds (`get`, `set`, `add`, `query`) go through `_api`: in extended mode it adds `"types": "extended"` and parses the answer with `parseExtended`, a JSON parser of its own that gives a `BigInt` for an integer beyond ±(2^53 - 1) and reads strings with `JSON.parse`; `__proto__` is an own key, as with `JSON.parse`. `api()` sends the request as written and answers with `JSON.parse`.
+- Requests are written by `writeJson`, in both modes: a `BigInt` as its digits (refused beyond 64 bits). In a document (`value`) in extended mode, a `Date` is `{"$datetime": ...}`, an instance of `decimal` `{"$decimal": ...}`, and a `$` key is written `$$`; in a condition (`where`) a `Date` and a decimal are tagged in both modes. In a plain document, a `Date` stays its ISO text and a decimal its text.
+- A key: a `BigInt` is an `int` in extended mode; an instance of `decimal` is a `decimal`, and is refused in plain mode with the hint `types: "extended"`.
+- `index.d.ts` gains `types`, `decimal`, and the type names `int`, `float`, `decimal`.
+
+### 24.2 Python 1.1.0
+
+- `connect(..., types="plain" | "extended")`; anything else is a `ValueError`; extended mode is refused when `HELLO` names a version before 2.0.0.
+- `get`, `set`, `add`, `query`, `explain`, `aggregate` and `changes` go through `_api`: in extended mode it adds `"types": "extended"` and reads the answer with `loads_extended` (an `object_hook`: tags to `Decimal`, `date`, `time`, aware `datetime` in UTC; `$$` keys to `$` keys). `api()` is unchanged.
+- `values.to_extended` writes documents: `Decimal` (finite, at most 28 digits, written without an exponent), `date`, `time`, aware `datetime` as tags, `$` keys doubled, an `int` beyond 64 bits refused with the hint `decimal.Decimal('...')`. `values.condition` tags the same objects in the conditions of `query`, `explain` and `aggregate`, in both modes.
+- `type_of(Decimal)` is `decimal` in extended mode, and a `TypeError` naming `types="extended"` in plain mode.
+
+### 24.3 Tests
+
+- `drivers/node/test/extended.test.js`: the parser against `JSON.parse` (escapes, surrogates, nesting, `__proto__`, errors) and at ±2^53 and 2^63; option checks; a fake 1.7.1 server refusing extended mode; against the server of the branch, reading in both modes, writing documents and keys of each kind, a `$` key, a `BigInt` beyond 64 bits refused, a decimal refused in plain mode, plain documents unchanged, and conditions with a `Date` and a decimal in both modes, with an index.
+- `drivers/python/tests/test_extended.py`: `to_extended`, `condition`, `loads_extended` and the refusals; a fake 1.7.1 server; against the server, documents and keys of each kind in both modes, `add`, conditions with and without an index, `aggregate`, and the change journal. `mypy --strict` passes.
+
+### 24.4 Limits
+
+- Node.js reads `date` and `time` as texts (JavaScript has no such types) and writes them as keys through `{ type }`; inside a document, a date or time text stays a text.
+- Node.js has no `changes` method yet; `similar`, `scan`, `stats` and the semantic cache answer plain JSON in both modes, as they carry no stored value to write back.
+- Nothing is published: the versions are raised in `package.json` and `pyproject.toml`, and npm publishes only on a version tag (the workflow of `drivers/node`), which waits for the maintainer.

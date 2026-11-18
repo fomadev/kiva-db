@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from typing import Any, Deque, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .errors import AuthenticationError, KivaConnectionError, KivaError, KivaTimeoutError
-from .values import from_wire, to_wire, type_of
+from .values import condition, from_wire, loads_extended, to_wire, type_of
 
 _HELLO, _AUTH, _EXEC, _PING, _API = 1, 2, 3, 4, 8
 _OK, _ERROR, _NOT_FOUND, _BYE, _EVENT = 0, 1, 2, 3, 9
@@ -88,7 +88,10 @@ class Client:
         timeout: float = 8.0,
         tls: TLS = None,
         reconnect: bool = True,
+        types: str = "plain",
     ) -> None:
+        if types not in ("plain", "extended"):
+            raise ValueError(f'types is "plain" or "extended", not {types!r}')
         if not _is_local(host) and not password:
             raise KivaError("A password is required to connect to a remote server.")
         if workspace is not None and not _WORKSPACE.match(workspace):
@@ -106,6 +109,7 @@ class Client:
         self._in_transaction = False
         self._lost_transaction = False
         self.server: Optional[str] = None
+        self.types = types
         self._open()
 
     # -- connection -------------------------------------------------------
@@ -128,6 +132,9 @@ class Client:
             if not hello.startswith("KivaDB"):
                 raise KivaError(f"{where} is not a KivaDB server.")
             self.server = hello.split("\n")[0]
+            major = re.match(r"KivaDB (\d+)\.", self.server)
+            if self.types == "extended" and (major is None or int(major.group(1)) < 2):
+                raise KivaError(f'types="extended" needs KivaDB 2.0.0 or later; {where} is {self.server}.')
             if "auth=required" in hello or self._password or self.user != "kiva":
                 status, payload = self._call(_AUTH, self.user.encode() + b"\0" + self._password.encode())
                 if status != _OK:
@@ -281,12 +288,24 @@ class Client:
         answer: Dict[str, Any] = json.loads(text)
         return answer
 
+    def _api(self, request: Mapping[str, Any]) -> Dict[str, Any]:
+        """A request the driver builds: with ``types="extended"``, it asks for
+        extended JSON and reads native values."""
+        if self.types == "plain":
+            return self.api(request)
+        status, payload = self._request(_API, json.dumps({**request, "types": "extended"}).encode())
+        text = payload.decode()
+        if status != _OK:
+            raise KivaError(text.replace("permission denied: ", "", 1))
+        answer: Dict[str, Any] = loads_extended(text)
+        return answer
+
     def ping(self) -> None:
         self._request(_PING)
 
     def get(self, key: str, default: Any = None) -> Any:
         """The value of a key, typed as in :mod:`kivadb.values`, or ``default``."""
-        r = self.api({"op": "get", "key": key})
+        r = self._api({"op": "get", "key": key})
         if not r["found"]:
             return default
         return from_wire(r["type"], r["value"])
@@ -297,22 +316,29 @@ class Client:
         """Creates or replaces a key. ``mode``: ``upsert``, ``create`` (fails
         if it exists) or ``update`` (fails if it does not). ``ttl`` in seconds;
         ``type`` forces one (``"date"`` for ``"2026-10-27"``, ``"time"``...)."""
-        kiva_type = type or type_of(value)
-        req: Dict[str, Any] = {"op": "put", "key": key, "type": kiva_type, "value": to_wire(kiva_type, value)}
+        extended = self.types == "extended"
+        kiva_type = type or type_of(value, extended)
+        req: Dict[str, Any] = {"op": "put", "key": key, "type": kiva_type, "value": to_wire(kiva_type, value, extended)}
         if mode != "upsert":
             req["mode"] = mode
         if ttl is not None:
             req["ttl"] = ttl
-        self.api(req)
+        self._api(req)
 
     def add(self, prefix: str, value: Any, *, ttl: Optional[int] = None, type: Optional[str] = None) -> Tuple[str, str]:
         """Stores a value under a key KivaDB names (``prefix`` and a new
         identifier sorted by time); returns ``(key, id)``."""
-        kiva_type = type or type_of(value)
-        req: Dict[str, Any] = {"op": "add", "prefix": prefix, "type": kiva_type, "value": to_wire(kiva_type, value)}
+        extended = self.types == "extended"
+        kiva_type = type or type_of(value, extended)
+        req: Dict[str, Any] = {
+            "op": "add",
+            "prefix": prefix,
+            "type": kiva_type,
+            "value": to_wire(kiva_type, value, extended),
+        }
         if ttl:
             req["ttl"] = ttl
-        r = self.api(req)
+        r = self._api(req)
         return r["key"], r["id"]
 
     def delete(self, key: str) -> bool:
@@ -334,7 +360,7 @@ class Client:
         after: Optional[str],
         reverse: bool,
     ) -> Dict[str, Any]:
-        req: Dict[str, Any] = {"target": pattern, "where": where}
+        req: Dict[str, Any] = {"target": pattern, "where": condition(where)}
         if limit is not None:
             req["limit"] = limit
         if order_by:
@@ -363,7 +389,7 @@ class Client:
         ``"created_at desc"``; ``after``: the last key of the previous page.
         ``limit`` at most 10 000."""
         req = self._query(pattern, where, limit, order_by, after, reverse)
-        rows = self.api({"op": "query", **req})["rows"]
+        rows = self._api({"op": "query", **req})["rows"]
         return [(r["key"], r["value"]) for r in rows]
 
     def explain(
@@ -382,7 +408,7 @@ class Client:
         req = self._query(pattern, where, limit, order_by, after, reverse)
         if analyze:
             req["analyze"] = True
-        return self.api({"op": "explain", **req})
+        return self._api({"op": "explain", **req})
 
     def aggregate(
         self,
@@ -396,10 +422,10 @@ class Client:
         ``compute={"n": "count", "mean": {"avg": "age"}}``."""
         req: Dict[str, Any] = {"op": "aggregate", "target": pattern, "compute": compute}
         if where is not None:
-            req["where"] = where
+            req["where"] = condition(where)
         if group_by:
             req["group_by"] = group_by
-        return self.api(req)
+        return self._api(req)
 
     def similar(
         self,
@@ -446,10 +472,10 @@ class Client:
             with self._lock:
                 saved, self.timeout = self.timeout, wait + 5
                 try:
-                    return self.api(req)
+                    return self._api(req)
                 finally:
                     self.timeout = saved
-        return self.api(req)
+        return self._api(req)
 
     def stats(self) -> Dict[str, Any]:
         return self.api({"op": "stats"})
@@ -533,6 +559,7 @@ def connect(
     timeout: float = 8.0,
     tls: TLS = None,
     reconnect: bool = True,
+    types: str = "plain",
 ) -> Client:
     """Opens a connection and logs in.
 
@@ -540,7 +567,12 @@ def connect(
     :class:`ssl.SSLContext`, or ``{"fingerprint": "AB:CD:..."}`` (the
     SHA-256 that ``kivadb tls`` shows on the server, for its own certificate).
     A remote host always needs a password.
+
+    ``types``: ``"plain"`` (the default, the answers of 1.x) or
+    ``"extended"`` (KivaDB 2.0.0 and later): ``Decimal``, ``date``,
+    ``time`` and aware ``datetime`` are kept inside documents, and decimals
+    come back as ``Decimal`` (:mod:`kivadb.values`).
     """
     return Client(
-        host, port, user, password, workspace=workspace, timeout=timeout, tls=tls, reconnect=reconnect
+        host, port, user, password, workspace=workspace, timeout=timeout, tls=tls, reconnect=reconnect, types=types
     )

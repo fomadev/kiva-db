@@ -10,7 +10,7 @@
 from .client import Change, Client, connect
 from .errors import AuthenticationError, KivaConnectionError, KivaError, KivaTimeoutError
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "AuthenticationError",
