@@ -1174,3 +1174,28 @@ S follows section 27 and the decisions G1 to G6, in the pull requests listed in 
   - the fixture is never changed.
 - **The path of an upgrade** (`a_home_goes_from_1_7_1_through_rc_2_to_this_version`): one home is written by the real 1.7.1, then by the real `rc.2` (its accounts migrated, a date: format 2), then by this version (`convert`, `sum` of decimals: format 3). `doctor` reads it, and `rc.2` then refuses it. The test runs when `KIVADB_V1_BIN` and `KIVADB_RC2_BIN` are given, as in the CI on Linux; it was also run on Windows with the published executables.
 - **The crash of a conversion** (`tests/convert_native.rs`, `a_crash_in_the_middle_of_a_conversion_converts_everything_or_nothing`): 200 documents are converted, and the file is then cut at 64 places of the transaction and at its last byte. At every cut nothing is converted, the other keys are there and `check` finds nothing damaged. The header stays at 3 with no typed record, as 27.3 says. The whole file holds the 200 conversions.
+
+### 28.2 The examples of the manual (G4)
+
+- **`tests/manual.rs`** runs the `kiva>` examples of chapters 5, 6, 9, 10, 11, 13, 14, 16 and 26: 227 commands, each chapter in a new home, in the time zone of the examples (`time.zone Africa/Kinshasa`).
+- **How answers are compared.** The answer of each command is compared line by line with the manual.
+  - `...` stands for a part that changes each time, and a line of `...` alone for any number of lines.
+  - A time of the clock without an offset (`2026-10-12 09:44:54`, in `scan`, `users` and `audit`) stands for any such time.
+  - The folder of the test's home is shown as the manual's (`C:\Users\you\AppData\Roaming\KivaDB`).
+- **What an example needs** that the manual says in words, such as the keys of Chapter 9 or the projects of 14.6, is written just before its block, in an HTML comment `<!-- setup ... -->` that the rendered manual does not show.
+- **Six blocks are left out**, each with `<!-- not run: <reason> -->`, and the test checks that count:
+  - the identifiers of `add`, drawn from the clock;
+  - the login prompt;
+  - `encryption`, which needs a key at start;
+  - the two blocks that load a script from a file;
+  - `bench script`.
+- **Corrected in the manual**, where the examples did not give what KivaDB answers:
+  - the `explain` plans counted 8 keys for the 6 of Chapter 9;
+  - `INDEX MERGE` lists the index that gives the fewest keys first (`(age) and (role)`), as the text above it says;
+  - 5.9 wrote `born` again, which already existed, so the example now uses another key;
+  - 13.4 showed a transaction's status without opening one;
+  - 14.2 counted 11 keys in `default`;
+  - the `audit` example of 16.9 now shows the commands of 16.6 that come before it;
+  - the conversion of 10.10 is now a real one, on four documents.
+- **Not covered**: the other chapters (REST, replication, operation), whose examples need a server, a network or a second machine. A block of theirs is added to the test when it changes.
+- The manual's conventions say what `...` means in an answer, and that these chapters are run by the tests.

@@ -148,6 +148,8 @@ kiva> get name
 name: Fordi [string]
 ```
 
+In an answer, `...` stands for a part that changes each time: the time it is now, a duration. The examples of a chapter follow each other, and those of chapters 5, 6, 9, 10, 11, 13, 14, 16 and 26 are run by KivaDB's tests, which check that the answers shown are the ones KivaDB gives.
+
 In the descriptions of commands:
 
 | Notation | Meaning | Example |
@@ -771,6 +773,9 @@ A line that starts with `#` or `--` is ignored. Useful in command files.
 
 KivaDB has these types: string, number (of the kind `int` or `float`), `decimal`, boolean, null, array, object, bytes, and date, datetime and time ([5.8](#58-date-datetime-time)). `typeof` tells you the type of a key, a number by its kind:
 
+<!-- setup
+set age 25
+-->
 ```text
 kiva> typeof age
  -> age is a [int]
@@ -924,7 +929,7 @@ A datetime is stored in UTC, so the same instant is right wherever the server is
 ```text
 kiva> config set time.zone Africa/Kinshasa
 kiva> timezone
-Time zone: Africa/Kinshasa (from the server's time.zone). It is 2026-10-27 14:30:00 +01:00 here, 2026-10-27T13:30:00.000Z UTC.
+Time zone: Africa/Kinshasa (from the server's time.zone). It is ... +01:00 here, ...Z UTC.
 kiva> timezone America/New_York
 kiva> get created_at
 created_at: 2026-10-27 09:30:00 -04:00 [datetime]
@@ -940,11 +945,11 @@ kiva> timezone default
 
 ```text
 kiva> format date "DD-MM-YYYY"
-date:     DD-MM-YYYY (from this session), now: 27-10-2026
-kiva> set date born "25-12-2000"
-OK: born saved.
-kiva> get born
-born: 25-12-2000 [date]
+date:     DD-MM-YYYY (from this session), now: ...
+kiva> set date wedding "25-12-2000"
+OK: wedding saved.
+kiva> get wedding
+wedding: 25-12-2000 [date]
 kiva> format datetime "DD/MM/YYYY HH:mm XXX"
 kiva> set datetime at "27/10/2026 14:30 +01:00"
 ```
@@ -1119,6 +1124,7 @@ add <prefix> <value> [ttl <seconds>]
 
 Creates a key named `<prefix>` followed by a new identifier, and says which key it is. Use it when the application has no natural name for a record (an order, a message, a place) and should not have to invent one:
 
+<!-- not run: the identifiers come from the clock and a random part -->
 ```text
 kiva> add place: {"type": "VILLE", "name": "Bukavu"}
 OK: place:6adf9c3ca32f23553b1dbb10 saved.
@@ -1372,8 +1378,14 @@ In the shell, quote a path that contains quotes, with the other kind of quote: `
 
 ### 10.2 Reading a field
 
-Directly with `get`:
+Directly with `get`, on the keys of [Chapter 9](#chapter-9--listing-keys-and-ranges):
 
+<!-- setup
+set user:1 {"name": "Alice", "role": "admin", "age": 30, "address": {"city": "Kinshasa"}}
+set user:2 {"name": "Bob", "role": "dev", "age": 25, "address": {"city": "Goma"}}
+set user:3 {"name": "Carol", "role": "dev", "age": 41, "address": {"city": "Kinshasa"}}
+set active true and age 31 and colors ["red", "green", "blue"]
+-->
 ```text
 kiva> get user:1.name and user:1.address.city
 user:1.name: Alice [string]
@@ -1536,10 +1548,16 @@ acc:1.balance: 1150.25 [decimal]
 **From texts to typed values.** Documents written before 2.0.0, or by programs sending plain JSON, hold dates and amounts as texts. `convert` turns the texts of one field into typed values:
 
 ```text
+kiva> set order:1 {"created_at": "2026-10-31T15:18:00Z", "total": "1250.50"}
+kiva> set order:2 {"created_at": "2026-11-02T09:00:00+01:00", "total": "80.25"}
+kiva> set order:3 {"created_at": datetime "2026-11-05 10:00:00", "total": decimal "7"}
+kiva> set order:4 {"total": "12.00"}
 kiva> convert order:*.created_at to datetime check
-Check: 1204 document(s) of order:* to convert to datetime (38 already datetime, 5 without created_at); nothing written.
+Check: 2 document(s) of order:* to convert to datetime (1 already datetime, 1 without created_at); nothing written.
 kiva> convert order:*.created_at to datetime
-Converted: 1204 document(s) of order:* to datetime (38 already datetime, 5 without created_at).
+Converted: 2 document(s) of order:* to datetime (1 already datetime, 1 without created_at).
+kiva> get order:1
+order:1: {"created_at": datetime "2026-10-31 16:18:00 +01:00", "total": "1250.50"} [object]
 ```
 
 * The types are `date`, `datetime`, `time` and `decimal`. Texts are read in ISO only (`2026-10-31`, `08:30:00`, `1250.50`); a datetime must carry its offset (`2026-10-31T15:18:00Z`, `+01:00`), since a text without one has no time zone to be read in.
@@ -1549,6 +1567,13 @@ Converted: 1204 document(s) of order:* to datetime (38 already datetime, 5 witho
 ## Chapter 11 — Queries and indexes
 
 So far every command named the keys it wanted. A **query** finds documents by what they contain. The examples of this chapter use the three users exactly as they were created at the start of [Chapter 9](#chapter-9--listing-keys-and-ranges).
+
+<!-- setup
+set user:1 {"name": "Alice", "role": "admin", "age": 30, "address": {"city": "Kinshasa"}}
+set user:2 {"name": "Bob", "role": "dev", "age": 25, "address": {"city": "Goma"}}
+set user:3 {"name": "Carol", "role": "dev", "age": 41, "address": {"city": "Kinshasa"}}
+set active true and age 31 and colors ["red", "green", "blue"]
+-->
 
 ### 11.1 The condition
 
@@ -1757,19 +1782,22 @@ Query Plan
   Filter    : user:*.role = "dev"
   Strategy  : PREFIX SCAN
   Index     : none
-  Estimated : 3 of 8 keys examined
+  Estimated : 3 of 6 keys examined
   Tip       : create index on user:* (role)
 ```
 
 After creating the index:
 
+<!-- setup
+create index on user: (role)
+-->
 ```text
 kiva> explain get where user:*.role = "dev"
 Query Plan
   Filter    : user:*.role = "dev"
   Strategy  : INDEX SCAN
   Index     : user:* (role)
-  Estimated : 2 of 8 keys examined
+  Estimated : 2 of 6 keys examined
 ```
 
 | Strategy | Meaning |
@@ -1792,19 +1820,22 @@ With several comparisons, KivaDB uses every index it can:
 
 Whatever the plan, every candidate document is tested against the whole condition, so an index changes the speed, never the answer. With indexes on `role` and `age`:
 
+<!-- setup
+create index on user: (age)
+-->
 ```text
 kiva> explain get where user:*.role = "dev" and age > 30
 Query Plan
   Filter    : user:* where role = "dev" and age > 30
   Strategy  : INDEX MERGE
-  Index     : user:* (role) and user:* (age)
-  Estimated : 1 of 8 keys examined
+  Index     : user:* (age) and user:* (role)
+  Estimated : 1 of 6 keys examined
 kiva> explain get where user:*.role = "dev" or address.city = "Goma"
 Query Plan
   Filter    : user:* where role = "dev" or address.city = "Goma"
   Strategy  : PREFIX SCAN
   Index     : none
-  Estimated : 3 of 8 keys examined
+  Estimated : 3 of 6 keys examined
   Tip       : create index on user:* (address.city)
 ```
 
@@ -1825,14 +1856,14 @@ Query Plan (explain analyze: the query was run; its rows are not shown)
   Index     : user:* (age) for the order, user:* (age) checked for the filter
   Order     : age desc, read in the order of the index: stops after 2
   Limit     : 2
-  Estimated : 2 of 8 keys examined
+  Estimated : 2 of 6 keys examined
 Measured
   Index entries : 4
   Keys examined : 2
   Documents     : 2 read (0 from the value cache, 2 from disk), 0 filtered out
-  Sorted        : 2 rows in 0.003 ms
+  Sorted        : 2 rows in ... ms
   Returned      : 2
-  Time          : 0.315 ms (plan 0.014 ms, read and filter 0.287 ms, sort 0.003 ms)
+  Time          : ... ms (plan ... ms, read and filter ... ms, sort ... ms)
 ```
 
 Everything under `Query Plan` is decided before the reading (`Estimated` is an estimate). Everything under `Measured` was counted while the query ran:
@@ -1899,6 +1930,9 @@ A **unique index** refuses a second document holding the same value, whoever wri
 create unique index on <pattern> (<field>[, <field>...]) [using btree|hash] [ignore case]
 ```
 
+<!-- setup
+drop index on user: (name)
+-->
 ```text
 kiva> create unique index on user: (name)
 Unique index created on user:* (name): 3 documents indexed.
@@ -1935,6 +1969,11 @@ Error: UNIQUE: 'place:5' not written: 'place:1' already holds ["ville",null,"gom
 
 Documents are free by default: any field, any type. A schema gives the documents of one key pattern rules that every write must follow, and values filled in when a field is missing. The patterns without a schema work as before.
 
+<!-- setup
+del user:1
+del user:2
+del user:3
+-->
 ```text
 kiva> schema set user: {"name": {"type": "string", "required": true, "maxLength": 80},
    ...   "email": {"type": "string", "required": true, "unique": true, "pattern": "^[^@ ]+@[^@ ]+$"},
@@ -1947,7 +1986,7 @@ Unique index created on user:* (email).
 kiva> set user:1 {"name": "Ana", "email": "ana@example.org"}
 OK: user:1 saved.
 kiva> get user:1
-user:1: {"name":"Ana","email":"ana@example.org","role":"dev","active":true,"created_at":"2026-10-27T14:30:00.000Z"} [object]
+user:1: {"name":"Ana","email":"ana@example.org","role":"dev","active":true,"created_at":"...Z"} [object]
 kiva> set user:2 {"name": "Ben"}
 Error: SCHEMA: 'user:2' not written: email: required (schema on user:*)
 kiva> json set user:1 .age -4
@@ -2353,6 +2392,9 @@ Inside your transaction, `get`, `has`, `typeof`, `json` and `print` see your pen
 
 A **savepoint** is a bookmark inside a transaction. You can come back to it without abandoning what was done before it.
 
+<!-- setup
+set colors ["red", "green", "blue"]
+-->
 ```text
 kiva> begin
 Transaction 4 started.
@@ -2373,11 +2415,18 @@ Transaction committed (1 keys written).
 ### 13.4 Status
 
 ```text
+kiva> begin
+Transaction 5 started.
+kiva> set order:2 {"total": 20}
+kiva> savepoint s1
+kiva> set order:3 {"total": 30}
 kiva> transaction status
-Transaction ID: 4
+Transaction ID: 5
 State: ACTIVE
 Savepoints: 1
 Modified keys: 2
+kiva> rollback
+Transaction rolled back.
 ```
 
 Outside a transaction it answers `State: NONE (no active transaction)`.
@@ -2388,7 +2437,7 @@ If a data command fails inside a transaction, the whole transaction is cancelled
 
 ```text
 kiva> begin
-Transaction 5 started.
+Transaction 6 started.
 kiva> update account:a 1
 OK: account:a updated.
 kiva> update account:a "text"
@@ -2431,6 +2480,12 @@ There is always a workspace named `default`. It is where an administrator lands.
 
 ### 14.2 Creating and switching
 
+<!-- setup
+set user:1 {"name": "Alice", "role": "admin", "age": 30, "address": {"city": "Kinshasa"}}
+set user:2 {"name": "Bob", "role": "dev", "age": 25, "address": {"city": "Goma"}}
+set user:3 {"name": "Carol", "role": "dev", "age": 41, "address": {"city": "Kinshasa"}}
+set active true and age 31 and colors ["red", "green", "blue"]
+-->
 ```text
 kiva> workspace create shop
 Workspace 'shop' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop.
@@ -2442,7 +2497,7 @@ kiva> workspace list
    default              write  C:\Users\you\AppData\Roaming\KivaDB\data
  * shop                 write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop
 kiva> workspace switch default
-Switched to workspace 'default' (11 keys).
+Switched to workspace 'default' (6 keys).
 ```
 
 The `*` marks the workspace you are in. `workspace current` shows only that one.
@@ -2506,6 +2561,10 @@ kiva> workspace list travel
 
 `workspace move` gives a workspace another name, which also moves it into a project, out of one, or from one to another:
 
+<!-- setup
+workspace remove travel.places
+workspace create places_travel
+-->
 ```text
 kiva> workspace move places_travel to travel.places
 Workspace 'places_travel' is now 'travel.places'. Its files did not move, and its grants followed it.
@@ -2696,8 +2755,14 @@ Administration commands (`compress`, `config`, `create`, `drop`, `grant`, `revok
 
 ### 16.3 Managing accounts
 
-A new account reaches **no workspace**: it can log in, but sees nothing until it is given access. Give it in the same command, or later with `grant` ([16.4](#164-workspaces-and-grants)):
+A new account reaches **no workspace**: it can log in, but sees nothing until it is given access. Give it in the same command, or later with `grant` ([16.4](#164-workspaces-and-grants)). With the projects of [14.6](#146-projects):
 
+<!-- setup
+project create travel
+workspace create travel.places
+project create school
+workspace create school.places
+-->
 ```text
 kiva> create user "fordi" identified by "mon_pass"
 User 'fordi' created with role [editor]: no workspace yet (give it some with grant).
@@ -2753,6 +2818,10 @@ Anyone may change their own password; only an admin may change someone else's pa
 
 Several scopes go in one grant, separated by commas:
 
+<!-- setup
+create user "guest" identified by "guest_pass" role viewer
+create user "ops" identified by "ops_pass"
+-->
 ```text
 kiva> grant write on travel.*, school.places to "fordi"
 Granted: write on travel.*, school.places to 'fordi'.
@@ -2787,6 +2856,7 @@ A user enters a workspace they were granted with `workspace switch <name>`; `wor
 
 When authentication is on, the shell asks who you are:
 
+<!-- not run: the login prompt of the shell, in a terminal -->
 ```text
 $ kivadb
 Username [kiva]: fordi
@@ -2847,11 +2917,13 @@ Never in clear. For each account KivaDB keeps a random *salt* and the result of 
 
 Sensitive actions are recorded in `audit.log` in the home directory: account and privilege changes, deletions, compaction, configuration changes, logins. Passwords are masked.
 
+After the commands of [16.6](#166-turning-authentication-on):
+
 ```text
 kiva> audit last 3
-[2026-10-12 09:44:55] user=kiva action="create user 'fordi' identified by '***'" status=SUCCESS
-[2026-10-12 09:44:55] user=kiva action="create user 'guest' identified by '***' role viewer" status=SUCCESS
-[2026-10-12 09:44:55] user=kiva action="grant read on workspace 'shop' to 'guest'" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="modify user 'kiva'" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="modify user 'kiva' password '***'" status=SUCCESS
+[2026-10-12 09:44:55] user=kiva action="config set auth_required true" status=SUCCESS
 ```
 
 | Command | Shows |
@@ -2976,6 +3048,7 @@ The key itself is never written in `kiva.conf` nor anywhere in the data folder. 
 
 **3. Check.**
 
+<!-- not run: needs an encryption key given when KivaDB starts -->
 ```text
 kiva> encryption
 Encryption at rest: on (AES-256-GCM, key 5d1e07a2)
@@ -4934,6 +5007,9 @@ For logic that needs several steps - read a value, decide, write another - you c
 eval '<lua code>' [arguments...]
 ```
 
+<!-- setup
+set user:1 {"name": "Alice", "role": "admin", "age": 30, "address": {"city": "Kinshasa"}}
+-->
 ```text
 kiva> eval 'return kiva.get("user:1").name'
 Alice
@@ -4984,6 +5060,9 @@ Lua tables count from 1: `kiva.get("colors")[1]` is the first colour. An empty L
 
 A typed value read from a document is written back with its type, so a script that changes one field keeps the others as they were:
 
+<!-- setup
+set acc:1 {"name": "Ana", "balance": decimal "1250.50", "opened": date "2026-01-15"}
+-->
 ```text
 kiva> eval 'local a = kiva.get("acc:1"); a.name = "Anna"; kiva.set("acc:1", a); return a.balance + kiva.decimal("0.10")'
 1250.60
@@ -5036,6 +5115,7 @@ return kiva.incr(key, by)
 
 Load it once under a name, then call it by that name from anywhere:
 
+<!-- not run: reads a file outside the home -->
 ```text
 kiva> script load "C:\scripts\increment.lua" as "inc"
 Script 'inc' stored (82 bytes).
@@ -5075,6 +5155,7 @@ The script receives `ARGV[1]` = the event and `ARGV[2]` = the key. Example: keep
 kiva.set("log:" .. ARGV[1] .. ":" .. ARGV[2], "seen")
 ```
 
+<!-- not run: reads a file outside the home -->
 ```text
 kiva> script load "C:\scripts\audit_log.lua" as "audit_log"
 Script 'audit_log' stored (54 bytes).
@@ -5094,6 +5175,7 @@ Triggers run just **after** the change, in the background: the command that caus
 
 ### 26.8 Measuring and debugging
 
+<!-- not run: needs the stored script of 26.6, and times the machine -->
 ```text
 kiva> bench script "inc" iterations 1000 counter
 SCRIPT inc: 1000 ops in 0.284s -> 3521 ops/sec (avg 0.284 ms)
