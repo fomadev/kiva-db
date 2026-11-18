@@ -842,3 +842,105 @@ The tests written before C5 are unchanged: plain JSON is what they read.
 - `CMD_GET` and `CMD_SET` carry canonical bytes, not JSON (21.2); Redis stays plain JSON.
 - In Lua, a key of type `decimal`, `date`, `time` or `datetime` is still read as its text (`kiva.get`), as before C5, so a script that writes such a key back as it read it writes a string; D4-b covers the leaves of documents. A key keeps its type when written with the helpers.
 - The drivers' options and native objects are C6.
+
+## 23. C6: preparation
+
+Nothing of this section is implemented. It prepares lot C6 (the Node.js and Python drivers read and write native values through extended JSON), so that its review starts from written rules; the code waits for the maintainer's decisions (23.6).
+
+State of main when it was written (`9428588`): C1 to C5, N2 and R0 merged; C5 (#109) answers extended JSON to requests that ask for it (section 22). The CI of main is green on `9428588`.
+
+### 23.1 The drivers today, read in the code
+
+| | Node.js (`drivers/node`) | Python (`drivers/python`) |
+| :--- | :--- | :--- |
+| Version, runtimes | `@fomadev/kivadb` 1.2.0; Node.js 18 and later (CI: 18, 20, 22) | `kivadb` 1.0.0; Python 3.10 and later |
+| Transport | binary protocol: `CMD_EXEC`, `CMD_API`; `HELLO` gives `KivaDB <version>` | the same |
+| Requests | `get`, `set`, `add`, `query`, `del`, `scan`, `similar`, `stats`, semantic cache, `subscribe`, `api` (raw) | the same, plus `explain`, `aggregate`, `changes`, `transaction`, `next_change` |
+| Reading | `JSON.parse` of the whole answer: an integer beyond ±2^53 is rounded; `fromWire` makes a `Buffer` of `bytes` and a `Date` of a `datetime` key | `json.loads`: integers exact; `from_wire` makes `bytes`, aware `datetime`, `date`, `time` of keys of those types |
+| Writing | `typeOf`: a `BigInt` is typed `number`, but `JSON.stringify` throws on it; a `Date` inside a document becomes its ISO text | `type_of`: `Decimal` is refused; `date`, `time`, aware `datetime` inside a document become ISO texts; a naive `datetime` is refused |
+| Conditions (`where`) | sent as given | sent as given: a `datetime` object in a condition makes `json.dumps` fail, so programs write `{"$datetime": ...}` by hand |
+| Decimal keys (N2) | `get` gives the text, `type` is `decimal` | the same |
+
+Neither driver sends `types`, so both receive plain JSON from a 2.0 server, exactly as from 1.x: C5 changed nothing for them, which the CI shows.
+
+### 23.2 How a program turns extended JSON on
+
+An option of the connection, as section 8 says:
+
+- Node.js: `connect({ types: "extended" })`; Python: `connect(..., types="extended")`. `"plain"`, the default, keeps every answer of today.
+- With it, every request the driver builds carries `"types": "extended"`, and the driver converts both ways (23.3, 23.4). `api()` (the raw request) is sent as the program wrote it and answered as JSON: it stays the escape hatch.
+- A server older than 2.0.0 does not know `types` and would answer plain JSON silently. The driver reads the version in `HELLO` and refuses `types: "extended"` before 2.0.0, with the version it found.
+
+### 23.3 Node.js
+
+Reading, with `types: "extended"`:
+
+| Leaf | Value |
+| :--- | :--- |
+| `int` within ±2^53 | `number` |
+| `int` beyond ±2^53 | `BigInt` |
+| `float` | `number` |
+| `decimal` | `string`, or an instance of the class the program gives (`connect({ types: "extended", decimal: Decimal })`, called as `new Decimal(text)`); the driver depends on no decimal library |
+| `date`, `time` | `string` (JavaScript has no date-only or time-only type) |
+| `datetime` | `Date` |
+| a `$$` key | the `$` key of the data |
+
+`JSON.parse` turns digits into a `number` before any reviver sees them, and the reviver's access to the source text exists only from Node.js 21; the driver therefore ships a small JSON parser, used only for extended answers, that keeps the text of each integer and makes a `BigInt` of it beyond ±2^53. Plain answers keep `JSON.parse`.
+
+Writing, with `types: "extended"`:
+
+- a `BigInt` is an exact JSON integer, refused beyond `i64`, at the top level (a key of kind `int`) and inside a document;
+- a `Date` inside a document is `{"$datetime": ...}` (a native datetime) instead of its ISO text;
+- an instance of the `decimal` class is `{"$decimal": String(value)}`;
+- a key of the data starting with `$` is written with the `$` doubled.
+
+Conditions: in both modes, a `Date` becomes `{"$datetime": ...}`, a `BigInt` an exact integer, an instance of the `decimal` class `{"$decimal": ...}`, since conditions read tags in both modes (C5).
+
+`index.d.ts` gains the option and the types of the values read.
+
+### 23.4 Python
+
+Reading, with `types="extended"`:
+
+| Leaf | Value |
+| :--- | :--- |
+| `int`, `float` | `int`, `float` (Python integers are exact) |
+| `decimal` | `decimal.Decimal` |
+| `date`, `time`, `datetime` | `datetime.date`, `datetime.time`, aware `datetime.datetime` in UTC |
+| a `$$` key | the `$` key of the data |
+
+Parsing uses `json.loads` with an `object_hook` for the tags; `parse_float` stays `float`.
+
+Writing, with `types="extended"`:
+
+- `decimal.Decimal` is accepted, at the top level (type `decimal`) and inside a document, sent as `{"$decimal": ...}`; `NaN`, infinities and a value with more digits than a KivaDB decimal holds are refused by the driver;
+- `date`, `time` and aware `datetime` inside a document are sent as tags; a naive `datetime` stays refused;
+- an `int` beyond `i64` is refused with the hint `Decimal(...)`;
+- a key of the data starting with `$` is written with the `$` doubled.
+
+In plain mode, `Decimal` stays refused, with the hint `types="extended"`, so that no program stores a decimal as a text without knowing it.
+
+Conditions: in both modes, `Decimal`, `date`, `time` and aware `datetime` objects are written as their tags, so that `client.query("acc:*", {"field": "balance", "cmp": "=", "value": Decimal("10.50")})` works.
+
+### 23.5 Tests to write
+
+- Each driver, against the server of the branch, in both modes: a document holding every native leaf, an `int` beyond 2^53, a `float` `8.0`, a key `$ref`; read back equal to what was written; keys of each kind.
+- Plain mode: every test of today unchanged, and a 2.0 server answering exactly as before.
+- Node.js: the extended parser against `JSON.parse` on plain values (numbers, escapes, unicode, nesting, errors), `BigInt` at ±2^53 and ±2^63, a `decimal` class given and not given.
+- Python: `Decimal` in and out, `NaN` and too many digits refused, naive `datetime` refused, a big `int` refused.
+- Conditions with native objects, in both modes, with and without an index.
+- `types: "extended"` refused against a server that says 1.x in `HELLO` (a fake server in the test).
+- The CI matrix of today (Node.js 18, 20, 22; Python 3.10, 3.12, 3.14).
+
+### 23.6 Decisions to take
+
+1. **E1, the option**: a connection option `types`, `"plain"` by default (23.2). Recommended, since every program of today keeps its answers.
+2. **E2, Node.js decimals**: a `string`, or the class the program gives; no dependency in the driver (23.3). Recommended.
+3. **E3, Node.js integers**: `BigInt` beyond ±2^53 only, through the driver's own parser (23.3). Recommended; the alternative, `BigInt` for every integer, would change every `number` a program reads.
+4. **E4, Python decimals in plain mode**: refused with a hint (23.4). Recommended.
+5. **E5, conditions**: native objects written as tags in both modes (23.3, 23.4). Recommended.
+6. **E6, versions**: the drivers become Node.js 1.3.0 and Python 1.1.0 (additive, plain by default); nothing is published to npm or PyPI before the maintainer says so.
+
+### 23.7 Out of C6
+
+Kiva Studio (its own repository, a condition of `docs/v2/RELEASE.md`); the `changes` request in the Node.js driver; Lua and Redis (C5); `doctor`, the replication and backup checks, and a 1.x client reading a decimal key by `CMD_GET` (C7). C6 prepares no candidate, tag or release.
