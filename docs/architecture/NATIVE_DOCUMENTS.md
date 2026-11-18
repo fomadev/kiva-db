@@ -693,3 +693,105 @@ C4 lets the shell write native values: typed literals at any depth, exact condit
 - A literal deeper than 128 levels whose first type word comes after the limit is refused by `serde_json`'s message (recursion limit), not by the typed parser's.
 - Structured requests share the check of condition values, so a `{"$decimal": "..."}` there is accepted already; it is documented and tested with extended JSON (C5).
 - REST bodies, the binary protocol, Redis `JSON.SET`, Lua and the drivers send plain JSON until C5 and C6.
+
+## 21. C5: preparation
+
+Nothing of this section is implemented. It prepares lot C5 (extended JSON for programs, Lua helpers) so that its review starts from written rules; the code waits for the maintainer's decisions (21.6).
+
+State of main when it was written (`da48972`): C1 to C4 merged, lot R0 merged, and lot N2 merged (#106): `int`, `float` and `decimal` keys ([NUMERIC_TYPES.md](NUMERIC_TYPES.md) section 11). The CI of main is green on `da48972`.
+
+### 21.1 What reaches programs today, read in the code
+
+| Path | Code | Out | In |
+| :--- | :--- | :--- | :--- |
+| REST `GET /v1/key/{key}` (and `?path=`), `GET /v1/range` | `http.rs`, `value_json` → `Value::to_json` | plain JSON | `PUT`/`POST /v1/key/{key}`: `put_key`, the body (or the envelope `{"value", "ttl"}`) typed by `Value::from_json` |
+| Structured requests: `POST /v1/api`, binary `CMD_API` (8) | `api::handle`; `get` → `value_out`, `query` rows → the document as plain JSON | plain JSON; `"type"` is `Type::name()`: `number` for `int` and `float`, `decimal` for a decimal key | `put`, `add` → `value_in`: an object or array is a `Value::Doc` of plain JSON, so `{"$decimal": "1"}` is stored as an object with a key `$decimal` |
+| Conditions of structured requests | `query::check_value`, `SKey::from_cond` | — | `{"$decimal"}`, `{"$datetime"}`, `{"$time"}` already accepted (C4, 20.3) |
+| Change journal: `GET /v1/changes`, the `changes` request | `changes::to_json` → `Value::to_json` | plain JSON | — |
+| `GET /v1/stream` (SSE), pub/sub events | `http::event_json` | no value, only the event, key and type | — |
+| Binary `CMD_GET` (5) and `CMD_SET` (6) | `server.rs`; `Value::encode(false)` | a type byte and the canonical bytes; a typed document as plain JSON; a decimal key as type 13 and its text | `binary_set`: the bytes of a type, documents as plain JSON |
+| Redis `JSON.GET`, `JSON.SET`... | `resp_json.rs` | plain JSON | plain JSON: `doc::from_json`, strings stay strings |
+| Lua | `script.rs`, `value_to_lua`, `lua_to_value` | a typed document as plain JSON tables (decimals and moments as texts), a decimal key as a text | a table is a `Value::Doc` of plain JSON |
+| Node.js driver | `drivers/node/index.js`: `CMD_EXEC` and `CMD_API` only; `fromWire` knows `bytes` and `datetime` | — | — |
+| Python driver | `drivers/python/src/kivadb`: `CMD_API`; `from_wire` knows `bytes`, `datetime`, `date`, `time` | — | — |
+
+`doc::to_extended_json` and `doc::from_extended_json` exist since C1 (with a property test: `Doc` → extended JSON → `Doc` is the identity, 15.3) and are used by no path that programs reach. C5 wires them; it designs no new form.
+
+Two facts that the audit adds to section 7:
+
+- The drivers of 1.x use only `CMD_EXEC` and `CMD_API`; `CMD_GET` and `CMD_SET` are used by the Rust `client.rs` (the shell connected to a server). A 1.x client reading a decimal key by `CMD_GET` gets a type byte it does not know (13): N2 made that possible, C5 does not change it, C7 documents it with the replication checks.
+- REST and structured requests answer `"type": "number"` for an `int` or `float` key (N2, kept for the 1.x drivers): extended JSON is where the kinds can be named (21.3).
+
+### 21.2 How a program asks for extended JSON
+
+As section 7.2 says, per request, never per connection or by configuration, so that two programs sharing a server or a connection never see each other's choice:
+
+| Path | How |
+| :--- | :--- |
+| Structured requests (REST `/v1/api`, binary `CMD_API`) | `"types": "extended"` in the request object; `"plain"` or absent is today's answer |
+| REST key reads and writes, `/v1/range`, `/v1/changes` | `?types=extended` |
+| The `changes` request | `"types": "extended"`, as other requests |
+| SSE, pub/sub | nothing to change: they carry no value |
+| Binary `CMD_GET`, `CMD_SET` | unchanged: they carry canonical bytes, not JSON |
+| Redis | unchanged: plain JSON (7.3); RESP has no decimal or date |
+
+Any other value of `types` is refused (`"types" is "plain" or "extended"`), so that a typo never gives plain JSON silently.
+
+### 21.3 Extended JSON, both ways
+
+Out, with `types=extended`:
+
+- every value is written by `to_extended_json`: a typed document, and also a key of type `decimal`, `date`, `time` or `datetime`, as `{"$decimal": "1250.50"}`...; a `float` with a fraction or an exponent;
+- a key of the data that starts with `$` is written with the `$` doubled, in every document, typed or not, so that a program can read any answer with one function;
+- `"type"` names the kind of a number key: `int`, `float`, or `number` for a legacy one;
+- a legacy number (an integer beyond `i64`, a fraction a float does not hold) is written `{"$decimal": "..."}`: its digits are kept and no JSON parser rounds it. This is a choice to approve (21.6, D3).
+
+In, with `types=extended`:
+
+- `put` and `add` with `"type": "object"` or `"array"` (or no type) read the value with `from_extended_json`: tags become native leaves, `$$` keys become `$` keys, any other `$` key is refused with the message of `from_extended_json`. A document holding a native leaf is stored as `KDOC` and raises the file to format 3, as a typed literal of the shell does (C4);
+- `put` with `"type": "decimal"`, `"date"`... also takes the tagged form (`{"$decimal": "1250.50"}`), so that a value read can be written back as it is;
+- `PUT /v1/key/{key}?types=extended` reads its body (or the `value` of its envelope) the same way: `{"$decimal": "1250.50"}` alone is a decimal key, `{"$date": ...}` a date key;
+- an integer beyond `i64` is refused, with the hint `{"$decimal": "..."}`.
+
+Without `types=extended`, nothing changes in either direction: a `{"$decimal": ...}` object written in plain JSON stays an object with a key `$decimal`, as today. Only conditions read the tags in both modes (C4).
+
+### 21.4 Lua
+
+As 7.3 says: `int` → Lua integer, `float` → Lua number, `decimal` and moments → their canonical text, so that existing scripts read the same values. C5 adds the writers:
+
+| Helper | Returns |
+| :--- | :--- |
+| `kiva.decimal("1250.50")` | a typed decimal |
+| `kiva.date("2026-10-31")`, `kiva.time("08:30:00")`, `kiva.datetime("2026-10-31T15:18:00Z")` | a typed moment, read in ISO only, as extended JSON reads it |
+| `kiva.int(n)`, `kiva.float(x)` | a number of that kind (`kiva.float(8)` stays a float) |
+
+A typed value is a Lua userdata: `tostring` gives its canonical text, `==` compares exactly, and it is accepted by `kiva.set` alone or inside a table. A table holding one is stored as a typed document.
+
+The open point is the round trip (D4): a script that reads a typed document, changes one field and writes it back writes texts in place of the decimals and moments it did not touch, since it read texts. Two answers:
+
+- **D4-a, texts (section 7.3 as written).** Reads stay texts; the script must rebuild every typed leaf with the helpers. Simple, and scripts of the candidates are unchanged, but the silent loss of types of C3 (18.4) stays for every script that does not know.
+- **D4-b, typed values read as userdata.** A decimal or a moment read from a document is the same userdata that the helpers return; `tostring`, `..` and comparisons with a string see its text, so most scripts are unchanged, and a read-modify-write keeps every type. A script that does arithmetic on a decimal (`d + 1`) or calls `string.*` on it directly changes behaviour: the userdata does arithmetic exactly (decimal + number) or refuses, and `string.*` needs `tostring`.
+
+Recommended: **D4-b**, since keeping types on every path is invariant 15.3 and C3 left Lua as its known exception. The change is listed in the release notes.
+
+### 21.5 Tests to write
+
+- For each path of 21.2: a document holding the four native leaves, an `int` beyond 2^53, a `float` `8.0` and a key `$ref`, read in plain and in extended JSON; written in extended JSON and read back equal; written in plain JSON and stored as plain JSON (format unchanged).
+- `types` absent, `plain`, `extended`, and a wrong value (refused).
+- Keys of type `decimal`, `date`, `time`, `datetime`, `int`, `float` and a legacy number, in both modes, by `get`, `/v1/key`, `/v1/range` and the change journal.
+- Extended writes refused: a `$` key that is not a tag, a tag whose value is not a text, an integer beyond `i64`, a document too deep.
+- A value read in extended JSON put back in a condition (`=`, `in`) finds its document, with and without an index.
+- Lua: each helper, a typed value inside a table, `tostring` and comparisons; under D4-b, a read-modify-write that keeps a decimal and a datetime untouched, and `d + 1` on a decimal.
+- The 1.x drivers, unchanged, against the server of C5: they see plain JSON only (the CI already runs them).
+- Format: a plain write leaves a file of format 1 or 2 as it is; an extended write of a native leaf raises it to 3.
+
+### 21.6 Decisions to take
+
+1. **D1, how it is asked**: per request, `"types": "extended"` / `?types=extended`, as 21.2 (section 7.2). Recommended.
+2. **D2, writes**: tags are read only in extended requests; plain writes stay plain (21.3). Recommended, since a plain program that stores objects with a `$decimal` key today keeps doing so.
+3. **D3, legacy numbers in extended JSON**: `{"$decimal": "..."}` (exact, but its kind changes from `number` to `decimal` when written back), or a bare JSON number (exact text, rounded by most parsers). Recommended: `{"$decimal": "..."}`.
+4. **D4, Lua reads**: D4-a texts or D4-b userdata (21.4). Recommended: D4-b.
+
+### 21.7 Out of C5
+
+The drivers' options and native objects (C6, and N3 for numbers); `doctor`, `convert ... to date`, the replication and backup checks, and what a 1.x client sees by `CMD_GET` (C7); Redis stays plain JSON. The random functions R1 to R4 are not in C5. C5 prepares no candidate, tag or release; the version stays `2.0.0-rc.2` until a candidate is authorised.
