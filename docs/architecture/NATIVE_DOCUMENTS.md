@@ -1052,3 +1052,27 @@ Taken by the maintainer on 2026-11-18, for 2.0.0: the five recommendations, F1 t
 ### 25.7 Out of C7
 
 The compatibility runs with the published binaries, the crash tests and the benchmarks of a candidate (S); Kiva Studio; the publication of the drivers; the random functions R1 to R4. C7 prepares no candidate, tag or release.
+
+## 26. C7 as built
+
+C7 follows section 25 and the decisions F1 to F5, in two pull requests: the code (#116) and the documentation.
+
+### 26.1 Code
+
+- **`kivadb doctor`** (F1): after the summary of the records, one line per workspace (and `system`) with its storage format and the versions that open it (`doctor::storage_format`, `format_text`). A header that cannot be read is a warning.
+- **`convert <pattern>.<field> to date|datetime|time|decimal [check]`** (F2, F3, `exec::convert_field`): each text of the field is read by `doc::from_extended_json`, so in ISO only, as extended JSON reads it; a datetime without an offset is refused. Every document is read first; one refusal stops everything, and the error names up to ten keys with their values and the reason. The changes are written in one transaction, or in the session's own if one is open, as typed documents (`Value::typed`, `KDOC`). Documents without the field, with `null`, or already of the type are counted and left; a value that is not a text (a number) is refused, not guessed. `check` reports the same counts and refusals and writes nothing.
+- Tests: `tests/convert_native.rs`.
+
+### 26.2 Documentation
+
+- Chapter 5: numbers named by kind, `decimal` keys, the refusal of untyped big integers, typed values in documents, programs and extended JSON.
+- 10.10 (new): typed literals in documents, conditions, storage format 3, `convert`.
+- 17.9 `doctor`, 19.4 format 3, 20.4 extended JSON, 21.2 `?types=extended`, 24.3 and 24.4 the drivers' option, 26.2 the Lua helpers and typed values, the table of errors.
+- Chapter 33: format 3 in 33.1, `rc.2` replicas in 33.5, the changes for applications in 33.6 (kinds of numbers, big integers, `json set` with a typed value, Lua, the drivers, a 1.x shell and a `decimal` key: F4), going back from format 3 in 33.7.
+- The outputs of the shell shown in the manual that changed with N2 (`[number]` to `[int]`, and the bytes of the binary example) are updated; each new example was run against the server of this commit.
+
+### 26.3 Limits
+
+- The rows of `get where` show a typed document as plain JSON; `get <key>` uses the typed syntax.
+- `sum` of decimals in the shell shows its total quoted (`Sum: "1250.60"`), since the aggregate gives it as a JSON text; programs read the same text. Seen while testing C7; left for a fix of its own.
+- The examples of the manual are not yet run by a test of their own (25.5); lot S can add one.
