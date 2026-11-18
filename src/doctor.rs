@@ -443,7 +443,7 @@ fn format_text(format: u32) -> String {
     match format {
         1 => "storage format 1 (opened by KivaDB 1.x and 2.x)".into(),
         2 => "storage format 2, dates and times (opened by KivaDB 2.x, not 1.x)".into(),
-        3 => "storage format 3, native values (opened by KivaDB 2.0.0 and later, not 2.0.0-rc.2 or 1.x)".into(),
+        3 => "storage format 3, native values (opened by KivaDB 2.0.0-rc.3 and later, not 2.0.0-rc.2 or 1.x)".into(),
         n => format!("storage format {n}"),
     }
 }
