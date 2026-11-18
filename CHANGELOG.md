@@ -77,7 +77,7 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 ### Known limits
 
-* In documents holding native values, dates, times and datetimes are queried, indexed and sorted as their ISO texts, as in JSON documents: a native date and the text `"2026-10-31"` are one value for a unique index, and sort among texts. Programs receive plain JSON, decimals and moments as texts, unless they ask for extended JSON; Redis clients always do ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md), 22).
+* In documents holding native values, dates, times and datetimes are queried, indexed and sorted as their ISO texts, as in JSON documents: a native date and the text `"2026-10-31"` are one value for a unique index, and sort among texts. The rows of `get where` show a typed document as plain JSON; `get <key>` shows its types. Programs receive plain JSON, decimals and moments as texts, unless they ask for extended JSON; Redis clients always do ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md), 22).
 * Replication does not cross major versions: a 2.0 replica refuses a 1.x master, and the other way round. Upgrade the master first ([Chapter 33](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20)).
 * Going back to 1.x: 1.7.1 refuses a workspace that received a `date`, `datetime` or `time` (storage format 2), which then comes back only from a backup made before the upgrade; it reads the accounts of 2.0 with the rules of 1.x ([33.7](DOCUMENTATION.md#337-going-back-to-1x)).
 * The change journal does not record expirations, each node keeps its own journal and cursors, and a restored backup starts a new one ([22.5](DOCUMENTATION.md#225-the-change-journal-changes-kept-read-again-from-a-cursor)).
@@ -85,7 +85,7 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 * `$time` comparisons and the date functions other than `year()` read every document of the pattern; composite indexes are unique indexes only ([11.1](DOCUMENTATION.md#111-the-condition), [11.7](DOCUMENTATION.md#117-unique-indexes)).
 * In Lua, a key of type `decimal`, `date`, `time` or `datetime` is still read as its text by `kiva.get`; write it back with the helpers to keep its type. Aggregates, `similar`, the semantic cache and the SSE events answer plain JSON in both modes ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md), 22.4).
 * A 1.x client that reads a key of type `decimal` through the binary `GET` command receives a type it does not know (13); the 1.x drivers, which use structured requests, receive its text ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md), 21.1).
-* The benchmarks of 1.7.1 and 2.0 were run on one machine, a 2-core Windows laptop with client and server together; they do not promise a gain elsewhere ([docs/v2/benchmarks/versions.md](docs/v2/benchmarks/versions.md)).
+* The benchmarks of 1.7.1 and 2.0 were run on one machine, a 2-core Windows laptop with client and server together; they do not promise a gain elsewhere. With 100 000 documents, 2.0 came out 8 to 9 % slower than 1.7.1 to write and read simple values there, within the spread of that machine; typed documents cost about what JSON documents cost ([docs/v2/benchmarks/versions.md](docs/v2/benchmarks/versions.md)).
 
 ## 1.7.1 - 2026-10-27
 

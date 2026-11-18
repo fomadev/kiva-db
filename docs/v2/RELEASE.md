@@ -7,7 +7,7 @@ What to check before each tag of 2.0, and what the tag does. Nothing here runs b
 Before the tag:
 
 1. `version = "2.0.0-rc.N"` in `Cargo.toml` (and `Cargo.lock` rebuilt). The release stops if the tag and this version differ.
-2. `main` is green on Windows, Linux and macOS, with `KIVADB_V1_BIN` (the real 1.7.1) on Linux.
+2. `main` is green on Windows, Linux and macOS, with `KIVADB_V1_BIN` (the real 1.7.1) and `KIVADB_RC2_BIN` (the real `2.0.0-rc.2`) on Linux: the homes of both open (`tests/compat.rs`, `tests/compat_rc2.rs`), one home goes from 1.7.1 through `rc.2` to this version, and the examples of the manual give the answers it shows (`tests/manual.rs`).
 3. `CHANGELOG.md` has its section `## Unreleased (2.0.0)`, with its `### Known limits`: the notes of the candidate are taken from it.
 4. The upgrade has been tried on a copy of a real 1.7.1 home, following [Chapter 33](../../DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20).
 
@@ -24,7 +24,7 @@ What the tag does (`.github/workflows/build.yml`):
 2. `## Unreleased (2.0.0)` renamed `## 2.0.0 - <date>` in `CHANGELOG.md`.
 3. The version named in the manual and the READMEs updated: the examples of `serve`, `update`, `doctor` and `stats`, the Docker tags ([29.6](../../DOCUMENTATION.md#296-docker)), `docker-compose.yml`, and [Chapter 32](../../DOCUMENTATION.md#chapter-32--limits-and-scope).
 4. A version of [Kiva Studio](https://github.com/fomadev/kiva-studio) that knows 2.0 released, since the upgrade guide points to it.
-5. The Python driver: published on PyPI, or still installed from the repository, as the maintainer decides; [24.4](../../DOCUMENTATION.md#244-python) says which.
+5. The Python driver (1.1.0): published on PyPI, or still installed from the repository, as the maintainer decides; [24.4](../../DOCUMENTATION.md#244-python) says which.
 6. This folder (`docs/v2`) archived or removed, as [IMPLEMENTATION_MATRIX.md](IMPLEMENTATION_MATRIX.md) says.
 
-The tag then publishes the release, `latest` on Docker Hub, and what `kivadb update` installs: from then on, a 1.7.1 that runs `kivadb update` moves to 2.0. It also publishes the Node.js driver of `drivers/node/package.json` on npm (1.2.0, whose `Date` is a `datetime` of 2.0), unless that version is already there.
+The tag then publishes the release, `latest` on Docker Hub, and what `kivadb update` installs: from then on, a 1.7.1 that runs `kivadb update` moves to 2.0. It also publishes the Node.js driver of `drivers/node/package.json` on npm (1.3.0: its `Date` is a `datetime` of 2.0, and `types: "extended"` reads the native values), unless that version is already there.
