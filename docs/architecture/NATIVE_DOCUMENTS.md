@@ -979,7 +979,7 @@ C6 follows section 23 and the decisions E1 to E6. Without the new option, both d
 
 ## 25. C7: preparation
 
-Nothing of this section is implemented. It prepares lot C7 (what a release needs around native values: checks, conversion, documentation), so that its review starts from written rules; the code waits for the maintainer's decisions (25.6).
+Nothing of this section is implemented. It prepares lot C7 (what a release needs around native values: checks, conversion, documentation), so that its review starts from written rules. The decisions of 25.6 are taken.
 
 State of main when it was written (`69e9ebf`): C1 to C6, N2 and R0 merged; the `CHANGELOG.md` section of 2.0.0 covers them (#113). The CI of main is green.
 
@@ -1046,6 +1046,8 @@ Recommended: **document it**, since the decimal keys are new in 2.0.0 and mixing
 3. **F3, the report of 15.2**: replaced by `convert ... check` (25.3). Recommended.
 4. **F4, a 1.x client and a `decimal` key**: documented, not changed (25.4). Recommended.
 5. **F5, documentation**: Chapter 33 and the manual pages of 25.5 in C7, so that lot S starts from a complete manual. Recommended.
+
+Taken by the maintainer on 2026-11-18, for 2.0.0: the five recommendations, F1 to F5.
 
 ### 25.7 Out of C7
 
