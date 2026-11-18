@@ -1,0 +1,26 @@
+{
+  "indexes": [],
+  "vector_indexes": [],
+  "schemas": [
+    {
+      "pattern": "place:*",
+      "spec": {
+        "name": {
+          "type": "string",
+          "required": true
+        },
+        "opens": {
+          "type": "time"
+        },
+        "kind": {
+          "enum": [
+            "hotel",
+            "park"
+          ],
+          "default": "park"
+        }
+      },
+      "indexes": []
+    }
+  ]
+}

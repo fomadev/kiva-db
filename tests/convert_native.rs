@@ -156,3 +156,72 @@ fn the_doctor_names_the_storage_format_of_each_workspace() {
         "{text}"
     );
 }
+
+/// What `convert ... check` says: (texts to convert, already converted).
+fn converted_state(s: &mut Session) -> (usize, usize) {
+    let text = ok(s, "convert order:*.created_at to datetime check");
+    let n = |after: &str| -> usize {
+        let rest = text.split(after).nth(1).unwrap_or_else(|| panic!("{text}"));
+        rest.trim_start().split(' ').next().unwrap().parse().unwrap()
+    };
+    (n("Check:"), n("to datetime ("))
+}
+
+#[test]
+fn a_crash_in_the_middle_of_a_conversion_converts_everything_or_nothing() {
+    const N: usize = 200;
+    let dir = TempDir::new("conv_crash");
+    let store = dir.path().join("data").join("store.kiva");
+    let hint = dir.path().join("data").join("store.kiva.hint");
+    {
+        let inst = open(&dir);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, "set greeting \"hello\"");
+        for i in 0..N {
+            ok(&mut s, &format!(r#"set order:{i} {{"created_at": "2026-10-{:02}T09:00:00Z", "n": {i}}}"#, i % 28 + 1));
+        }
+        drop(s);
+        inst.shutdown();
+    }
+    let before = std::fs::read(&store).unwrap();
+    assert_eq!(format_of(&dir), 1);
+    {
+        let inst = open(&dir);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, "convert order:*.created_at to datetime");
+        drop(s);
+        inst.shutdown();
+    }
+    let after = std::fs::read(&store).unwrap();
+    assert_eq!(format_of(&dir), 3);
+    // The conversion only appended, behind a header raised to 3.
+    assert_eq!(&after[8..before.len()], &before[8..], "appended, not rewritten");
+    let written = after.len() - before.len();
+
+    // The file cut at 64 places of the transaction, and at its last byte.
+    let mut cuts: Vec<usize> = (0..64).map(|k| before.len() + written * k / 64).collect();
+    cuts.push(after.len() - 1);
+    for cut in cuts {
+        std::fs::write(&store, &after[..cut]).unwrap();
+        let _ = std::fs::remove_file(&hint);
+        let inst = open(&dir);
+        let mut s = Session::new(inst.clone(), true, None);
+        assert_eq!(converted_state(&mut s), (N, 0), "cut at {cut} of {}: nothing converted", after.len());
+        assert_eq!(ok(&mut s, "get greeting"), "greeting: hello [string]");
+        assert_eq!(ok(&mut s, "count order:*"), format!("Count: {N}"));
+        assert_eq!(ok(&mut s, "get order:7.created_at").rsplit(' ').next().unwrap(), "[string]");
+        assert!(ok(&mut s, "check").contains("CORRUPTED: 0"), "cut at {cut}");
+        // A header raised before the crash stays raised, with no typed record.
+        assert_eq!(format_of(&dir), 3);
+        drop(s);
+        inst.shutdown();
+    }
+
+    // The whole file: everything converted.
+    std::fs::write(&store, &after).unwrap();
+    let _ = std::fs::remove_file(&hint);
+    let inst = open(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    assert_eq!(converted_state(&mut s), (0, N));
+    assert_eq!(ok(&mut s, "get order:7.created_at").rsplit(' ').next().unwrap(), "[datetime]");
+}

@@ -1158,3 +1158,19 @@ Pull requests: the tests of G1 and G2; the test of the manual and what it finds 
 ### 27.9 Out of S
 
 Kiva Studio (needed by the release, not the candidate); the publication of the drivers on npm and PyPI; the random functions R1 to R4; the pushing of any tag.
+
+## 28. S as built
+
+S follows section 27 and the decisions G1 to G6, in the pull requests listed in 27.8.
+
+### 28.1 Compatibility with `rc.2` and the crash of a conversion (G1, G2)
+
+- **`tests/fixtures/v2.0.0-rc.2`**: a home written by the published `rc.2` for Windows (its `SHA256SUMS.txt` checked) from `tests/fixtures/v2.0.0-rc.2.kva`. It holds dates, datetimes and times as keys (format 2), documents and their indexes (secondary, hash, unique ignoring case), an expiry, an HNSW graph, the project `travel` with two workspaces, a schema with a default, two accounts with grants on the project and a default workspace, and a change journal with a consumer. The journal is kept 3650 days, so that the fixture does not expire. The paths of `kiva.conf` are `@HOME@`, and the lock files and `audit.log` are left out.
+- **`tests/compat_rc2.rs`**:
+  - this version opens a copy and finds all of it: the indexes are used, the unique index refuses, the graph is read, the schema checks and fills in, and the accounts sign in with their grants;
+  - the consumer of the journal reads the 16 changes of `rc.2`, then a change of this version (#17);
+  - a typed document, a `decimal` key and `convert ... to decimal` raise the format to 3, workspace by workspace, and everything is there after compaction and reopening;
+  - `doctor` gives format 2, then 3, and does not write;
+  - the fixture is never changed.
+- **The path of an upgrade** (`a_home_goes_from_1_7_1_through_rc_2_to_this_version`): one home is written by the real 1.7.1, then by the real `rc.2` (its accounts migrated, a date: format 2), then by this version (`convert`, `sum` of decimals: format 3). `doctor` reads it, and `rc.2` then refuses it. The test runs when `KIVADB_V1_BIN` and `KIVADB_RC2_BIN` are given, as in the CI on Linux; it was also run on Windows with the published executables.
+- **The crash of a conversion** (`tests/convert_native.rs`, `a_crash_in_the_middle_of_a_conversion_converts_everything_or_nothing`): 200 documents are converted, and the file is then cut at 64 places of the transaction and at its last byte. At every cut nothing is converted, the other keys are there and `check` finds nothing damaged. The header stays at 3 with no typed record, as 27.3 says. The whole file holds the 200 conversions.
