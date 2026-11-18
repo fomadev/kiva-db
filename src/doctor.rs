@@ -356,6 +356,8 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
     spaces.extend(cfg.workspaces().into_iter().map(|(n, d)| (n, PathBuf::from(d))));
     spaces.push(("system".into(), home.join("system")));
     let (mut records, mut checked, mut empty, mut damaged) = (0u64, 0usize, 0usize, false);
+    // The format of each workspace, said after the summary of the records.
+    let mut formats = Vec::new();
     // Without its key, an encrypted workspace's documents are not read here.
     let keys = crate::crypt::Keys::load(cfg).ok().flatten();
     for (name, dir) in spaces {
@@ -381,6 +383,7 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
             Ok(n) => {
                 records += n;
                 checked += 1;
+                formats.push(storage_format(&name, &file));
                 if meta_ok {
                     unique(r, &name, &file, keys.as_deref());
                 }
@@ -417,6 +420,31 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
             format!("{checked} file(s), {records} record(s), every checksum matches{empty}"),
             None,
         );
+    }
+    for (level, message) in formats {
+        r.add(level, "Data", message, None);
+    }
+}
+
+/// The storage format of a workspace's file and the versions that open it
+/// (NATIVE_DOCUMENTS.md 25.2): what to look at before going back to an
+/// older KivaDB.
+fn storage_format(name: &str, file: &Path) -> (Level, String) {
+    let mut head = vec![0u8; crate::format::FILE_HEADER_LEN as usize];
+    let read = std::fs::File::open(file).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head));
+    match read.map_err(|e| e.to_string()).and_then(|_| crate::format::parse_file_header(&head)) {
+        Ok((_, format)) => (Level::Ok, format!("workspace '{name}': {}", format_text(format))),
+        Err(e) => (Level::Warn, format!("workspace '{name}': its format cannot be read ({e})")),
+    }
+}
+
+/// A storage format as `doctor` explains it.
+fn format_text(format: u32) -> String {
+    match format {
+        1 => "storage format 1 (opened by KivaDB 1.x and 2.x)".into(),
+        2 => "storage format 2, dates and times (opened by KivaDB 2.x, not 1.x)".into(),
+        3 => "storage format 3, native values (opened by KivaDB 2.0.0 and later, not 2.0.0-rc.2 or 1.x)".into(),
+        n => format!("storage format {n}"),
     }
 }
 

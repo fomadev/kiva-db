@@ -2361,7 +2361,22 @@ impl Session {
     }
 
     fn cmd_convert(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: convert <key> to msgpack|json";
+        const USAGE: &str =
+            "Usage: convert <key> to msgpack|json | convert <pattern>.<field> to date|datetime|time|decimal [check]";
+        // `convert order:*.created_at to datetime [check]`: a field of every
+        // document of a pattern, from its text to a native value.
+        if let [target, to, ty, rest @ ..] = a {
+            let native = Type::from_name(&ty.text.to_ascii_lowercase())
+                .filter(|t| matches!(t, Type::Date | Type::DateTime | Type::Time | Type::Decimal));
+            if let (true, Some(native)) = (to.is_kw("to"), native) {
+                let check = match rest {
+                    [] => false,
+                    [c] if c.is_kw("check") => true,
+                    _ => return Err(USAGE.into()),
+                };
+                return self.convert_field(&target.text, native, check, out);
+            }
+        }
         let [k, to, fmt] = a else {
             return Err(USAGE.into());
         };
@@ -2397,6 +2412,89 @@ impl Session {
         let (before, after) = (value.encode(meta.msgpack)?.len(), value.encode(msgpack)?.len());
         self.kv_put(&key, value, meta.expires_at, msgpack)?;
         out.say(format!("OK: {key} converted to {name} ({before} -> {after} bytes)."));
+        Ok(())
+    }
+
+    /// `convert <pattern>.<field> to <type> [check]` (NATIVE_DOCUMENTS.md
+    /// 25.3): every text of the field read as the type, in ISO only, all or
+    /// nothing; `check` counts and names the refusals, and writes nothing.
+    fn convert_field(&mut self, target: &str, ty: Type, check: bool, out: &mut Out) -> R {
+        let (pattern, field) = split_target(target)?;
+        let path = jsonpath::parse_path(&field)?;
+        let tag = match ty {
+            Type::Date => "$date",
+            Type::DateTime => "$datetime",
+            Type::Time => "$time",
+            _ => "$decimal",
+        };
+        let name = ty.name();
+        let (mut changes, mut already, mut without, mut bad) = (Vec::new(), 0usize, 0usize, Vec::new());
+        for (key, _) in self.engine.keys_matching(&pattern, 0) {
+            let Some((value, meta)) = self.kv_get(&key)? else { continue };
+            let mut d = match value {
+                Value::Typed(d) => d,
+                Value::Doc(j) => doc::from_json(&j),
+                _ => continue,
+            };
+            let converted = match docpath::get(&d, &path) {
+                None | Some(Doc::Null) => {
+                    without += 1;
+                    continue;
+                }
+                Some(leaf) if leaf.type_name() == name => {
+                    already += 1;
+                    continue;
+                }
+                Some(Doc::Str(s)) => doc::from_extended_json(&serde_json::json!({ tag: s })),
+                Some(other) => Err(format!("a {}, not a text", other.type_name())),
+            };
+            match converted {
+                Ok(leaf) => {
+                    docpath::set(&mut d, &path, leaf)?;
+                    changes.push((key, d, meta.expires_at));
+                }
+                Err(e) => {
+                    let shown = docpath::get(&d, &path).map(|l| doc::to_plain_json(l).to_string()).unwrap_or_default();
+                    bad.push(format!("{key} ({shown}: {e})"));
+                }
+            }
+        }
+        let counts = format!("{already} already {name}, {without} without {field}");
+        if !bad.is_empty() {
+            let more = if bad.len() > 10 { format!(" and {} more", bad.len() - 10) } else { String::new() };
+            let list = bad.iter().take(10).cloned().collect::<Vec<_>>().join("; ");
+            let what = if check { "Check" } else { "Nothing converted" };
+            return Err(format!(
+                "{what}: {} document(s) of {pattern} hold a {field} that does not read as a {name} in ISO: {list}{more}",
+                bad.len()
+            ));
+        }
+        if check {
+            out.say(format!(
+                "Check: {} document(s) of {pattern} to convert to {name} ({counts}); nothing written.",
+                changes.len()
+            ));
+            return Ok(());
+        }
+        let n = changes.len();
+        // One transaction, unless the session already holds one.
+        let own = self.txn.is_none() && n > 0;
+        if own {
+            self.begin()?;
+        }
+        for (key, d, expires_at) in changes {
+            let written = Value::typed(d).and_then(|v| self.kv_put(&key, v, expires_at, false));
+            if let Err(e) = written {
+                if own {
+                    self.rollback();
+                }
+                return Err(format!("Nothing converted: {key}: {e}"));
+            }
+        }
+        if own {
+            self.commit()?;
+        }
+        out.say(format!("Converted: {n} document(s) of {pattern} to {name} ({counts})."));
         Ok(())
     }
 
