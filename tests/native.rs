@@ -684,6 +684,6 @@ fn a_home_without_typed_documents_still_opens_in_2_0_0_rc_2() {
     assert!(success, "{text}");
     assert_eq!(
         text.lines().collect::<Vec<_>>(),
-        ["native:1.n: 2 [int]", "born: 2004-05-09 [date]", "greeting: hello [string]"]
+        ["native:1.n: 2 [number]", "born: 2004-05-09 [date]", "greeting: hello [string]"]
     );
 }
