@@ -845,7 +845,7 @@ The tests written before C5 are unchanged: plain JSON is what they read.
 
 ## 23. C6: preparation
 
-Nothing of this section is implemented. It prepares lot C6 (the Node.js and Python drivers read and write native values through extended JSON), so that its review starts from written rules; the code waits for the maintainer's decisions (23.6).
+Nothing of this section is implemented. It prepares lot C6 (the Node.js and Python drivers read and write native values through extended JSON), so that its review starts from written rules. The decisions of 23.6 are taken.
 
 State of main when it was written (`9428588`): C1 to C5, N2 and R0 merged; C5 (#109) answers extended JSON to requests that ask for it (section 22). The CI of main is green on `9428588`.
 
@@ -940,6 +940,8 @@ Conditions: in both modes, `Decimal`, `date`, `time` and aware `datetime` object
 4. **E4, Python decimals in plain mode**: refused with a hint (23.4). Recommended.
 5. **E5, conditions**: native objects written as tags in both modes (23.3, 23.4). Recommended.
 6. **E6, versions**: the drivers become Node.js 1.3.0 and Python 1.1.0 (additive, plain by default); nothing is published to npm or PyPI before the maintainer says so.
+
+Taken by the maintainer on 2026-11-18, for 2.0.0: the six recommendations, E1 to E6.
 
 ### 23.7 Out of C6
 
