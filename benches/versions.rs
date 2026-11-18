@@ -16,6 +16,9 @@
 //! output and every measurement to `KIVADB_BENCH_OUT` (`bench-versions.json`).
 //! The servers run with their default settings, except the case with
 //! `sync_writes`. Every answer is checked, so that both did the same work.
+//! The cases of orders compare, within one version that has them (2.0.0),
+//! the same orders as typed documents (`KDOC`) and as JSON; a version
+//! without typed values shows none.
 
 use kivadb::client::Client;
 use kivadb::value::Value;
@@ -350,7 +353,68 @@ fn run(bin: &Path, label: &str, n: usize, round: usize) -> (Results, Facts) {
         e.time(|| c.set(&format!("d:{i:07}"), &s(100, i), 0).unwrap());
     }
     wall(&mut r, "write with sync_writes (fsync)", durable as u64, t);
+    drop((c, srv));
+
+    orders(bin, &tag, n, &mut r);
     (r, facts)
+}
+
+/// The same N/4 orders as JSON (a float, a text) and as typed documents (a
+/// decimal, a datetime), on a server of their own: written, read, queried.
+/// Only for a version that has typed values.
+fn orders(bin: &Path, tag: &str, n: usize, r: &mut Results) {
+    let srv = Server::new(bin, &format!("{tag}_orders"), false);
+    let mut c = srv.client();
+    if c.exec(r#"set probe {"d": decimal "1"}"#).is_err() {
+        return;
+    }
+    let count = (n / 4).max(500);
+    let body = |typed: bool, i: usize| {
+        let (units, cents, day) = (10 + i % 2000, i % 100, 1 + i % 28);
+        if typed {
+            format!(
+                r#"{{"total": decimal "{units}.{cents:02}", "at": datetime "2026-10-{day:02}T10:00:00Z", "city": "city{}"}}"#,
+                i % 100
+            )
+        } else {
+            format!(r#"{{"total": {units}.{cents:02}, "at": "2026-10-{day:02}T10:00:00Z", "city": "city{}"}}"#, i % 100)
+        }
+    };
+    let mut answers = Vec::new();
+    for (kind, typed) in [("JSON", false), ("typed", true)] {
+        let prefix = if typed { "ot" } else { "oj" };
+        let name = format!("orders, {kind}: write");
+        let t = Instant::now();
+        let e = r.entry(name.clone()).or_default();
+        for i in 0..count {
+            e.time(|| c.exec(&format!("set {prefix}:{i:07} {}", body(typed, i))).unwrap());
+        }
+        r.get_mut(&name).unwrap().ops = count as u64;
+        r.get_mut(&name).unwrap().wall = t.elapsed();
+
+        let name = format!("orders, {kind}: read");
+        let t = Instant::now();
+        let e = r.entry(name.clone()).or_default();
+        for k in 0..count {
+            let i = (k * 7919) % count;
+            assert!(e.time(|| c.get(&format!("{prefix}:{i:07}")).unwrap()).is_some());
+        }
+        r.get_mut(&name).unwrap().ops = count as u64;
+        r.get_mut(&name).unwrap().wall = t.elapsed();
+
+        let name = format!("orders, {kind}: query");
+        let bound = if typed { r#"decimal "1500.50""# } else { "1500.50" };
+        let t = Instant::now();
+        let e = r.entry(name.clone()).or_default();
+        let mut got = String::new();
+        for _ in 0..20 {
+            got = e.time(|| c.exec(&format!("count where {prefix}:*.total > {bound}")).unwrap());
+        }
+        r.get_mut(&name).unwrap().ops = 20;
+        r.get_mut(&name).unwrap().wall = t.elapsed();
+        answers.push(got);
+    }
+    assert_eq!(answers[0], answers[1], "the JSON and typed orders answer the same");
 }
 
 fn main() {
@@ -394,13 +458,23 @@ fn main() {
         }
     };
     let labels: Vec<&String> = all.keys().collect();
-    let cases: Vec<String> = all[labels[0]][0].0.keys().cloned().collect();
+    // Every case of every version: the cases of orders exist in 2.0 only.
+    let cases: Vec<String> = all
+        .values()
+        .flat_map(|runs| runs[0].0.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let mut out = json!({ "n": n, "rounds": rounds, "versions": {} });
     println!("| Case | Version | Median (µs) | p95 (µs) | p99 (µs) | Operations/s |");
     println!("| :--- | :--- | ---: | ---: | ---: | ---: |");
     for case in &cases {
         for l in &labels {
             let runs = &all[*l];
+            if !runs[0].0.contains_key(case) {
+                println!("| {case} | {l} | — | — | — | — |");
+                continue;
+            }
             let stat = |f: &dyn Fn(&Sample) -> f64| median(runs.iter().map(|(r, _)| f(&r[case])).collect());
             let (p50, p95, p99) = (stat(&|s| s.pct(0.5)), stat(&|s| s.pct(0.95)), stat(&|s| s.pct(0.99)));
             let rate = stat(&|s| s.ops as f64 / s.wall.as_secs_f64());

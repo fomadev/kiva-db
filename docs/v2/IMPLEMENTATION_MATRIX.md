@@ -33,7 +33,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 17 | strengthen | backup and restore | existing | `kivadb backup`, `restore --check` (SHA-256 of the archive and of every file, every record), `tests/backup.rs` | |
 | 18 | strengthen | authentication and permissions | done | 2.0 grants on scopes and projects, no implicit workspace ([16.4](../../DOCUMENTATION.md#164-workspaces-and-grants)), `tests/commands.rs` | |
 | 19 | strengthen | TLS and encryption at rest | existing | `tests/tls.rs`, `tests/encryption.rs`; an encrypted home of 1.7.1 opens with its key and not without (`tests/compat.rs`) | |
-| 20 | test | compatibility with 1.x | done | `tests/fixtures/v1.7.1*`, made by the 1.7.1 executable from `v1.7.1.kva`; `tests/compat.rs`, which also runs the real 1.7.1 in CI (Linux) to go back | a fixture per later release |
+| 20 | test | compatibility with 1.x | done | `tests/fixtures/v1.7.1*`, made by the 1.7.1 executable from `v1.7.1.kva`; `tests/compat.rs`, which also runs the real 1.7.1 in CI (Linux) to go back; a home written by the published `2.0.0-rc.2` (`tests/fixtures/v2.0.0-rc.2`, `tests/compat_rc2.rs`), and one home taken from the real 1.7.1 through the real `rc.2` to this version in CI ([28.1](../architecture/NATIVE_DOCUMENTS.md#281-compatibility-with-rc2-and-the-crash-of-a-conversion-g1-g2)) | a fixture per later release |
 | 39 | document | migration guide | done | [Chapter 33](../../DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20): one server, Docker, a replication group, applications, going back; the replication between 1.x and 2.x refused both ways (`replication_never_crosses_major_versions`, against the real 1.7.1 in CI) | |
 
 ## P1
@@ -48,16 +48,32 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 | 26 | modify | cache invalidation | existing | `the_value_cache_serves_hot_keys_and_never_returns_stale_data`, `the_value_cache_stays_within_its_budget` | |
 | 27 | strengthen | HNSW | existing | recall and `tune` tests in `tests/power.rs`, graph of 1.7.1 read back (`tests/compat.rs`) | |
 | 28 | strengthen | semantic cache | existing | `tests/semantic_cache.rs`, `depends` invalidation | |
-| 29 | add | Python driver | done | `drivers/python` (1.0.0, standard library only, typed), `tests/test_driver.py` against a real server, `.github/workflows/python-driver.yml` (Windows, Linux, macOS; Python 3.10, 3.12, 3.14; `mypy --strict`; wheel contents), [24.4](../../DOCUMENTATION.md#244-python); the `changes` structured request (`the_structured_request_reads_the_journal_like_rest`) | publishing on PyPI: the maintainer's decision (package name, token) |
-| 30 | modify | Node.js driver | done | 1.2.0, `Date` as `datetime` | |
+| 29 | add | Python driver | done | `drivers/python` (1.1.0, standard library only, typed; `types="extended"` gives `Decimal`, `date`, `time` and `datetime`), `tests/test_driver.py` against a real server, `.github/workflows/python-driver.yml` (Windows, Linux, macOS; Python 3.10, 3.12, 3.14; `mypy --strict`; wheel contents), [24.4](../../DOCUMENTATION.md#244-python); the `changes` structured request (`the_structured_request_reads_the_journal_like_rest`) | publishing on PyPI: the maintainer's decision (package name, token) |
+| 30 | modify | Node.js driver | done | 1.3.0: `Date` as `datetime`; `types: "extended"` gives `BigInt` beyond 2^53 and decimals as texts or a class of the application ([24.3](../../DOCUMENTATION.md#243-nodejs)) | publishing on npm: with the release only (`RELEASE.md`) |
 | 31 | modify | REST and binary protocol | existing | dates as ISO 8601 in UTC on every interface | |
 | 32 | strengthen | Redis compatibility | existing | `tests/redis-clients/check.mjs` (ioredis, node-redis, rate limiters) in CI | |
 | 33 | add | latency metrics | done | `kiva_request_duration_seconds` histogram, `GET /ready`, [27.2](../../DOCUMENTATION.md#272-prometheus) | |
-| 34 | add | reproducible benchmarks | done | `benches/versions.rs`: real servers of 1.7.1 and 2.0 given the same work through the binary protocol, in rounds taking turns, every answer checked; 2 000, 20 000 and 100 000 documents; median, p95, p99, throughput, memory, CPU, disk, compaction, start after a stop and after a crash; [results and method](benchmarks/versions.md), every round in [`benchmarks/runs`](benchmarks/runs). The planner on its own: [queries.md](benchmarks/queries.md) | one machine (a 2-core laptop, client and server together); the same run on a server, and on Linux, would add to it |
+| 34 | add | reproducible benchmarks | done | `benches/versions.rs`: real servers of 1.7.1 and 2.0 given the same work through the binary protocol, in rounds taking turns, every answer checked; 2 000, 20 000 and 100 000 documents, 3 rounds each; median, p95, p99, throughput, memory, CPU, disk, compaction, start after a stop and after a crash; the same orders as typed documents and as JSON in 2.0. Run again on `main` at `7c62009`, with the native values: [results and method](benchmarks/versions.md), every round in [`runs`](benchmarks/runs). The planner on its own: [queries.md](benchmarks/queries.md) | one machine (a 2-core laptop, client and server together); no run on Linux, since the shared CI runners are too noisy to publish |
 | 35 | modify | Kiva Studio | partial | [fomadev/kiva-studio](https://github.com/fomadev/kiva-studio): projects, grants on scopes, default workspaces, sessions in no workspace, `can_compact`, the types of 2.0 | `doctor` stays a command of the server's machine: Studio connects over the network and cannot read the home |
 | 36 | modify | CLI and shell | partial | `kivadb doctor` | |
 | 37 | strengthen | replication and failover | existing + done | `tests/failover.rs`; clock drift between nodes (2.0) | |
 | 38 | modify | CI and packaging | done | `cargo fmt --check`; Python driver in CI; release candidates as pre-releases (notes from "Unreleased", own Docker tag, never `latest`), the tag checked against `Cargo.toml`; `kivadb update` orders a candidate before its release | |
+
+## Native values (2.0.0)
+
+Decimals, dates, times and datetimes kept as such inside documents, and typed numeric keys ([NATIVE_DOCUMENTS.md](../architecture/NATIVE_DOCUMENTS.md)). Each lot passed the whole test suite and its CI on Windows, Linux and macOS.
+
+| Lot | Item | Status | Proof | Left |
+| :- | :- | :- | :- | :- |
+| C1 | the `Doc` tree and its binary encoding `KDOC` | done | `src/doc.rs`, unit and property tests, a fuzz target | |
+| C2 | typed documents in the engine, storage format 3 raised on need, `rc.2` replicas refused | done | `tests/native.rs` (also against the real `rc.2` and 1.7.1 in CI), backup manifest format 2 | |
+| C3 | queries, indexes, sorting, aggregates, schemas and `json incr` on native values, exactly | done | `tests/native_queries.rs` | dates compare as their ISO texts (`CHANGELOG.md`, "Known limits") |
+| C4 | typed literals in the shell (`decimal "..."`, `date "..."`, `now()`) | done | `tests/typed_literals.rs`, [10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents) | |
+| N2 | `int`, `float` and `decimal` keys; untyped big integers refused | done | `tests/numeric_keys.rs`, [5.2](../../DOCUMENTATION.md#52-number) | |
+| C5 | extended JSON for programs (REST, structured requests, binary protocol, changes), Lua typed values | done | `tests/extended_json.rs`, [20.4](../../DOCUMENTATION.md#204-structured-requests-for-tools), [26](../../DOCUMENTATION.md#chapter-26--lua-scripting) | aggregates, `similar`, SSE answer plain JSON |
+| C6 | the drivers' `types` option | done | `drivers/node/test/extended.test.js`, `drivers/python/tests/test_extended.py` | |
+| C7 | `doctor` names the storage format; `convert <pattern>.<field> to date\|datetime\|time\|decimal [check]`; Chapter 33 | done | `tests/convert_native.rs`, [33](../../DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20) | |
+| S | a home of `rc.2`, the path 1.7.1 → `rc.2` → 2.0.0, a crash during `convert`, the examples of the manual run, benchmarks | done | `tests/compat_rc2.rs`, `tests/manual.rs`, [benchmarks/versions.md](benchmarks/versions.md) | the candidate `2.0.0-rc.3` |
 
 ## P2 and later
 

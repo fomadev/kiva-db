@@ -1199,3 +1199,17 @@ S follows section 27 and the decisions G1 to G6, in the pull requests listed in 
   - the conversion of 10.10 is now a real one, on four documents.
 - **Not covered**: the other chapters (REST, replication, operation), whose examples need a server, a network or a second machine. A block of theirs is added to the test when it changes.
 - The manual's conventions say what `...` means in an answer, and that these chapters are run by the tests.
+
+### 28.3 Benchmarks and the pages of a release (G3, G5)
+
+- **`benches/versions.rs`** gains the orders of 27.4. On a server of their own, after the other cases, N/4 orders are written as JSON (a float and a text) and as typed documents (`decimal`, `datetime`), then read, then counted by a condition on the total. Both counts must agree. A version without typed values, 1.7.1, shows none; the table gives it `—`.
+- **Run again** on the laptop of the earlier runs: `main` at `7c62009` against the tag `v1.7.1`, both built by `rustc 1.99.0`, at 2 000, 20 000 and 100 000 documents, 3 rounds each. `docs/v2/benchmarks/versions.md` is rewritten from these runs. The earlier runs are kept in `runs/a15abdb`, together with a first run of 100 000 documents in 2 rounds, which one disturbed round made unclear.
+- **What it says:**
+  - On 2 000 and 20 000 documents, 2.0 runs at the speed of 1.7.1, within the noise of the machine.
+  - On 100 000 documents, 2.0 is 8 to 9 % slower to write and read simple values and 5 % slower on transactions, with 7 % more CPU time. That is within the spread of the machine, but in every round but one, so it is written in `versions.md` and in the "Known limits" of `CHANGELOG.md`.
+  - Typed orders are written 4 % faster to 10 % slower than JSON orders, read at the same speed, and queried 2 to 6 % faster.
+- **Pages:**
+  - `IMPLEMENTATION_MATRIX.md`: a section for the native values (C1 to C7, N2, S) with their proofs, the fixture of `rc.2`, the drivers at 1.3.0 and 1.1.0, and the benchmarks.
+  - `RELEASE.md`: the checklist of a candidate names `KIVADB_RC2_BIN`, the path through `rc.2` and the test of the manual, and the drivers are at 1.3.0 and 1.1.0.
+  - `CHANGELOG.md`: the rows of `get where` and the benchmarks in "Known limits".
+- **Not done:** a run on Linux, since the shared CI runners are too noisy to publish (27.4).
