@@ -598,7 +598,10 @@ fn date_formats_follow_the_session_then_the_account_then_the_server() {
     assert_eq!(get(&mut admin, "opens")["value"], "08:30:00");
     ok(&mut admin, r#"set doc:1 {"a": 1}"#);
     ok(&mut admin, r#"json set doc:1 .day date "01-01-2027""#);
-    assert_eq!(ok(&mut admin, "get doc:1"), "doc:1: {\"a\":1,\"day\":\"2027-01-01\"} [object]");
+    // A native date since C4 (NATIVE_DOCUMENTS.md 19.6), shown in the session's format;
+    // programs still receive its ISO text.
+    assert_eq!(ok(&mut admin, "get doc:1"), "doc:1: {\"a\": 1, \"day\": date \"01-01-2027\"} [object]");
+    assert_eq!(get(&mut admin, "doc:1")["value"]["day"], "2027-01-01");
 
     // `format iso` and `format default`.
     ok(&mut admin, "format iso");
@@ -1153,10 +1156,11 @@ fn dates_times_and_datetimes() {
     assert_eq!(ok(&mut s, "print hour(created_at), weekday(born), minute(opens)"), "14 7 0");
     assert!(fails(&mut s, "print month(42)").contains("takes a date, a time or a datetime"));
 
-    // Documents keep their dates as ISO text, compared as moments.
+    // A moment set in a document is a native datetime since C4 (NATIVE_DOCUMENTS.md 19.6).
     ok(&mut s, "set doc {}");
     ok(&mut s, "json set doc .seen now()");
-    assert!(ok(&mut s, "get doc.seen").contains("Z"));
+    assert!(ok(&mut s, "get doc.seen").ends_with("[datetime]"));
+    // Documents written as ISO texts keep them, compared as moments.
     for (k, at) in [
         ("o:1", "2026-10-27T13:30:00Z"),
         ("o:2", "2026-12-31T23:30:00Z"),

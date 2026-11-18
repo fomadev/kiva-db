@@ -656,3 +656,40 @@ Queries give the same answers either way, since a native date is judged as its I
 ### 19.8 Out of C4
 
 Extended JSON in REST and the protocols, and `kiva.decimal()` in Lua (C5); the drivers (C6); `int`, `float` and `decimal` keys (N2); `convert ... to date`, and the replication and backup checks (C7); the random functions R1 to R4. C4 prepares no candidate, tag or release.
+
+## 20. C4 as built
+
+C4 lets the shell write native values: typed literals at any depth, exact conditions on decimals, and increments with a typed operand. Programs still send and receive plain JSON (C5).
+
+### 20.1 What changed
+
+| Piece | Built |
+| :--- | :--- |
+| Parser | `src/literal.rs`: recursive descent over the `Kind::Json` token, producing a `Doc`. `exec::parse_doc` gives the token to `serde_json` first and to this parser only when that fails; a literal holding no type word keeps the error of `serde_json` |
+| Grammar | the type words of 19.1 and the moments `now()`, `today()`, `current_timestamp`, `current_date`, `current_time`, followed or not by `+ 30 days`, `- 2 hours`... ([TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) 5.2) |
+| Writes | `set`, `update`, `add`, a value given to `rename` and `.kva` files read typed literals through `parse_doc`; `Value::typed` writes a document holding a native value in `KDOC` and the others in JSON |
+| `json set`, `append`, `insert` | read a typed value (`date "..."`, `decimal "..."`, `int 7`, `uuid "..."`, a typed document). A value JSON cannot hold changes a JSON document as a typed tree, which is then written in `KDOC` (19.6, option A); other values keep the code of 2.0 |
+| `json incr` | `decimal "-100.25"`, `float 0.1`, `int 3`, by the rules of 2.2; the untyped rule of C3 is unchanged |
+| Conditions | `decimal "..."`, `int`, `float`, `number`, `uuid`, `string`, `bool` before the value of `=`, `!=`, `<`, `<=`, `>`, `>=`, and typed values in `in [...]`. A decimal travels as `{"$decimal": "..."}` (`num::cond_decimal`), is compared by `NumKey::Decimal`, and is looked up in B-tree and hash indexes by `SKey::from_cond`. `explain` writes it back as `decimal "..."` |
+| Display | `get` shows a typed document in the typed syntax, its dates and times in the session's formats: what is shown can be typed back |
+
+### 20.2 Tests
+
+`tests/typed_literals.rs` has 7 tests:
+
+- the example of 19.1 written, read with `json type`, shown and typed back, and reopened; `update`, `add` and an array at the top; the file at format 3;
+- a literal of JSON types only (`uuid`, `int`, `float 8`, `string`, `bool`) written in JSON, the file below format 3; a type word inside a text or a key is text;
+- refusals with their line, column and path, the plain JSON error kept, and an hour skipped by summer time;
+- `decimal "0.1"`, `1250.50`, `float 0.1`, `in`, ranges, `and`, `or`, `!=` and `uuid` conditions, giving the same keys without an index, with a B-tree, with a hash index and after a reopen;
+- typed increments, their refusals, the untyped rule, a decimal operand turning a JSON document into `KDOC`, an int operand keeping it JSON;
+- `json set`, `append` and `insert` of native values into a JSON document (19.6), and queries answering as before;
+- a unique index taking `decimal "10.50"`, `10.5` and `decimal "10.5000"` for one value.
+
+`src/literal.rs` adds unit tests of the grammar, the errors, the depth limit, uuids, scalars and the display.
+
+### 20.3 Limits
+
+- `json type` and `json get` name an `int` or a `float` `number`, as C3 does; the native kinds named are `decimal`, `date`, `time` and `datetime`.
+- A literal deeper than 128 levels whose first type word comes after the limit is refused by `serde_json`'s message (recursion limit), not by the typed parser's.
+- Structured requests share the check of condition values, so a `{"$decimal": "..."}` there is accepted already; it is documented and tested with extended JSON (C5).
+- REST bodies, the binary protocol, Redis `JSON.SET`, Lua and the drivers send plain JSON until C5 and C6.

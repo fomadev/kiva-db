@@ -632,6 +632,9 @@ pub fn time_json(t: NaiveTime) -> Json {
 /// A condition value as it is written: `datetime "2026-10-27 14:30:00 +01:00"`
 /// for a moment, the JSON otherwise.
 pub fn show_value(j: &Json) -> String {
+    if let Some(d) = crate::num::cond_decimal(j) {
+        return format!("decimal \"{d}\"");
+    }
     match tagged(j) {
         Some(("$datetime", text)) => match parse_datetime(text, &Zone::Utc) {
             Ok(at) => format!("datetime \"{}\"", show(at)),

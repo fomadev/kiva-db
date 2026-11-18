@@ -178,12 +178,66 @@ pub(crate) fn json_literal(text: &str) -> Result<Json, String> {
 }
 
 fn parse_doc(text: &str, want: Option<Type>) -> Result<Value, String> {
-    let j = json_literal(text)?;
-    match (&j, want) {
-        (Json::Array(_), None | Some(Type::Array)) | (Json::Object(_), None | Some(Type::Object)) => Ok(Value::Doc(j)),
+    let value = match json_literal(text) {
+        Ok(j) => Value::Doc(j),
+        // Not plain JSON: a typed literal (NATIVE_DOCUMENTS.md 19), or the JSON error.
+        Err(plain) => Value::typed(crate::literal::document(text, plain)?).map_err(|e| e.to_string())?,
+    };
+    match (value.ty(), want) {
+        (Type::Array, None | Some(Type::Array)) | (Type::Object, None | Some(Type::Object)) => Ok(value),
         (_, Some(t)) => Err(format!("Value is not a JSON {}.", t.name())),
         _ => Err("Value is not a JSON array or object.".into()),
     }
+}
+
+/// A document literal read as a typed tree: plain JSON as it is, a typed
+/// literal with its types.
+fn doc_literal(text: &str) -> Result<Doc, String> {
+    match json_literal(text) {
+        Ok(j) => Ok(doc::from_json(&j)),
+        Err(plain) => crate::literal::document(text, plain),
+    }
+}
+
+/// A value of a command as a typed value: `json set`, `json append`,
+/// `json insert`. A moment (`date "..."`, `now()`) is a native date, time or
+/// datetime; a scalar type word (`decimal "0.1"`, `int 25`, `uuid "..."`)
+/// reads the token after it; anything else is read as `set` reads it.
+fn doc_value(c: &mut Cur, key: &str) -> Result<Doc, String> {
+    if let Some(v) = time_expr(c) {
+        return Ok(match v? {
+            Value::Date(d) => Doc::Date(d),
+            Value::DateTime(t) => {
+                Doc::DateTime(chrono::DateTime::from_timestamp_millis(t.timestamp_millis()).unwrap_or(t))
+            }
+            Value::Time(t) => Doc::Time(t),
+            other => doc::from_json(&other.to_json()),
+        });
+    }
+    if let Some(d) = typed_scalar(c) {
+        return d;
+    }
+    let t = c.next().ok_or("Syntax error. Missing value.")?;
+    if t.kind == Kind::Json {
+        return doc_literal(&t.text);
+    }
+    Ok(match parse_value(t, None, key)? {
+        Value::Typed(d) => d,
+        other => doc::from_json(&other.to_json()),
+    })
+}
+
+/// `decimal "0.1"`, `int 25`, `float 0.5`, `uuid "..."`, `string "x"`,
+/// `bool true`, `number 8` at the cursor: `None` (nothing read) when the
+/// tokens do not start one.
+fn typed_scalar(c: &mut Cur) -> Option<Result<Doc, String>> {
+    let w = c.peek().filter(|t| t.is_bare() && crate::literal::is_scalar_type(&t.text))?;
+    let v = c.rest().get(1).filter(|t| t.is_quoted() || t.is_bare())?;
+    let word = w.text.clone();
+    let (text, quoted) = (v.text.clone(), v.is_quoted());
+    c.next();
+    c.next();
+    Some(crate::literal::scalar(&word, &text, quoted))
 }
 
 /// Reads a value literal. Without a forced type the type is inferred from
@@ -684,10 +738,20 @@ fn project(doc: &Json, fields: &[String]) -> Json {
     Json::Object(m)
 }
 
+/// A value as the shell shows it: a typed document in the typed literal
+/// syntax, its dates and times in the session's formats, so that it can be
+/// typed back (NATIVE_DOCUMENTS.md 19.5).
+fn shown(v: &Value) -> String {
+    match v {
+        Value::Typed(d) => crate::literal::show(d),
+        other => other.display(),
+    }
+}
+
 fn render_row(key: &str, value: &Value, fields: &Option<Vec<String>>) -> String {
     match (fields, value.json_doc()) {
         (Some(f), Some(doc)) => format!("{key}: {}", project(&doc, f)),
-        _ => format!("{key}: {} [{}]", value.display(), value.ty().name()),
+        _ => format!("{key}: {} [{}]", shown(value), value.ty().name()),
     }
 }
 
@@ -897,6 +961,10 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
     let value = match value {
         Some(v) => v,
         // `now() - 7 days`, `datetime "2026-01-01"`, `today()`, `time "08:00"`.
+        // `decimal "1250.50"`, `int 25`, `uuid "..."`: exact, never converted (NATIVE_DOCUMENTS.md 19.3).
+        None if op != CmpOp::In && typed_scalar(&mut c.clone()).is_some() => {
+            crate::literal::condition_json(&typed_scalar(c).expect("a typed value")?)
+        }
         None if op != CmpOp::In && time_expr(&mut c.clone()).is_some() => match time_expr(c).expect("a moment")? {
             Value::DateTime(i) => time::datetime_json(i),
             Value::Date(d) => Json::String(time::date_text(d)),
@@ -908,7 +976,11 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
             match t.kind {
                 Kind::Bare => condition_value(&t.text)?,
                 Kind::DQuote | Kind::SQuote => literal_json(&t.text, true)?,
-                Kind::Json => json_literal(&t.text)?,
+                Kind::Json => match json_literal(&t.text) {
+                    Ok(j) => j,
+                    // `in [decimal "0.10", decimal "1250.50"]`.
+                    Err(plain) => crate::literal::condition_json(&crate::literal::document(&t.text, plain)?),
+                },
                 _ => return Err(USAGE.into()),
             }
         }
@@ -1334,7 +1406,7 @@ impl Session {
                         return Err(format!("Type mismatch. '{name}' is a [{}].", v.ty().name()));
                     }
                 }
-                out.say(format!("{name}: {} [{}]", v.display(), v.ty().name()));
+                out.say(format!("{name}: {} [{}]", shown(&v), v.ty().name()));
             }
         }
         Ok(())
@@ -2078,52 +2150,74 @@ impl Session {
         }
 
         enum Change {
-            Set(Json),
+            Set(Doc),
             Delete,
-            Append(Vec<Json>),
-            Insert(Json),
+            Append(Vec<Doc>),
+            Insert(Doc),
+            /// An untyped number, read by the rule of C3 (`docpath::increment`).
             Incr(serde_json::Number, String),
+            /// `decimal "-100.25"`, `float 0.1`, `int 3`: the operand as written.
+            IncrTyped(Doc),
         }
         let change = match sub.as_str() {
-            "set" => Change::Set(match time_expr(&mut c) {
-                Some(v) => v?.to_json(),
-                None => parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json(),
-            }),
+            "set" => Change::Set(doc_value(&mut c, &key)?),
             "delete" | "del" => Change::Delete,
             "append" => {
                 let mut values = Vec::new();
-                while let Some(t) = c.next() {
-                    if t.kind != Kind::Comma {
-                        values.push(parse_value(t, None, &key)?.to_json());
+                while let Some(t) = c.peek() {
+                    if t.kind == Kind::Comma {
+                        c.next();
+                        continue;
                     }
+                    values.push(doc_value(&mut c, &key)?);
                 }
                 if values.is_empty() {
                     return Err(USAGE.into());
                 }
                 Change::Append(values)
             }
-            "insert" => Change::Insert(parse_value(c.next().ok_or(USAGE)?, None, &key)?.to_json()),
-            "incr" => {
-                let t = c.next().ok_or(USAGE)?;
-                match literal_json(&t.text, t.is_quoted()) {
-                    Ok(Json::Number(n)) if t.is_bare() => Change::Incr(n, t.text.clone()),
-                    _ => return Err("ValueError: the increment must be a number.".into()),
+            "insert" => Change::Insert(doc_value(&mut c, &key)?),
+            "incr" => match typed_scalar(&mut c) {
+                Some(by) => match by? {
+                    by @ (Doc::Int(_) | Doc::Float(_) | Doc::Decimal(_)) => Change::IncrTyped(by),
+                    _ => return Err("ValueError: the increment must be a number: int, float or decimal.".into()),
+                },
+                None => {
+                    let t = c.next().ok_or(USAGE)?;
+                    match literal_json(&t.text, t.is_quoted()) {
+                        Ok(Json::Number(n)) if t.is_bare() => Change::Incr(n, t.text.clone()),
+                        _ => return Err("ValueError: the increment must be a number.".into()),
+                    }
                 }
-            }
+            },
             _ => return Err(USAGE.into()),
         };
         c.finish(USAGE)?;
+        // A value JSON cannot hold, or a typed operand, changes the document
+        // as a typed tree, even a JSON one: a typed literal is a native value
+        // (NATIVE_DOCUMENTS.md 19.6). The document goes back to JSON when it
+        // holds no native value.
+        let typed_change = match &change {
+            Change::Set(v) | Change::Insert(v) => !v.json_encodable(),
+            Change::Append(values) => values.iter().any(|v| !v.json_encodable()),
+            Change::IncrTyped(_) => true,
+            Change::Delete | Change::Incr(..) => false,
+        };
 
         // Read, change and write back under the engine lock: a client
         // changing another field of the same document at the same time
         // cannot lose this change, nor this one lose theirs.
         let done = self.kv_modify(&key, |value| {
+            let value = match value {
+                Value::Doc(j) if typed_change => Value::Typed(doc::from_json(&j)),
+                v => v,
+            };
             if let Value::Typed(mut d) = value {
                 // The same change on the typed tree: the values it does not touch keep their types.
                 let bad = |e: String| KivaError::Invalid(format!("{e} ({at})"));
                 let msg = match change {
                     Change::Set(v) => {
-                        docpath::set(&mut d, &path, doc::from_json(&v)).map_err(bad)?;
+                        docpath::set(&mut d, &path, v).map_err(bad)?;
                         format!("OK: {at} updated.")
                     }
                     Change::Delete => {
@@ -2133,16 +2227,20 @@ impl Session {
                         format!("Deleted: {at}")
                     }
                     Change::Append(values) => {
-                        let n =
-                            docpath::append(&mut d, &path, values.iter().map(doc::from_json).collect()).map_err(bad)?;
+                        let n = docpath::append(&mut d, &path, values).map_err(bad)?;
                         format!("OK: {at} now has {n} elements.")
                     }
                     Change::Insert(v) => {
-                        let n = docpath::insert(&mut d, &path, doc::from_json(&v)).map_err(bad)?;
+                        let n = docpath::insert(&mut d, &path, v).map_err(bad)?;
                         format!("OK: inserted at {at}; the array now has {n} elements.")
                     }
                     Change::Incr(by, text) => {
                         let by = docpath::increment(docpath::get(&d, &path), &by, &text);
+                        let v = docpath::incr(&mut d, &path, &by).map_err(bad)?;
+                        let (shown, ty) = show_leaf(&v);
+                        format!("{at}: {shown} [{ty}]")
+                    }
+                    Change::IncrTyped(by) => {
                         let v = docpath::incr(&mut d, &path, &by).map_err(bad)?;
                         let (shown, ty) = show_leaf(&v);
                         format!("{at}: {shown} [{ty}]")
@@ -2156,7 +2254,8 @@ impl Session {
             let mut doc = doc_of(&key, value)?;
             let msg = match change {
                 Change::Set(v) => {
-                    jsonpath::set(&mut doc, &path, v).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    jsonpath::set(&mut doc, &path, doc::to_plain_json(&v))
+                        .map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
                     format!("OK: {at} updated.")
                 }
                 Change::Delete => {
@@ -2166,15 +2265,16 @@ impl Session {
                     format!("Deleted: {at}")
                 }
                 Change::Append(values) => {
-                    let n = jsonpath::append(&mut doc, &path, values)
+                    let n = jsonpath::append(&mut doc, &path, values.iter().map(doc::to_plain_json).collect())
                         .map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
                     format!("OK: {at} now has {n} elements.")
                 }
                 Change::Insert(v) => {
-                    let n =
-                        jsonpath::insert(&mut doc, &path, v).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
+                    let n = jsonpath::insert(&mut doc, &path, doc::to_plain_json(&v))
+                        .map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;
                     format!("OK: inserted at {at}; the array now has {n} elements.")
                 }
+                Change::IncrTyped(_) => unreachable!("a typed operand changes the typed tree"),
                 Change::Incr(by, _) => {
                     let v =
                         jsonpath::incr(&mut doc, &path, &by).map_err(|e| KivaError::Invalid(format!("{e} ({at})")))?;

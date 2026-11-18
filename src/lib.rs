@@ -35,6 +35,7 @@ pub mod jsonpath;
 pub mod kva;
 pub mod lexer;
 pub mod lineedit;
+pub mod literal;
 pub mod num;
 pub mod proto;
 pub mod pubsub;

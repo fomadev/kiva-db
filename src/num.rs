@@ -66,6 +66,13 @@ pub enum NumKey {
     Decimal(rust_decimal::Decimal),
 }
 
+/// The decimal of a condition written `decimal "0.10"`, carried as
+/// `{"$decimal": "0.10"}` (NATIVE_DOCUMENTS.md 19.3).
+pub fn cond_decimal(j: &Json) -> Option<rust_decimal::Decimal> {
+    let m = j.as_object().filter(|m| m.len() == 1)?;
+    crate::doc::parse_decimal(m.get("$decimal")?.as_str()?).ok()
+}
+
 impl NumKey {
     /// The number for the exact comparisons of [`crate::doc`]: a `u64`
     /// beyond `i64` as the decimal that holds it.
