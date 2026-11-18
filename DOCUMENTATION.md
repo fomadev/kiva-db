@@ -3331,7 +3331,7 @@ KivaDB 2.0.0 doctor, home /home/ana/.local/share/kivadb
   OK    Replication master
   OK    Data        3 file(s), 18204 record(s), every checksum matches
   OK    Data        workspace 'default': storage format 1 (opened by KivaDB 1.x and 2.x)
-  OK    Data        workspace 'shop.orders': storage format 3, native values (opened by KivaDB 2.0.0 and later, not 2.0.0-rc.2 or 1.x)
+  OK    Data        workspace 'shop.orders': storage format 3, native values (opened by KivaDB 2.0.0-rc.3 and later, not 2.0.0-rc.2 or 1.x)
   OK    Server log  no recent error
 
 11 check(s) passed, 0 warnings, 1 problem.

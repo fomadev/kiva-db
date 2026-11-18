@@ -152,7 +152,7 @@ fn the_doctor_names_the_storage_format_of_each_workspace() {
     assert!(text.contains("workspace 'default': storage format 1 (opened by KivaDB 1.x and 2.x)"), "{text}");
     assert!(text.contains("workspace 'dated': storage format 2, dates and times"), "{text}");
     assert!(
-        text.contains("workspace 'native': storage format 3, native values (opened by KivaDB 2.0.0 and later"),
+        text.contains("workspace 'native': storage format 3, native values (opened by KivaDB 2.0.0-rc.3 and later"),
         "{text}"
     );
 }
