@@ -658,7 +658,7 @@ fn a_real_replica_of_2_0_0_rc_2_keeps_its_data_and_says_why_it_does_not_follow()
     };
     assert!(cli(&format!("replica of 127.0.0.1 {port}")).contains("Now replicating"));
     wait_until("rc.2 to be refused", || cli("replica status").contains("upgrade the replica to KivaDB"));
-    assert_eq!(cli("get kept"), "kept: 1 [int]\n");
+    assert_eq!(cli("get kept"), "kept: 1 [number]\n");
     assert_eq!(cli("get o:1"), "o:1: (nil)\n");
     cli("replica stop");
     drop(server);
