@@ -197,14 +197,16 @@ fn aggregates_add_decimals_exactly_and_refuse_mixing_them_with_floats() {
     ok(&mut s, r#"set o:4 {"city": "Bukavu", "total": 2}"#);
 
     // 0.1 + 0.2 is 0.3 exactly, not 0.30000000000000004.
-    assert!(ok(&mut s, r#"sum o:*.total where o:*.city = "Goma""#).contains("0.3"), "the exact sum");
-    let all = ok(&mut s, "sum o:*.total");
-    assert!(all.contains("12.80"), "{all}");
-    assert!(ok(&mut s, "avg o:*.total").contains("3.2"));
-    assert!(ok(&mut s, "max o:*.total").contains("10.50"));
-    assert!(ok(&mut s, "min o:*.total").contains("0.1"));
+    assert_eq!(ok(&mut s, r#"sum o:*.total where o:*.city = "Goma""#), "Sum: 0.3 (2 matches)", "the exact sum");
+    // Shown as numbers, not quoted as the text JSON carries them in.
+    assert_eq!(ok(&mut s, "sum o:*.total"), "Sum: 12.80 (4 matches)");
+    assert_eq!(ok(&mut s, "avg o:*.total"), "Avg: 3.20 (4 values, 4 matches)");
+    assert_eq!(ok(&mut s, "max o:*.total"), "Max: 10.50 (4 values, 4 matches)");
+    assert_eq!(ok(&mut s, "min o:*.total"), "Min: 0.1 (4 values, 4 matches)");
     let grouped = ok(&mut s, "sum o:*.total group by city");
-    assert!(grouped.contains("Goma") && grouped.contains("0.3") && grouped.contains("12.50"), "{grouped}");
+    assert!(grouped.contains("Goma") && grouped.contains(": 0.3 (") && grouped.contains(": 12.50 ("), "{grouped}");
+    // A text field keeps its quotes.
+    assert_eq!(ok(&mut s, "min o:*.city"), r#"Min: "Bukavu" (4 values, 4 matches)"#);
     // The month of a native date.
     assert!(ok(&mut s, "count o:* group by month(at)").contains("11"));
 

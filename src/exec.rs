@@ -1873,22 +1873,24 @@ impl Session {
             _ if grouped => format!(" ({v} values)"),
             _ => format!(" ({v} values, {matches} matches)"),
         };
-        let show = |v: &Json| match v {
+        let show = |v: &Json, decimal: bool| match v {
             // An integer as it is: an f64 would round one beyond 2^53.
             Json::Number(n) if n.is_f64() => n.as_f64().map(fmt_f64).unwrap_or_else(|| n.to_string()),
+            // A decimal as a number, not as the text JSON carries it in.
+            Json::String(s) if decimal => s.clone(),
             v => v.to_string(),
         };
         match &group_by {
             None => {
-                let (_, v, n) = &r.groups[0].values[0];
-                out.say(format!("{name}: {}{}", show(v), detail(*n, r.matches, false)));
+                let (_, v, n, decimal) = &r.groups[0].values[0];
+                out.say(format!("{name}: {}{}", show(v, *decimal), detail(*n, r.matches, false)));
             }
             Some(g) => {
                 out.say(format!("{name} by {g} ({} groups, {} matches):", r.groups.len(), r.matches));
                 for grp in &r.groups {
-                    let (_, v, n) = &grp.values[0];
+                    let (_, v, n, decimal) = &grp.values[0];
                     let key = grp.key.as_ref().map(|k| k.to_string()).unwrap_or_default();
-                    out.say(format!("  {key}: {}{}", show(v), detail(*n, grp.matches, true)));
+                    out.say(format!("  {key}: {}{}", show(v, *decimal), detail(*n, grp.matches, true)));
                 }
             }
         }

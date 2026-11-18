@@ -609,8 +609,9 @@ pub struct GroupResult {
     /// The value of the `group by` field; `None` without `group by`.
     pub key: Option<Json>,
     pub matches: usize,
-    /// `(name, value, values taken into account)` per aggregate.
-    pub values: Vec<(String, Json, u64)>,
+    /// `(name, value, values taken into account, decimal)` per aggregate;
+    /// `decimal` says the value is a decimal's text, not a text field.
+    pub values: Vec<(String, Json, u64, bool)>,
 }
 
 /// What an aggregation found.
@@ -744,6 +745,11 @@ impl Aggregation {
         for (key, b) in self.groups {
             let mut values = Vec::with_capacity(self.aggs.len());
             for (agg, acc) in self.aggs.iter().zip(b.accs) {
+                let decimal = match agg.func {
+                    Func::Sum | Func::Avg => acc.decimals.is_some(),
+                    Func::Min | Func::Max => acc.best.as_ref().is_some_and(|(_, d)| d.is_some()),
+                    Func::Count => false,
+                };
                 let v = match agg.func {
                     Func::Count => Json::from(acc.n),
                     Func::Sum | Func::Avg if acc.decimals.is_some() => {
@@ -754,7 +760,7 @@ impl Aggregation {
                     Func::Avg => num(acc.sum.total() / acc.n as f64),
                     Func::Min | Func::Max => acc.best.map(|(v, _)| v).unwrap_or(Json::Null),
                 };
-                values.push((agg.name.clone(), v, acc.n));
+                values.push((agg.name.clone(), v, acc.n, decimal));
             }
             groups.push(GroupResult { key: grouped.then_some(key.0), matches: b.matches, values });
         }
@@ -866,7 +872,7 @@ fn decimal_total(acc: &Acc, agg: &Agg) -> Result<Json, String> {
 pub fn aggregated_json(a: &Aggregated, grouped: bool) -> Json {
     let values = |g: &GroupResult| {
         let mut m = Map::new();
-        for (name, v, _) in &g.values {
+        for (name, v, _, _) in &g.values {
             m.insert(name.clone(), v.clone());
         }
         Json::Object(m)

@@ -1074,5 +1074,5 @@ C7 follows section 25 and the decisions F1 to F5, in two pull requests: the code
 ### 26.3 Limits
 
 - The rows of `get where` show a typed document as plain JSON; `get <key>` uses the typed syntax.
-- `sum` of decimals in the shell shows its total quoted (`Sum: "1250.60"`), since the aggregate gives it as a JSON text; programs read the same text. Seen while testing C7; left for a fix of its own.
+- `sum` of decimals in the shell showed its total quoted (`Sum: "1250.60"`), since the aggregate gives it as a JSON text. Fixed after C7: `sum`, `avg`, `min` and `max` of decimals are shown as numbers (`Sum: 1250.60`), and a text field keeps its quotes; programs and REST still read the decimal's text, as plain JSON carries decimals.
 - The examples of the manual are not yet run by a test of their own (25.5); lot S can add one.
