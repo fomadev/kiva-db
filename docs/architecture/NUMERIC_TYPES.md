@@ -291,8 +291,10 @@ This differs from 6.1, which read an old fraction as a `decimal`. Under K2 a dec
 
 Extended JSON (`{"$decimal": ...}`) in REST and the protocols, and `kiva.decimal()` in Lua (C5); the drivers (C6, N3); `doctor` and the replication and backup checks (C7). N2 prepares no candidate, tag or release.
 
-### 10.8 To decide before N2 starts
+### 10.8 Decisions
 
-1. K2 (proposed) or K1 (10.2).
-2. Legacy fractions read as `float`, as proposed in 10.3, rather than as `decimal`, as 6.1 said.
-3. `json type` of document leaves answering `int` and `float` in N2 (10.4).
+Taken by the maintainer on 2026-11-18, for 2.0.0:
+
+1. **K2** (10.2): `int` and `float` keys stay code 2, in canonical text; only a `decimal` key gets code 13 and raises its file to format 3. Codes 11 and 12 stay reserved. This replaces the codes of 6.1.
+2. **Legacy fractions read as `float`** (10.3) when a float holds them exactly; other old numbers stay legacy numbers. This replaces the reading of 6.1.
+3. **`json type` of document leaves answers `int` and `float`** in N2 (10.4), as `typeof` does for keys.
