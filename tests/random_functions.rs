@@ -181,6 +181,88 @@ fn functions_inside_documents_json_set_and_print() {
 }
 
 #[test]
+fn shuffle_and_sample_arrays() {
+    let dir = TempDir::new("random_arrays");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    let sorted = |v: &Json| {
+        let mut items: Vec<String> = v.as_array().unwrap().iter().map(|x| x.to_string()).collect();
+        items.sort();
+        items
+    };
+    ok(&mut s, r#"set a shuffle(["A", "B", "C", "D", "E"])"#);
+    assert_eq!(sorted(&doc(&inst, "a")), ["\"A\"", "\"B\"", "\"C\"", "\"D\"", "\"E\""]);
+    ok(&mut s, "set one sample([10, 20, 30])");
+    assert!(["10", "20", "30"].contains(&ok(&mut s, "get one").split(": ").nth(1).unwrap().split(' ').next().unwrap()));
+    ok(&mut s, "set none sample([1, 2], 0) and empty shuffle([])");
+    assert_eq!(doc(&inst, "none"), serde_json::json!([]));
+    assert_eq!(doc(&inst, "empty"), serde_json::json!([]));
+    // Elements keep their types, typed values included.
+    ok(&mut s, r#"set typed shuffle([decimal "1.50", date "2026-01-15", int 3, float 0.5])"#);
+    let shown = ok(&mut s, "get typed");
+    for t in [r#"decimal "1.50""#, r#"date "2026-01-15""#, "3", "0.5"] {
+        assert!(shown.contains(t), "{t} in {shown}");
+    }
+    ok(&mut s, r#"set d sample([date "2026-01-15"])"#);
+    assert!(ok(&mut s, "typeof d").contains("[date]"));
+    ok(&mut s, r#"set o sample([{"a": 1}])"#);
+    assert_eq!(doc(&inst, "o"), serde_json::json!({"a": 1}));
+
+    // Inside documents, nested with other functions, and in json set.
+    ok(
+        &mut s,
+        r#"set quiz:1 {"questions": shuffle(["Q1", "Q2", "Q3", "Q4"]), "bonus": sample(["X", "Y"]),
+                       "three": sample([1, 2, 3, 4, 5], 3), "ids": shuffle([uuid(), uuid()])}"#,
+    );
+    let q = doc(&inst, "quiz:1");
+    assert_eq!(sorted(&q["questions"]), ["\"Q1\"", "\"Q2\"", "\"Q3\"", "\"Q4\""]);
+    assert!(q["bonus"] == "X" || q["bonus"] == "Y");
+    let three = q["three"].as_array().unwrap();
+    assert_eq!(three.len(), 3);
+    assert_eq!(three.iter().collect::<HashSet<_>>().len(), 3);
+    assert!(is_uuid(q["ids"][0].as_str().unwrap(), '4'));
+    ok(&mut s, "json set quiz:1 .order shuffle([1, 2, 3])");
+    assert_eq!(sorted(&doc(&inst, "quiz:1")["order"]), ["1", "2", "3"]);
+    ok(&mut s, r#"json append quiz:1 .questions sample(["Q5", "Q6"])"#);
+    assert_eq!(doc(&inst, "quiz:1")["questions"].as_array().unwrap().len(), 5);
+
+    // Over many draws, every order of three comes up.
+    let mut orders = HashSet::new();
+    for i in 0..200 {
+        ok(&mut s, &format!("set p:{i} shuffle([1, 2, 3])"));
+        orders.insert(doc(&inst, &format!("p:{i}")).to_string());
+    }
+    assert_eq!(orders.len(), 6, "{orders:?}");
+
+    for (cmd, says) in [
+        ("set x sample([])", "empty array has no element"),
+        ("set x sample([1, 2], 3)", "3 elements asked of an array of 2"),
+        ("set x sample([1, 2], -1)", "0 or more"),
+        (r#"set x shuffle("abc")"#, "takes an array"),
+        ("set x shuffle([1], 2)", "takes one array"),
+        (r#"set x {"a": shuffle(3)}"#, "shuffle takes an array, not int"),
+        (r#"set x {"a": sample([1], 5)}"#, "5 elements asked of an array of 1"),
+        ("json set quiz:1 .x sample([])", "empty array"),
+        ("print shuffle([1, 2])", "print does not hold"),
+        ("get where quiz:*.bonus = sample([\"X\"])", "no place in a condition"),
+    ] {
+        assert!(fails(&mut s, cmd).contains(says), "{cmd}");
+    }
+    assert!(inst.engine("default").unwrap().get("x").unwrap().is_none());
+
+    // Lua: a new list, the one given left as it was.
+    let out = ok(
+        &mut s,
+        r#"eval 'local t = {1, 2, 3, 4} local u = kiva.shuffle(t) table.sort(u) return t[1] .. t[2] .. t[3] .. t[4], u[1] .. u[4], #kiva.sample(t, 2), kiva.sample({9})'"#,
+    );
+    assert_eq!(out.trim(), "1234, 14, 2, 9");
+    ok(&mut s, r#"eval 'kiva.set("lq", kiva.shuffle({"a", "b", "c"})) return 1'"#);
+    assert_eq!(sorted(&doc(&inst, "lq")), ["\"a\"", "\"b\"", "\"c\""]);
+    assert!(fails(&mut s, "eval 'return kiva.sample({}, 1)'").contains("1 element asked of an array of 0"));
+    assert!(fails(&mut s, "eval 'return kiva.shuffle(3)'").contains("takes a list"));
+}
+
+#[test]
 fn a_condition_refuses_a_random_function() {
     let dir = TempDir::new("random_conditions");
     let inst = instance(&dir);
@@ -276,13 +358,14 @@ fn a_replica_and_the_change_journal_hold_the_values_the_master_drew() {
     ok(&mut r, &format!("replica of 127.0.0.1 {port_m}"));
     wait_for("the initial snapshot", || replica.repl.link().status == "connected");
     ok(&mut m, "set id uuid() and roll random_int(1, 1000000)");
-    ok(&mut m, r#"set p:1 {"n": random_int(1, 1000000), "f": random()}"#);
+    ok(&mut m, r#"set p:1 {"n": random_int(1, 1000000), "f": random(), "order": shuffle([1, 2, 3, 4, 5, 6, 7, 8])}"#);
+    ok(&mut m, "set pick sample([1, 2, 3, 4, 5, 6, 7, 8], 4)");
     ok(&mut m, r#"eval 'kiva.set("lua", kiva.random_string(20)) return 1'"#);
     ok(&mut m, "begin");
     ok(&mut m, "set t uuid_v7()");
     ok(&mut m, "commit");
     wait_for("the writes", || replica.engine("default").unwrap().contains("t"));
-    for k in ["id", "roll", "p:1", "lua", "t"] {
+    for k in ["id", "roll", "p:1", "pick", "lua", "t"] {
         assert_eq!(value(&replica, k), value(&master, k), "{k}");
     }
     assert!(is_uuid(doc(&replica, "p:1")["id"].as_str().unwrap(), '7'));

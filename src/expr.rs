@@ -216,6 +216,12 @@ impl<'a, 'r> Parser<'a, 'r> {
     fn call(&mut self, name: &str) -> Result<EVal, String> {
         self.pos += 1;
         let lower = name.to_ascii_lowercase();
+        if crate::random::is_array_name(&lower) {
+            return Err(format!(
+                "TypeError: {lower}() works on an array, which print does not hold: \
+                 set k {lower}([1, 2, 3]), then get k"
+            ));
+        }
         if crate::random::is_name(&lower) {
             return self.random(&lower);
         }

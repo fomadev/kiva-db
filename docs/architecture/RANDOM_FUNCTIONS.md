@@ -2,7 +2,7 @@
 
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
-**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 and R1 are implemented; each code lot is merged after its own review.
+**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0, R1 and R2 are implemented; each code lot is merged after its own review.
 
 Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and C2, and to the branch of C3. Section 1 lists what was checked.
 
@@ -252,6 +252,8 @@ Ids are therefore strictly increasing within one process, never across nodes.
 | `sample(a, n)` | an array of `n` elements taken at distinct positions, in random order. Equal values may come back if the array holds them. 0 ≤ `n` ≤ length; a larger `n` is refused, not answered shorter |
 
 Arrays are bounded by the size of a document, and elements keep their types.
+
+Built in R2 (`random::ArrayFn`): the array is reordered in place, without a copy; `sample(a, n)` makes `n` draws (the first `n` steps of Fisher–Yates). `print` and schema defaults refuse them, since neither holds an array given in place. Lua's `kiva.shuffle` and `kiva.sample` return a new list.
 
 ### 12.6 Queries: one syntax
 

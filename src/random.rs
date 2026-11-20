@@ -20,9 +20,109 @@ pub const MAX_LENGTH: usize = 1024;
 
 const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-/// Whether `word` names one of the functions, in any case.
+/// The functions of arrays (lot R2): their first argument is an array.
+pub const ARRAY_NAMES: [&str; 2] = ["shuffle", "sample"];
+
+/// Whether `word` names one of the functions, of values or of arrays, in any case.
 pub fn is_name(word: &str) -> bool {
-    NAMES.iter().any(|n| n.eq_ignore_ascii_case(word))
+    NAMES.iter().chain(ARRAY_NAMES.iter()).any(|n| n.eq_ignore_ascii_case(word))
+}
+
+/// Whether `word` names `shuffle` or `sample`.
+pub fn is_array_name(word: &str) -> bool {
+    ARRAY_NAMES.iter().any(|n| n.eq_ignore_ascii_case(word))
+}
+
+/// `shuffle(array)`, `sample(array)` or `sample(array, n)`, read but not applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayFn {
+    Shuffle,
+    /// One element, not an array.
+    SampleOne,
+    /// `n` elements at distinct positions, as an array.
+    Sample(usize),
+}
+
+/// What an [`ArrayFn`] gives: an element, or an array.
+#[derive(Debug, PartialEq)]
+pub enum Picked<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl ArrayFn {
+    /// Reads the call from its name and the text of its count, if any.
+    pub fn parse(name: &str, count: Option<&str>) -> Result<ArrayFn, String> {
+        match (name.to_ascii_lowercase().as_str(), count) {
+            ("shuffle", None) => Ok(ArrayFn::Shuffle),
+            ("shuffle", Some(_)) => Err("shuffle takes one array: shuffle([\"A\", \"B\", \"C\"])".into()),
+            ("sample", None) => Ok(ArrayFn::SampleOne),
+            ("sample", Some(t)) => {
+                let t = t.trim();
+                t.parse::<usize>()
+                    .map(ArrayFn::Sample)
+                    .map_err(|_| format!("sample: the count '{t}' is not a whole number of 0 or more"))
+            }
+            (other, _) => Err(format!("'{other}' is not a function of arrays: shuffle, sample")),
+        }
+    }
+
+    /// The name, for messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            ArrayFn::Shuffle => "shuffle",
+            _ => "sample",
+        }
+    }
+
+    /// Applies the call to the elements of an array, which it takes.
+    ///
+    /// - `shuffle`: Fisher–Yates, every order equally likely;
+    /// - `sample(a, n)`: the first `n` steps of Fisher–Yates, then the rest
+    ///   is dropped: `n` distinct positions, in random order, `n` draws;
+    /// - `sample(a)`: one position.
+    ///
+    /// The array is reordered in place: nothing is copied.
+    pub fn apply<T>(self, mut items: Vec<T>, src: &mut Source) -> Result<Picked<T>, String> {
+        let len = items.len();
+        let draw = |e: crate::KivaError| e.to_string();
+        match self {
+            ArrayFn::Shuffle => {
+                partial_shuffle(&mut items, len, src).map_err(draw)?;
+                Ok(Picked::Many(items))
+            }
+            ArrayFn::SampleOne => {
+                if len == 0 {
+                    return Err("sample: an empty array has no element to give".into());
+                }
+                let i = src.below(len as u64).map_err(draw)? as usize;
+                Ok(Picked::One(items.swap_remove(i)))
+            }
+            ArrayFn::Sample(n) => {
+                if n > len {
+                    return Err(format!(
+                        "sample: {n} element{} asked of an array of {len}",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+                partial_shuffle(&mut items, n, src).map_err(draw)?;
+                items.truncate(n);
+                Ok(Picked::Many(items))
+            }
+        }
+    }
+}
+
+/// Puts `n` elements drawn uniformly without repetition at the front of
+/// `items`, in random order (the first `n` steps of Fisher–Yates). With
+/// `n` = the length, the whole array is shuffled.
+pub fn partial_shuffle<T>(items: &mut [T], n: usize, src: &mut Source) -> crate::Result<()> {
+    let len = items.len();
+    for i in 0..n.min(len.saturating_sub(1)) {
+        let j = i + src.below((len - i) as u64)? as usize;
+        items.swap(i, j);
+    }
+    Ok(())
 }
 
 /// A call, read and checked, not yet drawn.
@@ -101,6 +201,9 @@ impl Gen {
                         format!("{name}: the length '{t}' is not a whole number from 1 to {MAX_LENGTH}")
                     })?;
                 Ok(if name == "random_string" { Gen::Str(n) } else { Gen::Bytes(n) })
+            }
+            "shuffle" | "sample" => {
+                Err(format!("{name} works on an array, in a command or a document: {name}([1, 2, 3])"))
             }
             _ => Err(format!("'{name}' is not a random function: {}", NAMES.join(", "))),
         }
@@ -491,6 +594,101 @@ mod tests {
     }
 
     #[test]
+    fn array_calls_are_read_and_checked() {
+        assert_eq!(ArrayFn::parse("SHUFFLE", None).unwrap(), ArrayFn::Shuffle);
+        assert_eq!(ArrayFn::parse("sample", None).unwrap(), ArrayFn::SampleOne);
+        assert_eq!(ArrayFn::parse("sample", Some(" 3")).unwrap(), ArrayFn::Sample(3));
+        assert!(ArrayFn::parse("shuffle", Some("2")).unwrap_err().contains("one array"));
+        assert!(ArrayFn::parse("sample", Some("-1")).unwrap_err().contains("0 or more"));
+        assert!(ArrayFn::parse("sample", Some("1.5")).unwrap_err().contains("0 or more"));
+        assert!(Gen::parse("shuffle", &[]).unwrap_err().contains("works on an array"));
+        let mut s = Source::new();
+        assert_eq!(ArrayFn::Shuffle.apply(Vec::<u8>::new(), &mut s).unwrap(), Picked::Many(vec![]));
+        assert_eq!(ArrayFn::Shuffle.apply(vec![7], &mut s).unwrap(), Picked::Many(vec![7]));
+        assert_eq!(ArrayFn::Sample(0).apply(vec![1, 2], &mut s).unwrap(), Picked::Many(vec![]));
+        assert_eq!(ArrayFn::SampleOne.apply(vec![9], &mut s).unwrap(), Picked::One(9));
+        assert!(ArrayFn::SampleOne.apply(Vec::<u8>::new(), &mut s).unwrap_err().contains("empty array"));
+        assert!(ArrayFn::Sample(3)
+            .apply(vec![1, 2], &mut s)
+            .unwrap_err()
+            .contains("3 elements asked of an array of 2"));
+    }
+
+    #[test]
+    fn shuffles_keep_every_element() {
+        let mut s = Source::new();
+        // Duplicates included, and an array far larger than the block of the source.
+        let items: Vec<u32> = (0..100_000).map(|i| i % 50_000).collect();
+        let Picked::Many(mut out) = ArrayFn::Shuffle.apply(items.clone(), &mut s).unwrap() else { panic!() };
+        assert_ne!(out, items, "100 000 elements left in order: practically impossible");
+        out.sort_unstable();
+        let mut want = items;
+        want.sort_unstable();
+        assert_eq!(out, want);
+        // A sample takes distinct positions: equal values only as often as the array holds them.
+        let Picked::Many(mut few) = ArrayFn::Sample(5).apply((0..10).collect::<Vec<u32>>(), &mut s).unwrap() else {
+            panic!()
+        };
+        assert_eq!(few.len(), 5);
+        few.sort_unstable();
+        few.dedup();
+        assert_eq!(few.len(), 5);
+        let Picked::Many(all) = ArrayFn::Sample(3).apply(vec!["a", "a", "b"], &mut s).unwrap() else { panic!() };
+        assert_eq!(all.iter().filter(|x| **x == "a").count(), 2);
+    }
+
+    #[test]
+    fn every_order_of_four_is_as_likely() {
+        // 24 orders, 48 000 shuffles: chi-square with 23 degrees of freedom,
+        // 49.7 is passed by chance once in a thousand runs.
+        let mut s = Source::new();
+        let mut count = std::collections::HashMap::new();
+        for _ in 0..48_000 {
+            let Picked::Many(v) = ArrayFn::Shuffle.apply(vec![0u8, 1, 2, 3], &mut s).unwrap() else { panic!() };
+            *count.entry(v).or_insert(0f64) += 1.0;
+        }
+        assert_eq!(count.len(), 24);
+        let chi: f64 = count.values().map(|c| (c - 2000.0) * (c - 2000.0) / 2000.0).sum();
+        assert!(chi < 49.7, "chi-square {chi}");
+    }
+
+    #[test]
+    fn samples_take_each_element_as_often() {
+        // sample(10 elements, 3), 30 000 times: each element 9 000 times
+        // expected; chi-square with 9 degrees of freedom, 27.9 at p = 0.001.
+        // sample(a) alone: each of 5 elements 2 000 times of 10 000; 18.5 at 4 degrees.
+        let mut s = Source::new();
+        let mut count = [0f64; 10];
+        for _ in 0..30_000 {
+            let Picked::Many(v) = ArrayFn::Sample(3).apply((0..10).collect::<Vec<usize>>(), &mut s).unwrap() else {
+                panic!()
+            };
+            for i in v {
+                count[i] += 1.0;
+            }
+        }
+        let chi: f64 = count.iter().map(|c| (c - 9000.0) * (c - 9000.0) / 9000.0).sum();
+        assert!(chi < 27.9, "chi-square {chi}: {count:?}");
+        let mut one = [0f64; 5];
+        for _ in 0..10_000 {
+            let Picked::One(i) = ArrayFn::SampleOne.apply((0..5).collect::<Vec<usize>>(), &mut s).unwrap() else {
+                panic!()
+            };
+            one[i] += 1.0;
+        }
+        let chi: f64 = one.iter().map(|c| (c - 2000.0) * (c - 2000.0) / 2000.0).sum();
+        assert!(chi < 18.5, "chi-square {chi}: {one:?}");
+    }
+
+    #[test]
+    fn a_broken_generator_fails_shuffles_and_samples() {
+        for call in [ArrayFn::Shuffle, ArrayFn::SampleOne, ArrayFn::Sample(2)] {
+            let e = with_failing_random(|| call.apply(vec![1, 2, 3], &mut Source::new())).unwrap_err();
+            assert!(e.starts_with("ERR_RANDOM_UNAVAILABLE"), "{e}");
+        }
+    }
+
+    #[test]
     fn a_broken_generator_fails_every_function() {
         for g in [Gen::Random, Gen::Int(1, 6), Gen::Str(8), Gen::Bytes(8), Gen::Uuid, Gen::UuidV7] {
             let e = with_failing_random(|| g.draw()).unwrap_err();
@@ -507,6 +705,9 @@ mod tests {
             "set k uuid()",
             "set k random_int(1, 6)",
             r#"set k {"a": random()}"#,
+            "set k shuffle([1, 2, 3])",
+            r#"set k {"a": sample([1, 2, 3], 2)}"#,
+            r#"eval 'kiva.set("k", kiva.shuffle({1, 2})) return 1'"#,
             r#"set d:1 {"name": "x"}"#,
             r#"eval 'kiva.set("k", kiva.random_string(4)) return 1'"#,
         ] {
