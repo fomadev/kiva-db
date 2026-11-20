@@ -104,7 +104,7 @@ fn read_opts(req: &Json, q: &crate::query::Query, limit: usize) -> Result<crate:
     if order.is_some() && reverse {
         return Err(invalid("with \"order_by\", write \"created_at desc\" rather than \"reverse\""));
     }
-    Ok(crate::engine::ReadOpts { limit, order, after, reverse })
+    Ok(crate::engine::ReadOpts { limit, order, after, reverse, random: false })
 }
 
 pub fn measured_json(m: &crate::engine::Measured) -> Json {

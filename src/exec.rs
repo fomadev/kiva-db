@@ -721,14 +721,39 @@ struct QueryTail {
     tail: Tail,
     order: Option<(String, bool)>,
     after: Option<String>,
+    /// `order by random()`.
+    random: bool,
 }
 
+/// The most rows `order by random()` may ask for: they are all held in memory.
+pub const MAX_RANDOM_ROWS: usize = 10_000;
+
 fn parse_query_tail(c: &mut Cur) -> Result<QueryTail, String> {
-    let mut qt = QueryTail { tail: Tail::default(), order: None, after: None };
+    let mut qt = QueryTail { tail: Tail::default(), order: None, after: None, random: false };
     loop {
         if c.eat("order") {
             if !c.eat("by") {
                 return Err("expected 'by' after 'order': order by <field> [asc|desc]".into());
+            }
+            if qt.order.is_some() || qt.random {
+                return Err("one 'order by' per query: rows of the same value come in key order".into());
+            }
+            // `order by random()`: a random sample (RANDOM_FUNCTIONS.md 12.6).
+            let rest = c.rest();
+            if rest.first().is_some_and(|t| t.is_bare() && t.text.eq_ignore_ascii_case("random"))
+                && rest.get(1).is_some_and(|t| t.kind == Kind::LParen)
+            {
+                if !rest.get(2).is_some_and(|t| t.kind == Kind::RParen) {
+                    return Err("order by random() takes nothing between its parentheses".into());
+                }
+                for _ in 0..3 {
+                    c.next();
+                }
+                if c.peek().is_some_and(|t| t.is_kw("asc") || t.is_kw("desc")) {
+                    return Err("a random order has no direction: order by random() limit N".into());
+                }
+                qt.random = true;
+                continue;
             }
             let field = word(c.next(), "the field to order by")?;
             let desc = c.eat("desc");
@@ -758,6 +783,29 @@ fn parse_query_tail(c: &mut Cur) -> Result<QueryTail, String> {
     Ok(qt)
 }
 
+/// The query and its tail after `get where`. A pattern alone, without a
+/// condition, is read only with `order by random()`: `get where product:*
+/// order by random() limit 5` draws among every document of the pattern.
+fn parse_where(c: &mut Cur) -> Result<(Query, QueryTail), String> {
+    let rest = c.rest();
+    let bare_pattern = rest.first().filter(|t| t.is_bare() && !t.text.contains('.') && t.text.ends_with('*'));
+    if let Some(p) = bare_pattern.filter(|_| rest.get(1).is_some_and(|t| t.is_kw("order"))) {
+        let pattern = p.text.clone();
+        c.next();
+        let qt = parse_query_tail(c)?;
+        if !qt.random {
+            return Err(format!(
+                "expected a condition such as: {pattern}.role = \"admin\" \
+                 (a pattern alone is read only with order by random() limit N)"
+            ));
+        }
+        return Ok((Query { pattern, expr: None }, qt));
+    }
+    let q = parse_query(c, None)?;
+    let qt = parse_query_tail(c)?;
+    Ok((q, qt))
+}
+
 /// How `get where` hands out its rows. The field of `order by` may repeat
 /// the pattern: `order by user:*.age`.
 fn read_opts(q: &Query, qt: &QueryTail) -> Result<ReadOpts, String> {
@@ -771,7 +819,21 @@ fn read_opts(q: &Query, qt: &QueryTail) -> Result<ReadOpts, String> {
     if order.is_some() && qt.tail.reverse {
         return Err("with 'order by', write 'desc' rather than 'reverse'".into());
     }
-    Ok(ReadOpts { limit: qt.tail.limit, order, after: qt.after.clone(), reverse: qt.tail.reverse })
+    if qt.random {
+        if qt.tail.limit == 0 || qt.tail.limit > MAX_RANDOM_ROWS {
+            return Err(format!(
+                "order by random() needs a limit from 1 to {MAX_RANDOM_ROWS}: every row drawn is held \
+                 until the end (order by random() limit 10)"
+            ));
+        }
+        if qt.after.is_some() {
+            return Err("'after' has no meaning with order by random(): a random order has no next page".into());
+        }
+        if qt.tail.reverse {
+            return Err("'reverse' has no meaning with order by random()".into());
+        }
+    }
+    Ok(ReadOpts { limit: qt.tail.limit, order, after: qt.after.clone(), reverse: qt.tail.reverse, random: qt.random })
 }
 
 fn ms(d: std::time::Duration) -> String {
@@ -1963,11 +2025,10 @@ impl Session {
 
     fn cmd_where(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
-        let q = parse_query(&mut c, None)?;
-        let qt = parse_query_tail(&mut c)?;
+        let (q, qt) = parse_where(&mut c)?;
         refuse_unsupported(c.peek())?;
         c.finish(
-            "get where <condition> [order by <field> [asc|desc]] [limit N] [after <key>] [reverse] [return f1, f2]",
+            "get where <condition> [order by <field> [asc|desc] | order by random()] [limit N] [after <key>] [reverse] [return f1, f2]",
         )?;
         let opts = read_opts(&q, &qt)?;
         let mut rows = Vec::new();
@@ -2150,8 +2211,7 @@ impl Session {
                     (q, opts, Some((f, field, group_by)))
                 }
                 None => {
-                    let q = parse_query(&mut c, None)?;
-                    let qt = parse_query_tail(&mut c)?;
+                    let (q, qt) = parse_where(&mut c)?;
                     refuse_unsupported(c.peek())?;
                     let opts = read_opts(&q, &qt)?;
                     (q, opts, None)

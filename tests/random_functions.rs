@@ -262,6 +262,124 @@ fn shuffle_and_sample_arrays() {
     assert!(fails(&mut s, "eval 'return kiva.shuffle(3)'").contains("takes a list"));
 }
 
+/// The keys of the rows a `get where` printed.
+fn row_keys(out: &str) -> Vec<String> {
+    out.lines().filter(|l| !l.starts_with('(')).filter_map(|l| l.split(": ").next()).map(String::from).collect()
+}
+
+#[test]
+fn order_by_random_draws_among_the_documents_selected() {
+    let dir = TempDir::new("random_order");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    for i in 0..40 {
+        let role = if i % 4 == 0 { "admin" } else { "user" };
+        ok(&mut s, &format!(r#"set u:{i:02} {{"role": "{role}", "n": {i}}}"#));
+    }
+    // Not documents of the pattern: never drawn.
+    ok(&mut s, r#"set u:text "a text" and v:1 {"role": "user"}"#);
+
+    // A pattern alone: drawn among its documents.
+    let rows = row_keys(&ok(&mut s, "get where u:* order by random() limit 5"));
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.iter().collect::<HashSet<_>>().len(), 5, "{rows:?}");
+    assert!(rows.iter().all(|k| k.starts_with("u:") && k != "u:text"), "{rows:?}");
+    // More asked than there are: all of them, once each.
+    let all = row_keys(&ok(&mut s, "get where u:* order by random() limit 100"));
+    assert_eq!(all.len(), 40);
+    assert_eq!(all.iter().collect::<HashSet<_>>().len(), 40);
+
+    // With a condition: only rows that pass, `return` applied.
+    for _ in 0..20 {
+        let out = ok(&mut s, r#"get where u:*.role = "admin" order by random() limit 3 return n"#);
+        for k in row_keys(&out) {
+            let n: usize = k[2..].parse().unwrap();
+            assert_eq!(n % 4, 0, "{out}");
+        }
+        assert!(out.contains("(3 matches)") && !out.contains("role"), "{out}");
+    }
+    assert!(ok(&mut s, r#"get where u:*.role = "admin" order by random() limit 50"#).contains("(10 matches)"));
+    // An index changes how candidates are found, not what is drawn.
+    ok(&mut s, "create index on u:* (role)");
+    let out = ok(&mut s, r#"get where u:*.role = "admin" and u:*.n >= 20 order by random() limit 50"#);
+    assert!(out.contains("(5 matches)"), "{out}");
+
+    // Every document as likely: 1 of the 10 admins, 3 000 times (9 degrees, 27.9 at p = 0.001).
+    let mut count = std::collections::HashMap::new();
+    for _ in 0..3_000 {
+        let k = row_keys(&ok(&mut s, r#"get where u:*.role = "admin" order by random() limit 1"#)).remove(0);
+        *count.entry(k).or_insert(0f64) += 1.0;
+    }
+    assert_eq!(count.len(), 10);
+    let chi: f64 = count.values().map(|c| (c - 300.0) * (c - 300.0) / 300.0).sum();
+    assert!(chi < 27.9, "{count:?}");
+    // And in a random order: the first of all 40 is not always the same.
+    let firsts: HashSet<String> =
+        (0..30).map(|_| row_keys(&ok(&mut s, "get where u:* order by random() limit 40")).remove(0)).collect();
+    assert!(firsts.len() > 5, "{firsts:?}");
+
+    for (cmd, says) in [
+        ("get where u:* order by random()", "needs a limit from 1 to 10000"),
+        ("get where u:*.n > 1 order by random() limit 10001", "needs a limit from 1 to 10000"),
+        ("get where u:* order by random() limit 2 after u:01", "no next page"),
+        ("get where u:* order by random() desc limit 2", "no direction"),
+        ("get where u:* order by random() limit 2 reverse", "'reverse' has no meaning"),
+        ("get where u:* order by random(3) limit 2", "nothing between its parentheses"),
+        ("get where u:* order by random() order by n limit 2", "one 'order by' per query"),
+        ("get where u:* order by n limit 2", "a pattern alone is read only with order by random()"),
+        ("get where u:* limit 2", "expected a condition"),
+    ] {
+        assert!(fails(&mut s, cmd).contains(says), "{cmd}");
+    }
+}
+
+#[test]
+fn order_by_random_reads_only_the_documents_drawn_when_it_can() {
+    let dir = TempDir::new("random_order_plan");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    for i in 0..200 {
+        ok(&mut s, &format!(r#"set p:{i:03} {{"price": {i}}}"#));
+    }
+    // A pattern alone: every key looked at, 3 documents read.
+    let out = ok(&mut s, "explain analyze get where p:* order by random() limit 3");
+    assert!(out.contains("Order     : random: 3 drawn among the keys, then only those documents are read"), "{out}");
+    assert!(out.contains("Keys examined : 200"), "{out}");
+    assert!(out.contains("Documents     : 3 read"), "{out}");
+    assert!(out.contains("Returned      : 3"), "{out}");
+    // A condition: each candidate read and tested.
+    let out = ok(&mut s, "explain analyze get where p:*.price < 50 order by random() limit 3");
+    assert!(out.contains("random: 3 drawn among the documents that pass, every candidate read"), "{out}");
+    assert!(out.contains("Documents     : 200 read") && out.contains("150 filtered out"), "{out}");
+    ok(&mut s, "create index on p:* (price)");
+    let out = ok(&mut s, "explain analyze get where p:*.price < 50 order by random() limit 3");
+    assert!(out.contains("Documents     : 50 read") && out.contains("Returned      : 3"), "{out}");
+    // explain alone runs nothing.
+    let out = ok(&mut s, "explain get where p:* order by random() limit 3");
+    assert!(out.contains("Limit     : 3") && !out.contains("Measured"), "{out}");
+}
+
+#[test]
+fn order_by_random_skips_expired_keys_and_other_workspaces_and_changes_nothing() {
+    let dir = TempDir::new("random_order_scope");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, r#"set k:1 {"a": 1} and k:2 {"a": 2}"#);
+    ok(&mut s, r#"set k:3 {"a": 3} ttl 1"#);
+    ok(&mut s, "workspace create other");
+    ok(&mut s, "workspace switch other");
+    ok(&mut s, r#"set k:9 {"a": 9}"#);
+    ok(&mut s, "workspace switch default");
+    std::thread::sleep(Duration::from_millis(1200));
+    let before = ok(&mut s, "get where k:*.a > 0 limit 10");
+    for _ in 0..20 {
+        let mut rows = row_keys(&ok(&mut s, "get where k:* order by random() limit 10"));
+        rows.sort();
+        assert_eq!(rows, ["k:1", "k:2"]);
+    }
+    assert_eq!(ok(&mut s, "get where k:*.a > 0 limit 10"), before, "a read changes nothing");
+}
+
 #[test]
 fn a_condition_refuses_a_random_function() {
     let dir = TempDir::new("random_conditions");

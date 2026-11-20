@@ -746,6 +746,9 @@ pub struct ReadOpts {
     pub after: Option<String>,
     /// Key order from the last key.
     pub reverse: bool,
+    /// `order by random() limit N`: `limit` rows drawn uniformly among those
+    /// the query selects, in a random order (RANDOM_FUNCTIONS.md 12.6).
+    pub random: bool,
 }
 
 /// `order by <field> [asc|desc]`.
@@ -5102,6 +5105,12 @@ impl Engine {
                 n => format!("{}, sorted in memory (the first {n} kept while reading)", o.describe()),
             });
         }
+        if opts.random {
+            plan.order = Some(match q.expr {
+                None => format!("random: {limit} drawn among the keys, then only those documents are read"),
+                Some(_) => format!("random: {limit} drawn among the documents that pass, every candidate read"),
+            });
+        }
         Chosen { source, plan, entries }
     }
 
@@ -5252,6 +5261,72 @@ impl Engine {
             m.returned += 1;
             Ok(limit == 0 || m.returned < limit as u64)
         };
+        if opts.random {
+            if limit == 0 || opts.order.is_some() || opts.after.is_some() || opts.reverse {
+                return Err(KivaError::Invalid(
+                    "order by random() takes a limit, and no other order, 'after' or 'reverse'".into(),
+                ));
+            }
+            // A reservoir of `limit` rows (RANDOM_FUNCTIONS.md 12.6). Without a
+            // condition, which keys are documents of the pattern is known from
+            // the key index: the sample is drawn among the keys and only the
+            // documents drawn are read. With one, each candidate is read and
+            // tested, as in any query, and the reservoir keeps rows.
+            let mut src = crate::random::Source::new();
+            let keys_only = q.expr.is_none();
+            let mut by_key: crate::random::Reservoir<String> = crate::random::Reservoir::new(limit);
+            let mut by_row: crate::random::Reservoir<(String, Value)> = crate::random::Reservoir::new(limit);
+            let mut take = |inner: &mut Inner, key: String, m: &mut Measured| -> Result<()> {
+                if keys_only {
+                    m.keys_examined += 1;
+                    if glob_match(&q.pattern, &key) && inner.live(&key, now).is_some_and(|e| e.ty.is_doc()) {
+                        by_key.offer(key, &mut src)?;
+                    }
+                } else if let Some(doc) = Self::examine(inner, q, &key, now, m)? {
+                    by_row.offer((key, doc), &mut src)?;
+                }
+                Ok(())
+            };
+            match chosen.source {
+                Source::Keys(keys) => {
+                    for key in keys {
+                        take(&mut inner, key, &mut m)?;
+                    }
+                }
+                Source::Prefix => {
+                    let mut from: Option<String> = None;
+                    loop {
+                        let chunk = Self::prefix_chunk(&inner, &q.pattern, from.as_deref(), false);
+                        let Some(last) = chunk.last() else { break };
+                        from = Some(last.clone());
+                        for key in chunk {
+                            take(&mut inner, key, &mut m)?;
+                        }
+                    }
+                }
+                Source::Walk(..) => unreachable!("an order index is only chosen to sort"),
+            }
+            let rows = if keys_only {
+                let mut rows = Vec::new();
+                for key in by_key.finish(&mut src)? {
+                    // Looked at already: only the reading is counted again.
+                    let doc = Self::examine(&mut inner, q, &key, now, &mut m)?;
+                    m.keys_examined -= 1;
+                    rows.extend(doc.map(|d| (key, d)));
+                }
+                rows
+            } else {
+                by_row.finish(&mut src)?
+            };
+            m.read_time = started.elapsed() - m.plan_time;
+            for (key, doc) in rows {
+                if !emit(&mut m, key, doc)? {
+                    break;
+                }
+            }
+            m.total_time = started.elapsed();
+            return Ok((chosen.plan, m));
+        }
         let Some(order) = &opts.order else {
             // Key order: the documents go out as they are read.
             let reverse = opts.reverse;
