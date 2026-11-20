@@ -3590,8 +3590,11 @@ KivaDB/
   instance.lock        held by the running KivaDB process
   instance.port        its TCP port (removed when it stops)
   instance.pid         its process id (removed when it stops)
+  tls.lock             held while the certificate of tls/ is created
   history.txt          shell history
   version_check.json   result of the last check for a new release
+  tls/
+    cert.pem, key.pem  the certificate created at the first start
   system/
     system.kiva        users, stored scripts, triggers
   data/                the 'default' workspace
