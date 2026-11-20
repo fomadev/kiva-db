@@ -1,0 +1,40 @@
+{
+  "indexes": [
+    {
+      "pattern": "acc:*",
+      "field": "balance"
+    },
+    {
+      "pattern": "acc:*",
+      "field": "name",
+      "unique": true,
+      "ignore_case": true
+    },
+    {
+      "pattern": "user:*",
+      "field": "role"
+    }
+  ],
+  "vector_indexes": [],
+  "changes": {
+    "values": true,
+    "retain_secs": 315360000,
+    "max_bytes": 268435456
+  },
+  "schemas": [
+    {
+      "pattern": "item:*",
+      "spec": {
+        "price": {
+          "type": "decimal",
+          "required": true
+        },
+        "qty": {
+          "type": "int",
+          "default": 1
+        }
+      },
+      "indexes": []
+    }
+  ]
+}

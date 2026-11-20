@@ -18,7 +18,9 @@
 //! `sync_writes`. Every answer is checked, so that both did the same work.
 //! The cases of orders compare, within one version that has them (2.0.0),
 //! the same orders as typed documents (`KDOC`) and as JSON; a version
-//! without typed values shows none.
+//! without typed values shows none. On the JSON orders, 10 of them sorted by
+//! their total, and 10 drawn at random (`order by random()`, 2.0.0-rc.4 and
+//! later), among every order and among those of a condition.
 
 use kivadb::client::Client;
 use kivadb::value::Value;
@@ -415,6 +417,26 @@ fn orders(bin: &Path, tag: &str, n: usize, r: &mut Results) {
         answers.push(got);
     }
     assert_eq!(answers[0], answers[1], "the JSON and typed orders answer the same");
+
+    // 10 rows out of the JSON orders: sorted by a field (every candidate read,
+    // the first 10 kept), and drawn at random, where the version has it.
+    let rows = |out: &str| out.lines().filter(|l| l.starts_with("oj:")).count();
+    let random = c.exec("get where oj:* order by random() limit 1").is_ok();
+    let mut timed = |name: &str, times: usize, cmd: &str| {
+        let t = Instant::now();
+        let e = r.entry(name.to_string()).or_default();
+        for _ in 0..times {
+            let out = e.time(|| c.exec(cmd).unwrap());
+            assert_eq!(rows(&out), 10, "{cmd}: {out}");
+        }
+        r.get_mut(name).unwrap().ops = times as u64;
+        r.get_mut(name).unwrap().wall = t.elapsed();
+    };
+    timed("orders: 10 sorted by total, condition", 20, "get where oj:*.total > 100.50 order by total limit 10");
+    if random {
+        timed("orders: 10 drawn at random, condition", 20, "get where oj:*.total > 100.50 order by random() limit 10");
+        timed("orders: 10 drawn at random, every order", 50, "get where oj:* order by random() limit 10");
+    }
 }
 
 fn main() {

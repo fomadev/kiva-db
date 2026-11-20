@@ -6,6 +6,8 @@ The query work of 2.0 (`order by`, `explain analyze`, the planner) is measured o
 
 ## What it says
 
+The candidate `2.0.0-rc.4` is measured against `2.0.0-rc.3`, with the cost of `order by random()`, in [rc4.md](rc4.md): no slowdown.
+
 These runs measure 2.0 as it is before the candidate `2.0.0-rc.3`, with the native values (`main` at `7c62009`). The earlier runs, made before the native values (`main` at `a15abdb`, 28 October 2026), are kept in [`runs/a15abdb`](runs/a15abdb) and gave the same picture.
 
 * **On the operations of 1.7.1, 2.0 runs at about the same speed, and slightly slower on simple operations with 100 000 documents.**
