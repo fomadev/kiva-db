@@ -23,7 +23,9 @@ const version = tag.slice(1);
 // The version it is a candidate of (or itself), and the candidate.
 const [, core, candidate] = parsed;
 const repo = process.env.GITHUB_REPOSITORY || "fomadev/kiva-db";
-const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8" }).trim();
+// The answers of GitHub can be large: a comparison since 1.7.1 lists every
+// changed file, past the 1 MB that execFileSync keeps by default.
+const run = (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }).trim();
 const gh = (path) => JSON.parse(run("gh", ["api", path]));
 
 // --- The section of the changelog --------------------------------------------
@@ -70,7 +72,17 @@ const previous = tags.find((t) => !t.includes("-") && compare(t.slice(1), core) 
 const range = previous ? `${previous}...${tag}` : null;
 const isBot = (login) => !login || /\[bot\]$|-bot$/.test(login);
 
-const commits = range ? gh(`repos/${repo}/compare/${range}`).commits : [];
+// Only the fields used below, page by page: the comparison also holds every
+// changed file, and more than 250 commits only come with pages.
+const commitFields =
+  ".commits[] | {parents: [.parents[].sha], author: (if .author then {login: .author.login} else null end), " +
+  "commit: {message: .commit.message, author: {name: .commit.author.name}}}";
+const commits = range
+  ? run("gh", ["api", "--paginate", `repos/${repo}/compare/${range}?per_page=100`, "--jq", commitFields])
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+  : [];
 const people = new Map();
 const credit = (login, name, what) => {
   const who = login ? `@${login}` : name;
@@ -82,7 +94,8 @@ const credit = (login, name, what) => {
 const prNumbers = [];
 for (const c of commits) {
   const subject = c.commit.message.split("\n")[0];
-  const merged = subject.match(/^Merge pull request #(\d+)/);
+  // A merge commit, or a squashed pull request ("Title (#106)").
+  const merged = subject.match(/^Merge pull request #(\d+)/) ?? (c.parents.length === 1 && subject.match(/\(#(\d+)\)$/));
   if (merged) {
     prNumbers.push(Number(merged[1]));
     continue;
