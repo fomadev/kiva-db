@@ -40,6 +40,7 @@ pub mod num;
 pub mod proto;
 pub mod pubsub;
 pub mod query;
+pub mod random;
 pub mod repl;
 pub mod resp;
 pub mod schema;

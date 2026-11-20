@@ -2,7 +2,7 @@
 
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
-**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. Only R0 is implemented so far; each code lot is merged after its own review.
+**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 and R1 are implemented; each code lot is merged after its own review.
 
 Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and C2, and to the branch of C3. Section 1 lists what was checked.
 
@@ -235,8 +235,11 @@ When one command needs many draws, for a large `shuffle` or for `order by random
 
 It follows RFC 9562, method 1:
 
-- `rand_a` holds a 12-bit counter, strictly increasing within one process, which starts from a random value at each new millisecond;
-- when the counter overflows (more than 4096 ids in one millisecond), or when the clock goes back, the timestamp is moved 1 ms forward instead.
+- `rand_a` holds a 12-bit counter, which starts from a random value below 2048 at each new millisecond, leaving room to count;
+- in the same millisecond, or when the clock goes back, the previous timestamp is kept and the counter goes up by one;
+- when the counter is full, the timestamp is moved 1 ms forward, ahead of the clock, and the counter starts again.
+
+The other 62 bits are random. Built in R1 (`src/random.rs`), with tests of a clock going back, a full counter and 10 000 ids in one millisecond.
 
 Ids are therefore strictly increasing within one process, never across nodes.
 

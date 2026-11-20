@@ -204,6 +204,9 @@ fn doc_literal(text: &str) -> Result<Doc, String> {
 /// datetime; a scalar type word (`decimal "0.1"`, `int 25`, `uuid "..."`)
 /// reads the token after it; anything else is read as `set` reads it.
 fn doc_value(c: &mut Cur, key: &str) -> Result<Doc, String> {
+    if let Some(d) = random_value(c) {
+        return Ok(crate::literal::drawn_doc(d?));
+    }
     if let Some(v) = time_expr(c) {
         return Ok(match v? {
             Value::Date(d) => Doc::Date(d),
@@ -390,6 +393,63 @@ fn temporal_literal(ty: Type, text: &str) -> Result<Value, String> {
     }
 }
 
+/// `uuid()`, `random_int(1, 6)`, `random_string(16)`... at the cursor,
+/// read and checked but not drawn (RANDOM_FUNCTIONS.md 12): `None`, with
+/// nothing read, when the tokens do not start one. `uuid "..."` is a type
+/// word, not a call.
+pub(crate) fn random_call(c: &mut Cur) -> Option<Result<crate::random::Gen, String>> {
+    let t = c.peek().filter(|t| t.is_bare() && crate::random::is_name(&t.text))?;
+    let rest = c.rest();
+    if !rest.get(1).is_some_and(|t| t.kind == Kind::LParen) {
+        return None;
+    }
+    let name = t.text.to_ascii_lowercase();
+    let mut args = Vec::new();
+    let mut i = 2;
+    loop {
+        match rest.get(i) {
+            Some(t) if t.kind == Kind::RParen && args.is_empty() => {
+                i += 1;
+                break;
+            }
+            Some(t) if t.is_bare() => {
+                args.push(t.text.clone());
+                i += 1;
+                match rest.get(i) {
+                    Some(t) if t.kind == Kind::Comma => i += 1,
+                    Some(t) if t.kind == Kind::RParen => {
+                        i += 1;
+                        break;
+                    }
+                    _ => return Some(Err(format!("{name}: ',' or ')' is expected after '{}'", args[args.len() - 1]))),
+                }
+            }
+            Some(t) => {
+                return Some(Err(format!("{name}: '{}' is not an argument; write {name}(...) with numbers", t.text)))
+            }
+            None => return Some(Err(format!("{name}: ')' is missing"))),
+        }
+    }
+    for _ in 0..i {
+        c.next();
+    }
+    Some(crate::random::Gen::parse(&name, &args))
+}
+
+/// A call of [`random_call`], drawn.
+pub(crate) fn random_value(c: &mut Cur) -> Option<Result<crate::random::Drawn, String>> {
+    Some(random_call(c)?.and_then(|g| g.draw().map_err(|e| e.to_string())))
+}
+
+/// A drawn value as the value of a key: a number or a text.
+pub(crate) fn drawn_value(d: crate::random::Drawn) -> Value {
+    match d {
+        crate::random::Drawn::Float(f) => Value::Num(crate::random::Drawn::float_text(f)),
+        crate::random::Drawn::Int(i) => Value::Num(i.to_string()),
+        crate::random::Drawn::Text(s) => Value::Str(s),
+    }
+}
+
 /// A moment written with a function or a typed text, then moved by
 /// durations: `now()`, `today()`, `current_timestamp`, `current_date`,
 /// `current_time`, `datetime "2026-10-27 14:30"`, `date "..."`, `time "..."`,
@@ -475,7 +535,11 @@ enum Pending<'a> {
 }
 
 fn value_of<'a>(c: &mut Cur<'a>, forced: Option<Type>) -> Result<Pending<'a>, String> {
-    match time_expr(c) {
+    let moment = match random_value(c) {
+        Some(d) => Some(d.map(drawn_value)),
+        None => time_expr(c),
+    };
+    match moment {
         Some(v) => {
             let v = v?;
             match forced {
@@ -1014,6 +1078,9 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
         }
     }
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
+    if value.is_none() && random_call(&mut c.clone()).is_some() {
+        return Err(crate::literal::RANDOM_IN_CONDITION.into());
+    }
     let value = match value {
         Some(v) => v,
         // `now() - 7 days`, `datetime "2026-01-01"`, `today()`, `time "08:00"`.
@@ -1035,7 +1102,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
                 Kind::Json => match json_literal(&t.text) {
                     Ok(j) => j,
                     // `in [decimal "0.10", decimal "1250.50"]`.
-                    Err(plain) => crate::literal::condition_json(&crate::literal::document(&t.text, plain)?),
+                    Err(plain) => crate::literal::condition_json(&crate::literal::condition_document(&t.text, plain)?),
                 },
                 _ => return Err(USAGE.into()),
             }

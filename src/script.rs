@@ -233,6 +233,27 @@ fn lua_to_doc(v: &LVal, depth: usize) -> mlua::Result<Doc> {
 
 /// `kiva.decimal`, `kiva.date`, `kiva.time`, `kiva.datetime`: a typed value
 /// read from its text in ISO only, as extended JSON reads it.
+/// `kiva.uuid()`, `kiva.random_int(1, 6)`...: drawn when called. The script's
+/// writes are replicated as values, so a replica never draws again.
+fn random_helper(lua: &Lua, name: &'static str) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |lua, args: mlua::Variadic<LVal>| {
+        let texts: Vec<String> = args
+            .iter()
+            .map(|a| match a {
+                LVal::Integer(i) => i.to_string(),
+                LVal::Number(f) if f.fract() == 0.0 && f.abs() < 9.2e18 => format!("{}", *f as i64),
+                other => render(other),
+            })
+            .collect();
+        let call = crate::random::Gen::parse(name, &texts).map_err(|e| lerr(format!("kiva.{e}")))?;
+        Ok(match call.draw().map_err(lerr)? {
+            crate::random::Drawn::Float(f) => LVal::Number(f),
+            crate::random::Drawn::Int(i) => LVal::Integer(i),
+            crate::random::Drawn::Text(s) => LVal::String(lua.create_string(&s)?),
+        })
+    })
+}
+
 fn typed_helper(lua: &Lua, tag: &'static str) -> mlua::Result<mlua::Function> {
     lua.create_function(move |lua, v: LVal| {
         let text = match &v {
@@ -485,6 +506,11 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
         kiva.set("incr", incr)?;
         for (name, tag) in [("decimal", "$decimal"), ("date", "$date"), ("time", "$time"), ("datetime", "$datetime")] {
             kiva.set(name, typed_helper(&lua, tag)?)?;
+        }
+        // From the operating system's generator; `math.random` stays as Lua
+        // has it, which is not cryptographic (RANDOM_FUNCTIONS.md 12.7).
+        for name in ["random", "random_int", "random_string", "random_bytes", "uuid", "uuid_v7"] {
+            kiva.set(name, random_helper(&lua, name)?)?;
         }
         // `kiva.int` checks that its number is an integer; `kiva.float` keeps
         // a float a float, even `8.0`.
