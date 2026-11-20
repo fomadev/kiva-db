@@ -116,3 +116,70 @@ fn replicas_follow_their_master_over_tls() {
     assert_eq!(ok(&mut m, "wait 1"), "OK: 1 replica(s) acknowledged.");
     assert_eq!(ok(&mut r, "get live"), "live: streamed [string]");
 }
+
+/// Every `.tmp` file left in `<home>/tls/`.
+fn leftovers(home: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(home.join("tls"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+#[test]
+fn threads_creating_the_certificate_together_end_up_with_the_same_one() {
+    for round in 0..5 {
+        let dir = TempDir::new(&format!("tls_race_threads_{round}"));
+        let cfg = std::sync::Arc::new(kivadb::config::Config::load(dir.path()).unwrap());
+        let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let creators: Vec<_> = (0..8)
+            .map(|_| {
+                let (home, cfg, start) = (dir.path().to_path_buf(), cfg.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    tls::load_server(&home, &cfg).map(|t| t.fingerprint).map_err(|e| e.to_string())
+                })
+            })
+            .collect();
+        let seen: Vec<String> = creators.into_iter().map(|t| t.join().unwrap().unwrap()).collect();
+        assert!(seen.iter().all(|f| *f == seen[0]), "round {round}: {seen:?}");
+        assert_eq!(tls::load_server(dir.path(), &cfg).unwrap().fingerprint, seen[0], "round {round}");
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new(), "round {round}");
+    }
+}
+
+#[test]
+fn processes_creating_the_certificate_together_end_up_with_the_same_one() {
+    // `kivadb tls` run while a server starts for the first time: each
+    // process finds no certificate, and all must show the one in the files.
+    let dir = TempDir::new("tls_race_processes");
+    let children: Vec<_> = (0..6)
+        .map(|_| {
+            std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+                .arg("--home")
+                .arg(dir.path())
+                .arg("tls")
+                .env("KIVADB_NO_UPDATE_CHECK", "1")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let seen: Vec<String> = children
+        .into_iter()
+        .map(|c| {
+            let out = c.wait_with_output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+            let line = text.lines().find(|l| l.starts_with("SHA-256")).unwrap_or_else(|| panic!("{text}"));
+            line.split(':').skip(1).collect::<Vec<_>>().join(":").trim().to_string()
+        })
+        .collect();
+    assert!(seen.iter().all(|f| *f == seen[0]), "{seen:?}");
+    let cfg = kivadb::config::Config::load(dir.path()).unwrap();
+    assert_eq!(tls::load_server(dir.path(), &cfg).unwrap().fingerprint, seen[0]);
+    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+}

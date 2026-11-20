@@ -77,7 +77,7 @@ pub fn load_server(home: &Path, cfg: &Config) -> Result<ServerTls> {
         let dir = home.join("tls");
         let (c, k) = (dir.join("cert.pem"), dir.join("key.pem"));
         if !c.exists() || !k.exists() {
-            generate(&dir, &c, &k, &hosts)?;
+            create_once(home, &dir, &c, &k, &hosts)?;
         }
         (c, k)
     } else {
@@ -103,9 +103,37 @@ pub fn load_server(home: &Path, cfg: &Config) -> Result<ServerTls> {
     Ok(ServerTls { config: Arc::new(config), fingerprint, cert_path })
 }
 
+/// Creates the certificate of `<home>/tls/` unless another process (or
+/// thread) does it at the same moment: a server starting for the first time
+/// and `kivadb tls` or `kivadb doctor` run then all find no certificate.
+/// One of them creates it while holding `<home>/tls.lock`; the others wait
+/// for it, then read the pair it published instead of creating another.
+///
+/// The lock is kept out of `tls/`, which backups copy whole (and a locked
+/// file cannot be read on Windows). It goes with the process that held it.
+fn create_once(home: &Path, dir: &Path, cert: &Path, key: &Path, extra: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(home.join("tls.lock"))?;
+    match lock.lock() {
+        Ok(()) => {}
+        // A file system without locks: create it anyway, as before.
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => {}
+        Err(e) => return Err(e.into()),
+    }
+    if cert.exists() && key.exists() {
+        return Ok(()); // created by whoever held the lock before us
+    }
+    generate(cert, key, extra)
+}
+
 /// A self-signed certificate valid for this machine's usual names, plus
 /// `extra` (comma-separated names or IP addresses, from `tls.hosts`).
-fn generate(dir: &Path, cert: &Path, key: &Path, extra: &str) -> Result<()> {
+///
+/// Both files are written under temporary names, then renamed into place:
+/// the certificate goes last, and a half of an older pair left alone is
+/// removed first, so that whoever finds both files finds a whole pair that
+/// belongs together.
+fn generate(cert: &Path, key: &Path, extra: &str) -> Result<()> {
     let mut names = vec!["localhost".to_string(), "127.0.0.1".to_string(), "::1".to_string()];
     if let Ok(h) = std::env::var("HOSTNAME").or_else(|_| std::env::var("COMPUTERNAME")) {
         names.push(h.to_ascii_lowercase());
@@ -118,24 +146,51 @@ fn generate(dir: &Path, cert: &Path, key: &Path, extra: &str) -> Result<()> {
     params.not_before = rcgen::date_time_ymd(2025, 1, 1);
     params.not_after = rcgen::date_time_ymd(2125, 1, 1);
     let certificate = params.self_signed(&key_pair).map_err(tls_err)?;
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(cert, certificate.pem())?;
-    write_private(key, key_pair.serialize_pem().as_bytes())?;
+    let (cert_tmp, key_tmp) = (temporary(cert), temporary(key));
+    let published = write_new(&key_tmp, key_pair.serialize_pem().as_bytes(), true)
+        .and_then(|()| write_new(&cert_tmp, certificate.pem().as_bytes(), false))
+        .and_then(|()| match std::fs::remove_file(cert) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        })
+        .and_then(|()| std::fs::rename(&key_tmp, key))
+        .and_then(|()| std::fs::rename(&cert_tmp, cert));
+    if let Err(e) = published {
+        let _ = std::fs::remove_file(&key_tmp);
+        let _ = std::fs::remove_file(&cert_tmp);
+        return Err(e.into());
+    }
+    #[cfg(unix)]
+    if let Some(dir) = cert.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
     Ok(())
 }
 
-/// Writes a file only its owner can read (the private key).
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// A name next to `path` that no other process or thread writes to.
+fn temporary(path: &Path) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{}.{n}.tmp", std::process::id()));
+    PathBuf::from(name)
+}
+
+/// Writes a new file whole, on disk; `private` makes it readable by its
+/// owner only (the private key).
+fn write_new(path: &Path, bytes: &[u8], private: bool) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
+    if private {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-        f.write_all(bytes)
+        options.mode(0o600);
     }
     #[cfg(not(unix))]
-    {
-        std::fs::write(path, bytes)
-    }
+    let _ = private;
+    let mut f = options.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
 }
 
 /// What a listener does with a new connection: `Some((stream, peer))` to

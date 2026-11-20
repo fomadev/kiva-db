@@ -216,6 +216,10 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
             return 1;
         }
     }
+    // The certificate is loaded, or created on the first start, before any
+    // port opens: whoever sees a port open, `kivadb tls` included, finds the
+    // certificate this server uses.
+    let tls = inst.tls();
     let tcp_port = match server::start_tcp(&inst, &bind, port) {
         Ok(p) => p,
         Err(e) => {
@@ -227,7 +231,7 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     println!("  Home         : {}", inst.home.display());
     println!("  TCP protocol : {bind}:{tcp_port} (binary and plain text)");
     let tls_required = inst.cfg().get_bool("tls", "required");
-    match inst.tls() {
+    match tls {
         Some(t) => println!(
             "  TLS          : on every port{}, certificate SHA-256 {}",
             if tls_required { ", required from other machines" } else { "" },
