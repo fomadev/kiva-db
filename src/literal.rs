@@ -457,6 +457,9 @@ impl<'a> Parser<'a> {
             if self.in_condition {
                 return Err(self.err_at(start, RANDOM_IN_CONDITION));
             }
+            if crate::random::is_array_name(&word) {
+                return self.array_call(&word, start, depth);
+            }
             return self.random(&word, start);
         }
         match word.as_str() {
@@ -551,6 +554,39 @@ impl<'a> Parser<'a> {
         Ok(drawn_doc(drawn))
     }
 
+    /// `shuffle([...])`, `sample([...])`, `sample([...], 2)`: the array is
+    /// read as any value, typed values and functions included, then shuffled
+    /// or sampled once, here (RANDOM_FUNCTIONS.md 12.5).
+    fn array_call(&mut self, word: &str, start: usize, depth: usize) -> R<Doc> {
+        self.ws();
+        self.eat(b'(');
+        let arg_at = {
+            self.ws();
+            self.i
+        };
+        let items = match self.value(depth + 1)? {
+            Doc::Array(items) => items,
+            other => return Err(self.err_at(arg_at, format!("{word} takes an array, not {}", other.type_name()))),
+        };
+        self.ws();
+        let count = if self.eat(b',') {
+            self.ws();
+            let at = self.i;
+            while self.i < self.b.len() && !matches!(self.b[self.i], b')' | b' ' | b'\t' | b'\n' | b'\r') {
+                self.i += 1;
+            }
+            self.ws();
+            Some(self.s[at..self.i].trim().to_string())
+        } else {
+            None
+        };
+        if !self.eat(b')') {
+            return Err(self.err(format!("{word}: ')' is expected")));
+        }
+        let call = crate::random::ArrayFn::parse(word, count.as_deref()).map_err(|e| self.err_at(start, e))?;
+        array_result(call, items).map_err(|e| self.err_at(start, e))
+    }
+
     /// `now()`, `today()`, `current_timestamp`... then `+ 30 days`, `- 2 hours`.
     fn moment(&mut self, word: &str, start: usize) -> R<Doc> {
         let call = {
@@ -610,6 +646,14 @@ impl<'a> Parser<'a> {
             };
         }
     }
+}
+
+/// `shuffle`, `sample` applied to the elements of an array: an array, or one element.
+pub fn array_result(call: crate::random::ArrayFn, items: Vec<Doc>) -> Result<Doc, String> {
+    Ok(match call.apply(items, &mut crate::random::Source::new())? {
+        crate::random::Picked::One(d) => d,
+        crate::random::Picked::Many(v) => Doc::Array(v),
+    })
 }
 
 /// A drawn value as a value of a document.

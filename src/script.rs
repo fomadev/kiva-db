@@ -254,6 +254,27 @@ fn random_helper(lua: &Lua, name: &'static str) -> mlua::Result<mlua::Function> 
     })
 }
 
+/// `kiva.shuffle(list)`, `kiva.sample(list)`, `kiva.sample(list, n)`: a
+/// new list, or one element; the list given is left as it was.
+fn array_helper(lua: &Lua, name: &'static str) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |lua, (list, n): (LVal, Option<LVal>)| {
+        let LVal::Table(t) = list else {
+            return Err(lerr(format!("kiva.{name} takes a list (a table 1, 2, 3...), not a Lua {}", list.type_name())));
+        };
+        let items: Vec<LVal> = t.sequence_values::<LVal>().collect::<mlua::Result<_>>()?;
+        let count = n.map(|v| match v {
+            LVal::Integer(i) => i.to_string(),
+            LVal::Number(f) if f.fract() == 0.0 && f.abs() < 9.2e18 => format!("{}", f as i64),
+            other => render(&other),
+        });
+        let call = crate::random::ArrayFn::parse(name, count.as_deref()).map_err(|e| lerr(format!("kiva.{e}")))?;
+        match call.apply(items, &mut crate::random::Source::new()).map_err(|e| lerr(format!("kiva.{e}")))? {
+            crate::random::Picked::One(v) => Ok(v),
+            crate::random::Picked::Many(v) => Ok(LVal::Table(lua.create_sequence_from(v)?)),
+        }
+    })
+}
+
 fn typed_helper(lua: &Lua, tag: &'static str) -> mlua::Result<mlua::Function> {
     lua.create_function(move |lua, v: LVal| {
         let text = match &v {
@@ -511,6 +532,9 @@ fn run_lua(sess: &mut Session, source: &str, args: &[String]) -> Result<ScriptOu
         // has it, which is not cryptographic (RANDOM_FUNCTIONS.md 12.7).
         for name in ["random", "random_int", "random_string", "random_bytes", "uuid", "uuid_v7"] {
             kiva.set(name, random_helper(&lua, name)?)?;
+        }
+        for name in ["shuffle", "sample"] {
+            kiva.set(name, array_helper(&lua, name)?)?;
         }
         // `kiva.int` checks that its number is an integer; `kiva.float` keeps
         // a float a float, even `8.0`.

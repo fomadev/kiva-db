@@ -1023,6 +1023,38 @@ Error: random_string: the length '0' is not a whole number from 1 to 1024
 * **The operating system's generator**: every function, `random()` included, draws from the cryptographic generator of the system. If it ever fails, the command fails with `ERR_RANDOM_UNAVAILABLE` and writes nothing; KivaDB never falls back on a predictable value. `random_string` and `random_bytes` can therefore make tokens and codes. Lua's own `math.random` is not cryptographic: use `kiva.random_string` or `kiva.random_bytes` in scripts.
 * **UUIDs are texts**: KivaDB has no UUID type, and stores them as strings of 36 characters.
 
+**Arrays.** Two functions take an array, written in place (JSON or typed values, functions included):
+
+| Function | Gives |
+| :--- | :--- |
+| `shuffle(array)` | the same elements in a random order, every order equally likely; `shuffle([])` is `[]` |
+| `sample(array)` | one element, not an array; refused on an empty array |
+| `sample(array, n)` | an array of `n` elements taken at `n` different positions, in random order; `n` from 0 to the length of the array |
+
+<!-- not run: the values are drawn at random -->
+```text
+kiva> set quiz:1 {"questions": shuffle(["Q1", "Q2", "Q3", "Q4"]), "bonus": sample(["X", "Y", "Z"]), "two": sample([10, 20, 30, 40], 2)}
+OK: quiz:1 saved.
+kiva> get quiz:1
+quiz:1: {"questions":["Q3","Q1","Q4","Q2"],"bonus":"Z","two":[40,10]} [object]
+```
+
+```text
+kiva> set winner sample(["Amani"])
+OK: winner saved.
+kiva> get winner
+winner: Amani [string]
+kiva> set two sample([1, 2], 3)
+Error: sample: 3 elements asked of an array of 2
+kiva> set nobody sample([])
+Error: sample: an empty array has no element to give
+```
+
+* `sample(array, n)` never answers with fewer elements than asked: asking more than the array holds is an error. Positions are distinct, so a value comes back twice only if the array holds it twice.
+* Elements keep their types: `shuffle([decimal "1.50", date "2026-01-15"])` keeps a decimal and a date.
+* They are written where the functions above are, except `print` and schema defaults. `json set quiz:1 .order shuffle([1, 2, 3])` writes a shuffled array; shuffling an array already stored in the document is not offered.
+* In Lua, `kiva.shuffle(list)` and `kiva.sample(list [, n])` return a new list, or one element, and leave the list given as it was.
+
 ---
 
 ## Chapter 6 — Writing, reading and deleting
@@ -5084,6 +5116,7 @@ The code goes between single quotes so that double quotes can be used inside. Wh
 | `kiva.decimal(text)`, `kiva.date(text)`, `kiva.time(text)`, `kiva.datetime(text)` | A typed value, read in ISO (a datetime with its offset), to store alone or inside a table |
 | `kiva.int(n)`, `kiva.float(x)` | A number of that kind: `kiva.float(8)` is stored as `8.0` |
 | `kiva.random()`, `kiva.random_int(min, max)`, `kiva.random_string(n)`, `kiva.random_bytes(n)`, `kiva.uuid()`, `kiva.uuid_v7()` | The values of [5.11](#511-random-values-and-uuids), from the operating system's generator. Lua's `math.random` is not cryptographic: do not use it for tokens |
+| `kiva.shuffle(list)`, `kiva.sample(list [, n])` | A new list in random order, one element, or `n` elements; the list given is left as it was |
 
 How values travel between KivaDB and Lua:
 
@@ -5795,6 +5828,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `set datetime <key> "2026-10-27 14:30"`, `set date <key> "..."`, `set time <key> "..."` | A moment ([5.8](#58-date-datetime-time)) |
 | `set <key> now()` / `today()` / `current_time`, `+ 7 days`, `- 2 hours` | The moment of the action, moved by durations |
 | `set <key> uuid()` / `uuid_v7()` / `random_int(1, 6)` / `random()` / `random_string(16)` / `random_bytes(32)` | A value drawn at random ([5.11](#511-random-values-and-uuids)) |
+| `set <key> shuffle([...])` / `sample([...])` / `sample([...], n)` | An array in random order, one element, or `n` elements ([5.11](#511-random-values-and-uuids)) |
 | `add <prefix> <value> [ttl <sec>]` | Create a key named by KivaDB: `<prefix>` + a new identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |

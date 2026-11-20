@@ -204,6 +204,9 @@ fn doc_literal(text: &str) -> Result<Doc, String> {
 /// datetime; a scalar type word (`decimal "0.1"`, `int 25`, `uuid "..."`)
 /// reads the token after it; anything else is read as `set` reads it.
 fn doc_value(c: &mut Cur, key: &str) -> Result<Doc, String> {
+    if let Some(d) = array_value(c) {
+        return d;
+    }
     if let Some(d) = random_value(c) {
         return Ok(crate::literal::drawn_doc(d?));
     }
@@ -398,7 +401,9 @@ fn temporal_literal(ty: Type, text: &str) -> Result<Value, String> {
 /// nothing read, when the tokens do not start one. `uuid "..."` is a type
 /// word, not a call.
 pub(crate) fn random_call(c: &mut Cur) -> Option<Result<crate::random::Gen, String>> {
-    let t = c.peek().filter(|t| t.is_bare() && crate::random::is_name(&t.text))?;
+    let t = c
+        .peek()
+        .filter(|t| t.is_bare() && crate::random::is_name(&t.text) && !crate::random::is_array_name(&t.text))?;
     let rest = c.rest();
     if !rest.get(1).is_some_and(|t| t.kind == Kind::LParen) {
         return None;
@@ -434,6 +439,68 @@ pub(crate) fn random_call(c: &mut Cur) -> Option<Result<crate::random::Gen, Stri
         c.next();
     }
     Some(crate::random::Gen::parse(&name, &args))
+}
+
+/// Whether a call of a random function, of values or of arrays, starts at the cursor.
+fn function_follows(c: &Cur) -> bool {
+    let rest = c.rest();
+    rest.first().is_some_and(|t| t.is_bare() && crate::random::is_name(&t.text))
+        && rest.get(1).is_some_and(|t| t.kind == Kind::LParen)
+}
+
+/// `shuffle([...])`, `sample([...])`, `sample([...], 2)` at the cursor,
+/// applied (RANDOM_FUNCTIONS.md 12.5): `None`, with nothing read, when the
+/// tokens do not start one.
+pub(crate) fn array_value(c: &mut Cur) -> Option<Result<Doc, String>> {
+    let t = c.peek().filter(|t| t.is_bare() && crate::random::is_array_name(&t.text))?;
+    let rest = c.rest();
+    if !rest.get(1).is_some_and(|t| t.kind == Kind::LParen) {
+        return None;
+    }
+    let name = t.text.to_ascii_lowercase();
+    let read = || -> Result<(Doc, usize, Option<String>), String> {
+        let usage = || format!("{name} takes an array: {name}([\"A\", \"B\", \"C\"])");
+        let arg = rest.get(2).filter(|t| t.kind == Kind::Json).ok_or_else(usage)?;
+        let items = doc_literal(&arg.text)?;
+        let (count, used) = match (rest.get(3), rest.get(4), rest.get(5)) {
+            (Some(r), ..) if r.kind == Kind::RParen => (None, 4),
+            (Some(comma), Some(n), Some(r)) if comma.kind == Kind::Comma && n.is_bare() && r.kind == Kind::RParen => {
+                (Some(n.text.clone()), 6)
+            }
+            _ => return Err(format!("{name}: ')' is expected after the array, or ', <count>)' for sample")),
+        };
+        Ok((items, used, count))
+    };
+    let result = read().and_then(|(items, used, count)| {
+        let call = crate::random::ArrayFn::parse(&name, count.as_deref())?;
+        let Doc::Array(items) = items else {
+            return Err(format!("{name} takes an array, not {}", items.type_name()));
+        };
+        Ok((crate::literal::array_result(call, items)?, used))
+    });
+    Some(result.map(|(d, used)| {
+        for _ in 0..used {
+            c.next();
+        }
+        d
+    }))
+}
+
+/// A value of a document (an element given by `sample`, an array given by
+/// `shuffle`) as the value of a key.
+pub(crate) fn doc_value_of(d: Doc) -> Result<Value, String> {
+    Ok(match d {
+        Doc::Null => Value::Null,
+        Doc::Bool(b) => Value::Bool(b),
+        Doc::Int(i) => Value::Num(i.to_string()),
+        Doc::Float(f) => Value::Num(crate::random::Drawn::float_text(f)),
+        Doc::Decimal(d) => Value::Decimal(d),
+        Doc::Str(s) => Value::Str(s),
+        Doc::Date(d) => Value::Date(d),
+        Doc::DateTime(t) => Value::DateTime(t),
+        Doc::Time(t) => Value::Time(t),
+        d @ (Doc::Array(_) | Doc::Object(_)) => Value::typed(d).map_err(|e| e.to_string())?,
+    })
 }
 
 /// A call of [`random_call`], drawn.
@@ -535,9 +602,12 @@ enum Pending<'a> {
 }
 
 fn value_of<'a>(c: &mut Cur<'a>, forced: Option<Type>) -> Result<Pending<'a>, String> {
-    let moment = match random_value(c) {
-        Some(d) => Some(d.map(drawn_value)),
-        None => time_expr(c),
+    let moment = match array_value(c) {
+        Some(d) => Some(d.and_then(doc_value_of)),
+        None => match random_value(c) {
+            Some(d) => Some(d.map(drawn_value)),
+            None => time_expr(c),
+        },
     };
     match moment {
         Some(v) => {
@@ -1078,7 +1148,7 @@ fn parse_one_cond(c: &mut Cur, pattern: Option<&str>) -> Result<(Cond, bool), St
         }
     }
     let op = CmpOp::parse(&op_text).ok_or_else(|| format!("unknown comparison operator '{op_text}'"))?;
-    if value.is_none() && random_call(&mut c.clone()).is_some() {
+    if value.is_none() && function_follows(c) {
         return Err(crate::literal::RANDOM_IN_CONDITION.into());
     }
     let value = match value {
