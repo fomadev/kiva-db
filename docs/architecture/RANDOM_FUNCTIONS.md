@@ -2,7 +2,7 @@
 
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
-**Nothing here is implemented.** No code starts before the maintainer approves this note, and each lot waits for its own approval.
+**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. Only R0 is implemented so far; each code lot is merged after its own review.
 
 Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and C2, and to the branch of C3. Section 1 lists what was checked.
 
@@ -199,3 +199,78 @@ None starts before its approval. R0 can be done at any time.
 | A `uuid` type, a `seed` for samples, functions in REST bodies | No | Not needed for the uses described; each adds syntax or a type |
 
 Order: R0 first, as it is a fix. Then R1 and R2 after C3 is merged, and R3 after C4. The integrity of documents (C3 to C5) stays ahead of these functions.
+
+## 12. Decisions for 2.0.0 (approved 2026-11-20)
+
+The maintainer approved the functions for 2.0.0 itself, not 2.1, and the seven decisions below. They replace sections 5.2, 10 and 11 where those differ. The audit was made again on `main` at `73f22b0` (`v2.0.0-rc.3`):
+
+- R0 is done;
+- the typed literal parser of C4 (`literal.rs`) is merged and already reads `now()` inside documents, so the functions inside documents no longer wait on anything;
+- no random function or UUID generator exists yet.
+
+### 12.1 The lots
+
+| Lot | Content |
+| :--- | :--- |
+| R1 | Generators: `random()`, `rand()`, `random_int`, `random_string`, `random_bytes`, `uuid`, `uuid_v7` |
+| R2 | Arrays: `shuffle(array)`, `sample(array)`, `sample(array, n)` |
+| R3 | Queries: `order by random() limit N` |
+| R4 | REST and structured requests, the Node.js and Python drivers |
+
+Each lot brings its functions to every place of 12.7 at once (shell, `.kva` scripts, documents, `json set`, schema defaults, Lua), so that each pull request can be used on its own. Version `2.0.0-rc.4` is prepared after R4, and tagged by the maintainer.
+
+### 12.2 One source
+
+Every function draws from the operating system's generator (`util::fill_random`), `random()` included. There is no local generator and no new dependency.
+
+When one command needs many draws, for a large `shuffle` or for `order by random()`, they are taken from a block of bytes drawn once for the command instead of one system call each. When the generator fails, the command fails with `ERR_RANDOM_UNAVAILABLE` and nothing is written.
+
+### 12.3 `random_bytes(n)`
+
+`random_bytes(n)` is added. It gives `n` random bytes, written as a text in base64url without padding, with 1 ≤ `n` ≤ 1024. The strength of a token is then said in bytes.
+
+`random_string(n)` stays on `A-Z a-z 0-9`; there is no `hex` or `base64url` option.
+
+### 12.4 `uuid_v7()`
+
+It follows RFC 9562, method 1:
+
+- `rand_a` holds a 12-bit counter, strictly increasing within one process, which starts from a random value at each new millisecond;
+- when the counter overflows (more than 4096 ids in one millisecond), or when the clock goes back, the timestamp is moved 1 ms forward instead.
+
+Ids are therefore strictly increasing within one process, never across nodes.
+
+### 12.5 Arrays
+
+| Call | Answer |
+| :--- | :--- |
+| `shuffle([])` | `[]` |
+| `sample(a)` | one element, not an array; refused on an empty array |
+| `sample(a, n)` | an array of `n` elements taken at distinct positions, in random order. Equal values may come back if the array holds them. 0 ≤ `n` ≤ length; a larger `n` is refused, not answered shorter |
+
+Arrays are bounded by the size of a document, and elements keep their types.
+
+### 12.6 Queries: one syntax
+
+Only `order by random() limit N` is added. `sample n` (5.2) is not, since it would do the same thing; the word `sample` stays for arrays.
+
+| Rule | |
+| :--- | :--- |
+| `limit` | required, 1 to 10 000 |
+| `after` | refused: a random order has no next page |
+| Algorithm | reservoir sampling (Vitter's Algorithm L), memory for `N` rows; the `N` rows come in random order |
+| Indexes alone decide, or no condition | the reservoir runs over the keys, and only the `N` documents chosen are read |
+| A condition needs the document | every candidate is read and tested, as in any such query |
+| `explain` | says which of the two applies; `explain analyze` counts the documents read |
+
+### 12.7 Where the functions are accepted
+
+| Accepted | Refused |
+| :--- | :--- |
+| `set`, `print` | Conditions (`where ... = random()`): a random filter has no stable meaning, so it is refused with a message |
+| Inside documents, through the typed literal parser | `$fn` forms in REST and structured bodies (only `"order_by": "random()"` there) |
+| `json set`, `json append`, `json insert` | New Redis commands: `KIVA.API` carries the structured request |
+| Schema defaults (`"default": "uuid_v7()"`) | |
+| Lua: `kiva.random`, `kiva.random_int`, `kiva.random_string`, `kiva.random_bytes`, `kiva.uuid`, `kiva.uuid_v7`, `kiva.shuffle`, `kiva.sample`; `math.random` stays, documented as not cryptographic | |
+
+Principles 1 and 2 hold everywhere: each occurrence is evaluated once when the command is read, a schema default at the commit, and only values are stored, so the journal, replication and backups carry them as written. KivaDB never retries a command; a program that sends one again gets new values, as with `now()`. Storage formats do not change.
