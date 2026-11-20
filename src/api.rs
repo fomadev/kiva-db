@@ -29,11 +29,22 @@ fn invalid(msg: impl Into<String>) -> KivaError {
 /// The query of a structured request:
 /// - `"target": "user:*", "where": {...}` (see [`crate::query::Expr::from_json`]);
 /// - `"target": "user:*.age", "cmp": ">", "value": 18`: one comparison;
-/// - for an aggregate, `"target": "user:*"` alone: every document.
+/// - for an aggregate, `"target": "user:*"` alone: every document;
+/// - with `"order_by": "random()"`, `"target": "user:*"` alone too: a draw
+///   among every document of the pattern (RANDOM_FUNCTIONS.md 12.6).
 fn request_query(req: &Json, aggregate: bool) -> Result<crate::query::Query> {
     use crate::query::{Expr, Query};
     let target = str_field(req, "target")?;
     let single = !req["cmp"].is_null() || !req["value"].is_null();
+    if !aggregate && !single && req["where"].is_null() && is_random_order(req) {
+        if crate::exec::split_target(target).is_ok() {
+            return Err(invalid(format!(
+                "with \"order_by\": \"random()\" and no condition, \"target\" is the key pattern alone \
+                 ('{target}' names a field after it)"
+            )));
+        }
+        return Ok(Query { pattern: target.to_string(), expr: None });
+    }
     if !req["where"].is_null() {
         if single {
             return Err(invalid("give either \"where\" or \"cmp\" and \"value\", not both"));
@@ -76,8 +87,41 @@ fn date_tags_as_text(j: &Json) -> Json {
     }
 }
 
+/// Whether `"order_by"` asks for a random order: `"random()"`, `"random() desc"` too, so
+/// that the direction is refused with its own message.
+fn is_random_order(req: &Json) -> bool {
+    req["order_by"].as_str().is_some_and(|s| {
+        let s = s.trim_start();
+        s.len() >= 8 && s[..8].eq_ignore_ascii_case("random()")
+    })
+}
+
 /// `"order_by": "created_at desc"`, `"after"`, `"reverse"` and `"limit"` of a query.
 fn read_opts(req: &Json, q: &crate::query::Query, limit: usize) -> Result<crate::engine::ReadOpts> {
+    if is_random_order(req) {
+        // `"order_by": "random()"`: `"limit"` given, from 1 to 10 000; no page,
+        // no direction (RANDOM_FUNCTIONS.md 12.6).
+        let max = crate::exec::MAX_RANDOM_ROWS;
+        if req["order_by"].as_str().is_some_and(|s| !s.trim().eq_ignore_ascii_case("random()")) {
+            return Err(invalid("\"order_by\": a random order has no direction: \"random()\""));
+        }
+        let limit = match req["limit"].as_u64() {
+            Some(n) if (1..=max as u64).contains(&n) => n as usize,
+            _ => {
+                return Err(invalid(format!(
+                    "\"order_by\": \"random()\" needs a \"limit\" from 1 to {max}: every row drawn is held \
+                     until the end"
+                )))
+            }
+        };
+        if !req["after"].is_null() {
+            return Err(invalid("\"after\" has no meaning with a random order: it has no next page"));
+        }
+        if req["reverse"].as_bool().unwrap_or(false) {
+            return Err(invalid("\"reverse\" has no meaning with a random order"));
+        }
+        return Ok(crate::engine::ReadOpts { limit, random: true, ..Default::default() });
+    }
     let order = match &req["order_by"] {
         Json::Null => None,
         Json::String(s) => {

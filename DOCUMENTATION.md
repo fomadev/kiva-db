@@ -3814,7 +3814,7 @@ The command language answers with text written for people. A program that needs 
 | `del` | `key` | `deleted` |
 | `stats` | - | The figures of the `stats` command, as fields |
 | `users` | - | `users`: name, role, grants, default workspace, created, whether the password is empty (admin only) |
-| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below); `order_by` (`"created_at desc"`), `after` (a key), `reverse` | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
+| `query` | `target` (`user:*.age`), `cmp` (`=` `!=` `>` `>=` `<` `<=` `in` `like` `ilike`), `value`, `limit`; or `target` (`user:*`) and `where` (below); `order_by` (`"created_at desc"`, or `"random()"` with a `limit` from 1 to 10 000, then `target` may be a pattern alone: [11.2](#112-get-where--find-documents)), `after` (a key), `reverse` | `rows`: key and document; `plan` ([11.6](#116-what-a-query-does-not-do)) |
 | `aggregate` | `target` (`user:*`), optional `where`, `group_by`, `compute`, `limit` | `matches` and `values`; with `group_by`, `groups`: `key`, `matches`, `values`; `plan` |
 | `explain` | the same as `query`; `analyze`: `true` to run it | `plan`: strategy, index, candidates, total keys, order; `suggestion`: the index to create, if any; with `analyze`, `analyze`: the counts and times of [11.5](#115-explain--see-how-a-query-will-run) |
 | `similar` | `target` (`doc:*.embedding`), `vector`, `limit`, `metric` | `results`: key, score, document; `compared`; `indexed` |
@@ -4702,6 +4702,8 @@ const { key, id } = await db.add("place:", { type: "QUARTIER", parent: "place:1"
 const quarters = await db.query("place:*", { type: "QUARTIER", parent: "place:1" });
 const found = await db.query("place:*", { field: "name", cmp: "ilike", value: "kat%" });
 const children = await db.query("place:*", { parent: ["place:1", "place:2"] });   // a list means in
+const sorted = await db.query("place:*", { type: "QUARTIER" }, { orderBy: "name desc" });
+const three = await db.query("place:*", null, { orderBy: "random()", limit: 3 });   // drawn at random
 try {
   await db.add("place:", { type: "QUARTIER", parent: "place:1", name: "KATINDO" });
 } catch (err) {
@@ -4764,6 +4766,7 @@ with kivadb.connect(host="localhost", port=2911, user="kiva", password="") as db
     db.set("user:1:seen", dt.datetime.now(dt.timezone.utc))      # a datetime
     print(db.get("user:1"))
     print(db.query("user:*", {"role": "dev"}, order_by="name", limit=20))
+    print(db.query("user:*", order_by="random()", limit=3))   # 3 drawn at random
     with db.transaction():
         db.set("acct:a", 10)
         db.set("acct:b", 20)

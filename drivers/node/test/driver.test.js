@@ -151,6 +151,19 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     await assert.rejects(db.exec('set place:x {"type": "VILLE", "parent": null, "name": "goma"}'), (err) => err.code === "UNIQUE");
     const other = await db.query("place:*", { field: "name", cmp: "like", value: "%x%" });
     assert.deepEqual(other, []);
+
+    // Drawn at random: among every document of the pattern, or those that pass.
+    const drawn = await db.query("place:*", null, { orderBy: "random()", limit: 2 });
+    assert.equal(drawn.length, 2);
+    assert.notEqual(drawn[0].key, drawn[1].key);
+    const quarters = await db.query("place:*", { type: "QUARTIER" }, { orderBy: "random()", limit: 10 });
+    assert.deepEqual(names(quarters).sort(), ["Himbi", "Katindo"]);
+    const byName = await db.query("place:*", { type: "QUARTIER" }, { orderBy: "name desc" });
+    assert.deepEqual(names(byName), ["Katindo", "Himbi"]);
+    await assert.rejects(
+      db.api({ op: "query", target: "place:*", order_by: "random()" }),
+      (err) => err instanceof KivaError && /needs a "limit"/.test(err.message),
+    );
     await assert.rejects(db.set("ghost", "x", { mode: "update" }), (err) => err.code === undefined);
   });
 

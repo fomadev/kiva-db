@@ -360,7 +360,9 @@ class Client:
         after: Optional[str],
         reverse: bool,
     ) -> Dict[str, Any]:
-        req: Dict[str, Any] = {"target": pattern, "where": condition(where)}
+        req: Dict[str, Any] = {"target": pattern}
+        if where is not None:
+            req["where"] = condition(where)
         if limit is not None:
             req["limit"] = limit
         if order_by:
@@ -374,7 +376,7 @@ class Client:
     def query(
         self,
         pattern: str,
-        where: Any,
+        where: Any = None,
         *,
         limit: int = 100,
         order_by: Optional[str] = None,
@@ -386,7 +388,10 @@ class Client:
         ``{"role": "dev"}``, ``{"field": "age", "cmp": ">", "value": 18}``,
         ``{"and": [...]}``, ``{"or": [...]}``, ``{"not": {...}}``; a moment
         as ``{"$datetime": "2026-10-27T13:30:00Z"}``. ``order_by``:
-        ``"created_at desc"``; ``after``: the last key of the previous page.
+        ``"created_at desc"``, or ``"random()"`` for ``limit`` documents drawn
+        at random, in a random order (KivaDB 2.0.0-rc.4 or later); with
+        ``"random()"``, ``where`` may be ``None``: every document of the
+        pattern. ``after``: the last key of the previous page.
         ``limit`` at most 10 000."""
         req = self._query(pattern, where, limit, order_by, after, reverse)
         rows = self._api({"op": "query", **req})["rows"]
@@ -395,7 +400,7 @@ class Client:
     def explain(
         self,
         pattern: str,
-        where: Any,
+        where: Any = None,
         *,
         analyze: bool = False,
         limit: Optional[int] = None,

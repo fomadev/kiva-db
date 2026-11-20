@@ -415,13 +415,19 @@ class KivaClient extends EventEmitter {
    * The condition is JSON: {type: "VILLE"} (equalities), {city: ["Goma", "Bukavu"]}
    * (in), {field: "name", cmp: "ilike", value: "kin%"}, {and: [...]}, {or: [...]},
    * {not: {...}}. in, like and ilike need KivaDB 1.7.0 or later.
+   * options.orderBy: "created_at desc", or "random()" for `limit` documents
+   * drawn at random, in a random order (KivaDB 2.0.0-rc.4 or later); with
+   * "random()", `where` may be null: every document of the pattern.
    * @param {string} pattern e.g. "place:*"
-   * @param {object} where the condition
-   * @param {object} [options] limit (100, at most 10000)
+   * @param {object|null} where the condition
+   * @param {object} [options] limit (100, at most 10000), orderBy
    * @returns {Promise<{key: string, value: any}[]>}
    */
   async query(pattern, where, options = {}) {
-    const r = await this._api({ op: "query", target: pattern, where, limit: options.limit || 100 });
+    const req = { op: "query", target: pattern, limit: options.limit || 100 };
+    if (where !== undefined && where !== null) req.where = where;
+    if (options.orderBy) req.order_by = options.orderBy;
+    const r = await this._api(req);
     return r.rows.map((row) => ({ key: row.key, value: this._value(row.value) }));
   }
 

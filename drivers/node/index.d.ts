@@ -125,8 +125,16 @@ export class KivaClient extends EventEmitter {
   set(key: string, value: unknown, options?: SetOptions): Promise<void>;
   /** Stores a value under `prefix` + a new identifier (KivaDB 1.7.0 or later). */
   add(prefix: string, value: unknown, options?: AddOptions): Promise<{ key: string; id: string }>;
-  /** The documents of `pattern` that satisfy `where`, in key order (default limit 100). */
-  query<T = unknown>(pattern: string, where: Where, options?: { limit?: number }): Promise<{ key: string; value: T }[]>;
+  /**
+   * The documents of `pattern` that satisfy `where`, in key order (default limit 100).
+   * `orderBy`: "created_at desc", or "random()" for `limit` documents drawn at random
+   * (KivaDB 2.0.0-rc.4 or later), where `where` may be null: every document of the pattern.
+   */
+  query<T = unknown>(
+    pattern: string,
+    where: Where | null,
+    options?: { limit?: number; orderBy?: string },
+  ): Promise<{ key: string; value: T }[]>;
   del(key: string): Promise<boolean>;
   scan(pattern?: string, limit?: number): Promise<KeyInfo[]>;
   similar<T = unknown>(target: string, vector: number[], options?: SimilarOptions): Promise<SimilarResult<T>[]>;

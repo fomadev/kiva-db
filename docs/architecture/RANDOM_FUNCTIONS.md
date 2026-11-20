@@ -2,7 +2,7 @@
 
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
-**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 to R3 are implemented; each code lot is merged after its own review.
+**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 to R4 are implemented; each code lot is merged after its own review.
 
 Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and C2, and to the branch of C3. Section 1 lists what was checked.
 
@@ -274,7 +274,7 @@ Only `order by random() limit N` is added. `sample n` (5.2) is not, since it wou
 - **With a condition**, every candidate is read, even when an index answers it, since KivaDB's indexes narrow the candidates while the document decides (`examine` tests the whole condition). Telling when an index alone is exact (case, arrays, typed values) is left out: the answer would be the same, only cheaper.
 - **The reservoir** is drawn from one `Source` per query, so a few system calls serve the whole draw.
 - **Tests**: χ² on the items of a stream, on late items of a long one, and on the order given; in queries, on 1 of 10 documents over 3 000 runs. `explain analyze` shows 3 documents read of 200 keys for a pattern alone.
-- **REST and structured requests** come in R4.
+- **REST and structured requests** (R4): `"order_by": "random()"`, the `"limit"` given from 1 to 10 000, `"target"` a pattern alone when there is no condition; the same refusals as the shell. The Node.js driver 1.3.0 takes `{ orderBy }` (a field or `"random()"`), the Python driver 1.1.0 `order_by="random()"`, both with `where` left out. No driver version is added: both versions are not published yet.
 
 ### 12.7 Where the functions are accepted
 
