@@ -43,7 +43,7 @@ use std::sync::LazyLock;
 const CHAPTERS: &[u32] = &[5, 6, 9, 10, 11, 13, 14, 16, 26];
 
 /// The blocks of those chapters marked `<!-- not run -->`.
-const NOT_RUN: usize = 6;
+const NOT_RUN: usize = 7;
 
 /// The home the manual shows.
 const HOME: &str = r"C:\Users\you\AppData\Roaming\KivaDB";

@@ -151,6 +151,8 @@ enum Fill {
     Now,
     Today,
     CurrentTime,
+    /// `"uuid_v7()"`, `"random_int(1, 6)"`: drawn for each document written.
+    Random(crate::random::Gen),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -443,6 +445,27 @@ fn parse_rule(spec: &Json, path: &str, depth: usize, in_items: bool) -> Result<R
             (Some(FieldType::DateTime), Some("now()" | "current_timestamp")) => Some(Fill::Now),
             (Some(FieldType::Date), Some("today()" | "current_date")) => Some(Fill::Today),
             (Some(FieldType::Time), Some("current_time")) => Some(Fill::CurrentTime),
+            (_, Some(text)) => match crate::random::Gen::from_text(text) {
+                Some(call) => {
+                    let call = call.map_err(|e| format!("{path}: in the default, {e}"))?;
+                    use crate::random::Gen;
+                    let fits = match (&call, ty) {
+                        (_, None | Some(FieldType::Any)) => true,
+                        (Gen::Random, Some(t)) => matches!(t, FieldType::Number | FieldType::Float),
+                        (Gen::Int(..), Some(t)) => matches!(t, FieldType::Number | FieldType::Integer | FieldType::Int),
+                        (_, Some(t)) => t == FieldType::String,
+                    };
+                    if !fits {
+                        return Err(format!(
+                            "{path}: the default {} does not give a value of type {}",
+                            call.call(),
+                            ty.map(|t| t.name()).unwrap_or("any")
+                        ));
+                    }
+                    Some(Fill::Random(call))
+                }
+                None => None,
+            },
             _ => None,
         };
         r.default = Some(match dynamic {
@@ -463,7 +486,7 @@ fn fill_and_check(fields: &Fields, map: &mut Map<String, Json>, prefix: &str, at
     for (name, rule) in fields {
         if !map.contains_key(name) {
             if let Some(d) = &rule.default {
-                map.insert(name.clone(), default_value(d, at));
+                map.insert(name.clone(), default_value(d, at)?);
             }
         }
         // Defaults inside an object present in the document.
@@ -478,7 +501,7 @@ fn fill_and_check_typed(fields: &Fields, map: &mut Members, prefix: &str, at: Mo
     for (name, rule) in fields {
         if !map.contains_key(name) {
             if let Some(d) = &rule.default {
-                map.insert(name.clone(), doc::from_json(&default_value(d, at)));
+                map.insert(name.clone(), doc::from_json(&default_value(d, at)?));
             }
         }
         if let (Some(props), Some(Doc::Object(inner))) = (&rule.properties, map.get_mut(name)) {
@@ -488,14 +511,19 @@ fn fill_and_check_typed(fields: &Fields, map: &mut Members, prefix: &str, at: Mo
     check_fields(fields, &|n| map.get(n).map(Leaf::Doc), prefix)
 }
 
-fn default_value(d: &Fill, at: Moment) -> Json {
-    match d {
+fn default_value(d: &Fill, at: Moment) -> Result<Json, String> {
+    Ok(match d {
         Fill::Value(v) => v.clone(),
         Fill::Now => Json::String(crate::time::iso(at.now)),
         // In the zone of the session writing, as `today()` in a command.
         Fill::Today => Json::String(crate::time::zone().wall(at.now).date().to_string()),
         Fill::CurrentTime => Json::String(crate::time::zone().wall(at.now).time().format("%H:%M:%S").to_string()),
-    }
+        Fill::Random(call) => match call.draw().map_err(|e| e.to_string())? {
+            crate::random::Drawn::Float(f) => serde_json::Number::from_f64(f).map(Json::Number).unwrap_or(Json::Null),
+            crate::random::Drawn::Int(i) => Json::from(i),
+            crate::random::Drawn::Text(s) => Json::String(s),
+        },
+    })
 }
 
 /// The fields of an object, by name.

@@ -11,6 +11,7 @@
 //! unary   := '-' unary | primary
 //! primary := NUMBER | STRING | '(' expr ')' | KEY | `KEY` | CALL
 //! call    := ('now' | 'today') '(' ')' | ('year' | 'month' | ... ) '(' expr ')'
+//!          | ('uuid' | 'random_int' | ...) '(' [expr (',' expr)*] ')'
 //! ```
 //! Strings support `${expr}` interpolation. `+` adds numbers or concatenates
 //! strings; mixing the two is a type error.
@@ -77,7 +78,9 @@ pub fn eval_list<'a>(src: &'a [char], resolve: &mut Resolver<'a>) -> Result<Vec<
 }
 
 fn is_call(word: &str) -> bool {
-    matches!(word.to_ascii_lowercase().as_str(), "now" | "today") || TimeFn::parse(word).is_some()
+    matches!(word.to_ascii_lowercase().as_str(), "now" | "today")
+        || TimeFn::parse(word).is_some()
+        || crate::random::is_name(word)
 }
 
 /// A number for arithmetic, which is done with 64-bit floats: refused when
@@ -213,6 +216,9 @@ impl<'a, 'r> Parser<'a, 'r> {
     fn call(&mut self, name: &str) -> Result<EVal, String> {
         self.pos += 1;
         let lower = name.to_ascii_lowercase();
+        if crate::random::is_name(&lower) {
+            return self.random(&lower);
+        }
         let arg = if matches!(lower.as_str(), "now" | "today") { None } else { Some(self.expr()?) };
         if self.peek() != Some(')') {
             return Err(format!(
@@ -235,6 +241,37 @@ impl<'a, 'r> Parser<'a, 'r> {
             }
             _ => unreachable!("the functions without a value are above"),
         }
+    }
+
+    /// `uuid()`, `random_int(1, 6)`, `random_string(n)`: the arguments are
+    /// expressions, which give whole numbers.
+    fn random(&mut self, name: &str) -> Result<EVal, String> {
+        let mut args = Vec::new();
+        self.skip_ws();
+        if self.peek() != Some(')') {
+            loop {
+                let v = self.expr()?;
+                args.push(match v {
+                    EVal::Num(f) if f.fract() == 0.0 && f.abs() < 9.007_199_254_740_992e15 => format!("{}", f as i64),
+                    other => other.render(),
+                });
+                self.skip_ws();
+                match self.peek() {
+                    Some(',') => self.pos += 1,
+                    Some(')') => break,
+                    _ => return Err(format!("SyntaxError: {name}() expects ',' or ')'")),
+                }
+            }
+        }
+        self.pos += 1;
+        let call = crate::random::Gen::parse(name, &args).map_err(|e| format!("ValueError: {e}"))?;
+        Ok(match call.draw().map_err(|e| e.to_string())? {
+            crate::random::Drawn::Float(f) => EVal::Num(f),
+            // Beyond 2^53 a float would round it: shown as it was drawn.
+            crate::random::Drawn::Int(i) if i.unsigned_abs() <= 1 << 53 => EVal::Num(i as f64),
+            crate::random::Drawn::Int(i) => EVal::Str(i.to_string()),
+            crate::random::Drawn::Text(s) => EVal::Str(s),
+        })
     }
 
     fn lookup(&mut self, name: &str) -> Result<EVal, String> {

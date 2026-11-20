@@ -25,7 +25,22 @@ pub const TYPE_WORDS: &str =
 /// returned as it is when the literal holds no type word, so that a mistake
 /// in plain JSON is reported as before.
 pub fn document(text: &str, plain: String) -> Result<Doc, String> {
+    read_document(Parser::new(text), plain)
+}
+
+/// [`document`] in a condition (`in [decimal "0.10", ...]`), where a random
+/// function is refused: each row would be compared with another value.
+pub fn condition_document(text: &str, plain: String) -> Result<Doc, String> {
     let mut p = Parser::new(text);
+    p.in_condition = true;
+    read_document(p, plain)
+}
+
+/// The message of a random function written in a condition.
+pub const RANDOM_IN_CONDITION: &str = "a random function has no place in a condition: each row would be compared \
+     with another value. Draw the value first and compare with it";
+
+fn read_document(mut p: Parser, plain: String) -> Result<Doc, String> {
     let result = p.top();
     match result {
         Ok(d) if p.typed => Ok(d),
@@ -214,6 +229,8 @@ struct Parser<'a> {
     i: usize,
     /// A type word or a moment was met in a value position.
     typed: bool,
+    /// Read for a condition: random functions are refused.
+    in_condition: bool,
     path: Vec<Seg>,
 }
 
@@ -221,7 +238,7 @@ type R<T> = Result<T, String>;
 
 impl<'a> Parser<'a> {
     fn new(s: &'a str) -> Self {
-        Parser { s, b: s.as_bytes(), i: 0, typed: false, path: Vec::new() }
+        Parser { s, b: s.as_bytes(), i: 0, typed: false, in_condition: false, path: Vec::new() }
     }
 
     /// `line 3, column 18 (.values[3]): <msg>`, at byte `at`.
@@ -434,6 +451,14 @@ impl<'a> Parser<'a> {
             return self.plain(depth);
         }
         let word = w.to_ascii_lowercase();
+        // `uuid()`, `random_int(1, 6)`: a call, where `uuid "..."` is a type word.
+        if crate::random::is_name(&word) && self.paren_follows() {
+            self.typed = true;
+            if self.in_condition {
+                return Err(self.err_at(start, RANDOM_IN_CONDITION));
+            }
+            return self.random(&word, start);
+        }
         match word.as_str() {
             "now" | "today" | "current_timestamp" | "current_date" | "current_time" => {
                 self.typed = true;
@@ -483,6 +508,47 @@ impl<'a> Parser<'a> {
                 scalar(word, &text, quoted).map_err(|e| self.err_at(at, e))
             }
         }
+    }
+
+    /// Whether `(` comes next, spaces aside; nothing is read.
+    fn paren_follows(&mut self) -> bool {
+        let save = self.i;
+        self.ws();
+        let found = self.peek() == Some(b'(');
+        self.i = save;
+        found
+    }
+
+    /// `uuid()`, `random_int(1, 6)`, `random_string(16)`: drawn once, here,
+    /// and kept as the value it gave (RANDOM_FUNCTIONS.md 12.7).
+    fn random(&mut self, word: &str, start: usize) -> R<Doc> {
+        self.ws();
+        self.eat(b'(');
+        let mut args = Vec::new();
+        self.ws();
+        if !self.eat(b')') {
+            loop {
+                self.ws();
+                let at = self.i;
+                while self.i < self.b.len() && !matches!(self.b[self.i], b',' | b')' | b' ' | b'\t' | b'\n' | b'\r') {
+                    self.i += 1;
+                }
+                if self.i == at {
+                    return Err(self.err(format!("{word}: an argument is expected")));
+                }
+                args.push(self.s[at..self.i].to_string());
+                self.ws();
+                if self.eat(b')') {
+                    break;
+                }
+                if !self.eat(b',') {
+                    return Err(self.err(format!("{word}: ',' or ')' is expected")));
+                }
+            }
+        }
+        let call = crate::random::Gen::parse(word, &args).map_err(|e| self.err_at(start, e))?;
+        let drawn = call.draw().map_err(|e| e.to_string())?;
+        Ok(drawn_doc(drawn))
     }
 
     /// `now()`, `today()`, `current_timestamp`... then `+ 30 days`, `- 2 hours`.
@@ -543,6 +609,15 @@ impl<'a> Parser<'a> {
                 other => other,
             };
         }
+    }
+}
+
+/// A drawn value as a value of a document.
+pub fn drawn_doc(d: crate::random::Drawn) -> Doc {
+    match d {
+        crate::random::Drawn::Float(f) => Doc::Float(f),
+        crate::random::Drawn::Int(i) => Doc::Int(i),
+        crate::random::Drawn::Text(s) => Doc::Str(s),
     }
 }
 

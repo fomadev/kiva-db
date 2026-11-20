@@ -972,6 +972,57 @@ Error: Cannot update [number] with a value formatted as [string].
 
 When you really want to change the type, say so explicitly with `change` ([section 6.6](#66-change--rename-or-migrate)).
 
+### 5.11 Random values and UUIDs
+
+Seven functions draw a value when the command is read:
+
+| Function | Gives | Rule |
+| :--- | :--- | :--- |
+| `random()`, or `rand()` | a `float` in [0, 1) | Every multiple of 2^-53 in that range equally likely |
+| `random_int(min, max)` | an `int` from `min` to `max`, both included | Whole numbers within the 64-bit range, `min` ≤ `max`; no value favoured |
+| `random_string(n)` | a text of `n` characters from `A-Z a-z 0-9` | 1 ≤ `n` ≤ 1024; 16 characters hold about 95 random bits |
+| `random_bytes(n)` | `n` random bytes, as a text in base64url without padding | 1 ≤ `n` ≤ 1024; 32 bytes give 43 characters |
+| `uuid()` | a UUID of version 4, as a text | 122 random bits, lowercase with hyphens |
+| `uuid_v7()` | a UUID of version 7, as a text | Starts with the time in milliseconds, so they sort by time; strictly increasing within one KivaDB process, not across servers |
+
+<!-- not run: the values are drawn at random -->
+```text
+kiva> set id uuid_v7()
+OK: id saved.
+kiva> set token random_bytes(32) and code random_string(8) and roll random_int(1, 6)
+OK: token saved.
+OK: code saved.
+OK: roll saved.
+kiva> get id and token and code and roll
+id: 01a1f8ea-5b7e-7540-91f2-fe07ce3fbd80 [string]
+token: 3yKvc2b0Tq1mXzN8hL4rWf9sJd6pAe7oUi5gBn0cRkY [string]
+code: EJDtgCE4 [string]
+roll: 4 [int]
+kiva> set order:1 {"id": uuid_v7(), "score": random_int(0, 100), "created_at": now()}
+OK: order:1 saved.
+kiva> print uuid(), random_int(1, 100)
+d36ce980-beb5-4ac4-8471-bbd842428b9f 57
+```
+
+<!-- setup
+set id uuid_v7()
+-->
+```text
+kiva> typeof id
+ -> id is a [string]
+kiva> set n random_int(5, 1)
+Error: random_int(5, 1): the lower bound is above the upper bound
+kiva> set code random_string(0)
+Error: random_string: the length '0' is not a whole number from 1 to 1024
+```
+
+* **Where they are written**: as the value of `set` and `update`, inside documents, in `json set`, `json append` and `json insert` ([10.10](#1010-typed-values-in-documents)), in `print`, in schema defaults (`"default": "uuid_v7()"`, [11.8](#118-schemas-rules-for-the-documents-of-a-pattern)) and in Lua (`kiva.uuid()`, [26.2](#262-the-kiva-functions)).
+* **Not in conditions**: `get where order:*.score = random_int(1, 6)` is refused, since each document would be compared with another value. Draw the value first, then compare with it.
+* **In quotes, a text**: `set t "uuid()"` stores the six characters. `uuid "..."` is still the type word that checks a UUID given as text.
+* **Drawn once, stored as a value**: a transaction, the change journal, replicas and backups keep the value drawn, never the call, so a replica holds the same values as its master. A command sent again, by a program after an error for example, draws new values, as it gets a new `now()`.
+* **The operating system's generator**: every function, `random()` included, draws from the cryptographic generator of the system. If it ever fails, the command fails with `ERR_RANDOM_UNAVAILABLE` and writes nothing; KivaDB never falls back on a predictable value. `random_string` and `random_bytes` can therefore make tokens and codes. Lua's own `math.random` is not cryptographic: use `kiva.random_string` or `kiva.random_bytes` in scripts.
+* **UUIDs are texts**: KivaDB has no UUID type, and stores them as strings of 36 characters.
+
 ---
 
 ## Chapter 6 — Writing, reading and deleting
@@ -2011,7 +2062,7 @@ The pattern is written as for an index: `user:` means `user:*`. A schema is a JS
 
 In a document, a `date` is the text `"2026-10-27"`, a `time` is `"08:00:00"` or `"08:00"`, and a `datetime` is ISO 8601 **with its offset** (`"2026-10-27T14:30:00Z"`, `"2026-10-27T15:30:00+01:00"`): a moment without its offset would mean a different instant in each time zone. These are the forms that conditions compare as moments ([11.1](#111-the-condition)).
 
-**Defaults.** A default is filled in when the field is missing, never when it holds `null`, and is checked against its rule when the schema is set. Three defaults are computed at the time of the write, for the type they belong to: `"now()"` for a `datetime` (UTC, to the millisecond), `"today()"` for a `date` and `"current_time"` for a `time` (both in the zone of the session writing, [5.9](#59-time-zones)). The same texts are plain values for a field of another type. Nothing else is evaluated: a rule is data, never code.
+**Defaults.** A default is filled in when the field is missing, never when it holds `null`, and is checked against its rule when the schema is set. Three defaults are computed at the time of the write, for the type they belong to: `"now()"` for a `datetime` (UTC, to the millisecond), `"today()"` for a `date` and `"current_time"` for a `time` (both in the zone of the session writing, [5.9](#59-time-zones)). The same texts are plain values for a field of another type. The random functions of [5.11](#511-random-values-and-uuids) are drawn for each document written: `"uuid_v7()"`, `"uuid()"`, `"random_string(8)"` or `"random_bytes(16)"` for a `string`, `"random_int(1, 6)"` for an `integer`, `int` or `number`, `"random()"` for a `float` or `number` (any of them for a field without a type); a schema whose default does not fit its type is refused. Nothing else is evaluated: a rule is data, never code.
 
 **What is checked, and when.** Every write of a key of the pattern, whatever it comes from: `set`, `update`, `json set` and the other changes of a field, `add`, the REST API (answered with code `422`), the binary protocol, Redis clients (`HSET`, `JSON.SET`...), Lua scripts and triggers. The whole document is judged after the change, so `json set user:1 .age -4` is refused even though only `age` changed. A refused write changes nothing: the document stays as it was. The error starts with `SCHEMA:` (`SCHEMA` for Redis clients), followed by the key, the field and the reason.
 
@@ -5032,6 +5083,7 @@ The code goes between single quotes so that double quotes can be used inside. Wh
 | `kiva.incr(key [, amount])` | Adds to a number (1 by default), creating it at 0 if needed; returns the new value |
 | `kiva.decimal(text)`, `kiva.date(text)`, `kiva.time(text)`, `kiva.datetime(text)` | A typed value, read in ISO (a datetime with its offset), to store alone or inside a table |
 | `kiva.int(n)`, `kiva.float(x)` | A number of that kind: `kiva.float(8)` is stored as `8.0` |
+| `kiva.random()`, `kiva.random_int(min, max)`, `kiva.random_string(n)`, `kiva.random_bytes(n)`, `kiva.uuid()`, `kiva.uuid_v7()` | The values of [5.11](#511-random-values-and-uuids), from the operating system's generator. Lua's `math.random` is not cryptographic: do not use it for tokens |
 
 How values travel between KivaDB and Lua:
 
@@ -5742,6 +5794,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `set [type] <key> <value> [ttl <sec>] [if not exists]` | Create (`if not exists`: skip if present) |
 | `set datetime <key> "2026-10-27 14:30"`, `set date <key> "..."`, `set time <key> "..."` | A moment ([5.8](#58-date-datetime-time)) |
 | `set <key> now()` / `today()` / `current_time`, `+ 7 days`, `- 2 hours` | The moment of the action, moved by durations |
+| `set <key> uuid()` / `uuid_v7()` / `random_int(1, 6)` / `random()` / `random_string(16)` / `random_bytes(32)` | A value drawn at random ([5.11](#511-random-values-and-uuids)) |
 | `add <prefix> <value> [ttl <sec>]` | Create a key named by KivaDB: `<prefix>` + a new identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |
