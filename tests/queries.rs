@@ -164,6 +164,7 @@ impl Opts {
             order: self.order.map(|(f, desc)| Order::new(f, desc).unwrap()),
             after: self.after.clone(),
             reverse: self.reverse,
+            random: false,
         }
     }
 }

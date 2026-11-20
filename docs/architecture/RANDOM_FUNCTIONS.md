@@ -2,7 +2,7 @@
 
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
-**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0, R1 and R2 are implemented; each code lot is merged after its own review.
+**Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 to R3 are implemented; each code lot is merged after its own review.
 
 Statements about the engine refer to `main` at `e9d6c7b`, which includes C1 and C2, and to the branch of C3. Section 1 lists what was checked.
 
@@ -267,6 +267,14 @@ Only `order by random() limit N` is added. `sample n` (5.2) is not, since it wou
 | Indexes alone decide, or no condition | the reservoir runs over the keys, and only the `N` documents chosen are read |
 | A condition needs the document | every candidate is read and tested, as in any such query |
 | `explain` | says which of the two applies; `explain analyze` counts the documents read |
+
+**Built in R3** (`random::Reservoir`, `Engine::run_query`):
+
+- **The sample over the keys** is taken for a pattern alone, which `get where` now accepts with `order by random()` only (`get where product:* order by random() limit 5`). The key index tells which keys are live documents of the pattern without reading them.
+- **With a condition**, every candidate is read, even when an index answers it, since KivaDB's indexes narrow the candidates while the document decides (`examine` tests the whole condition). Telling when an index alone is exact (case, arrays, typed values) is left out: the answer would be the same, only cheaper.
+- **The reservoir** is drawn from one `Source` per query, so a few system calls serve the whole draw.
+- **Tests**: χ² on the items of a stream, on late items of a long one, and on the order given; in queries, on 1 of 10 documents over 3 000 runs. `explain analyze` shows 3 documents read of 200 keys for a pattern alone.
+- **REST and structured requests** come in R4.
 
 ### 12.7 Where the functions are accepted
 

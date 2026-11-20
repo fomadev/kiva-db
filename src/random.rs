@@ -113,6 +113,75 @@ impl ArrayFn {
     }
 }
 
+/// `n` items drawn uniformly among a stream of unknown length, with memory
+/// for `n` items only: Vitter's reservoir sampling, Algorithm L (Li, 1994).
+/// After the reservoir is full, the number of items to skip before the next
+/// one kept is drawn directly, so the draws grow as `n · log(N / n)`, not
+/// with `N`.
+pub struct Reservoir<T> {
+    n: usize,
+    items: Vec<T>,
+    /// Items offered so far.
+    seen: u64,
+    /// The number of the next item kept, once the reservoir is full.
+    next: u64,
+    w: f64,
+}
+
+impl<T> Reservoir<T> {
+    /// A reservoir of `n` items, `n` ≥ 1.
+    pub fn new(n: usize) -> Reservoir<T> {
+        Reservoir { n: n.max(1), items: Vec::with_capacity(n.clamp(1, 1024)), seen: 0, next: 0, w: 1.0 }
+    }
+
+    /// A float in (0, 1), never 0, for the logarithms of Algorithm L.
+    fn open_unit(src: &mut Source) -> crate::Result<f64> {
+        loop {
+            let u = src.float()?;
+            if u > 0.0 {
+                return Ok(u);
+            }
+        }
+    }
+
+    /// Draws the next `w` and the number of the next item kept.
+    fn step(&mut self, src: &mut Source) -> crate::Result<()> {
+        self.w *= (Self::open_unit(src)?.ln() / self.n as f64).exp();
+        // ln(u) / ln(1 - w) items are skipped; a vanishing w skips them all.
+        let skip = (Self::open_unit(src)?.ln() / (1.0 - self.w).ln()).floor();
+        self.next = self.seen.saturating_add(if skip.is_finite() { skip as u64 } else { u64::MAX }).saturating_add(1);
+        Ok(())
+    }
+
+    /// Offers the next item of the stream: kept, or dropped at once.
+    pub fn offer(&mut self, item: T, src: &mut Source) -> crate::Result<()> {
+        self.seen += 1;
+        if self.items.len() < self.n {
+            self.items.push(item);
+            if self.items.len() == self.n {
+                self.step(src)?;
+            }
+        } else if self.seen == self.next {
+            let j = src.below(self.n as u64)? as usize;
+            self.items[j] = item;
+            self.step(src)?;
+        }
+        Ok(())
+    }
+
+    /// The items offered, for `explain analyze`.
+    pub fn seen(&self) -> u64 {
+        self.seen
+    }
+
+    /// The items kept, in a random order: min(`n`, items offered) of them.
+    pub fn finish(mut self, src: &mut Source) -> crate::Result<Vec<T>> {
+        let len = self.items.len();
+        partial_shuffle(&mut self.items, len, src)?;
+        Ok(self.items)
+    }
+}
+
 /// Puts `n` elements drawn uniformly without repetition at the front of
 /// `items`, in random order (the first `n` steps of Fisher–Yates). With
 /// `n` = the length, the whole array is shuffled.
@@ -680,12 +749,82 @@ mod tests {
         assert!(chi < 18.5, "chi-square {chi}: {one:?}");
     }
 
+    fn chi(count: &[f64], expected: f64) -> f64 {
+        count.iter().map(|c| (c - expected) * (c - expected) / expected).sum()
+    }
+
+    fn reservoir(stream: usize, n: usize, s: &mut Source) -> Vec<usize> {
+        let mut r = Reservoir::new(n);
+        for i in 0..stream {
+            r.offer(i, s).unwrap();
+        }
+        assert_eq!(r.seen(), stream as u64);
+        r.finish(s).unwrap()
+    }
+
+    #[test]
+    fn a_reservoir_keeps_what_fits_and_no_more() {
+        let mut s = Source::new();
+        let mut all = reservoir(3, 5, &mut s);
+        all.sort_unstable();
+        assert_eq!(all, [0, 1, 2], "fewer items than asked: all of them");
+        assert!(reservoir(0, 5, &mut s).is_empty());
+        let big = reservoir(200_000, 7, &mut s);
+        assert_eq!(big.len(), 7);
+        assert_eq!(big.iter().collect::<std::collections::HashSet<_>>().len(), 7);
+        assert!(big.iter().all(|i| *i < 200_000));
+    }
+
+    #[test]
+    fn a_reservoir_draws_each_item_as_often() {
+        // 5 of 20 items, 20 000 times: each item 5 000 times expected;
+        // chi-square with 19 degrees of freedom, 43.8 at p = 0.001.
+        let mut s = Source::new();
+        let mut count = [0f64; 20];
+        for _ in 0..20_000 {
+            for i in reservoir(20, 5, &mut s) {
+                count[i] += 1.0;
+            }
+        }
+        assert!(chi(&count, 5000.0) < 43.8, "{count:?}");
+        // 1 of 10, 10 000 times: 27.9 at 9 degrees.
+        let mut one = [0f64; 10];
+        for _ in 0..10_000 {
+            one[reservoir(10, 1, &mut s)[0]] += 1.0;
+        }
+        assert!(chi(&one, 1000.0) < 27.9, "{one:?}");
+        // Late items as often as early ones on a long stream: 2 of 1 000, by tenths.
+        let mut tenths = [0f64; 10];
+        for _ in 0..10_000 {
+            for i in reservoir(1000, 2, &mut s) {
+                tenths[i / 100] += 1.0;
+            }
+        }
+        assert!(chi(&tenths, 2000.0) < 27.9, "{tenths:?}");
+    }
+
+    #[test]
+    fn a_reservoir_gives_its_items_in_a_random_order() {
+        // Every item kept: which comes first is uniform (3 degrees, 16.3).
+        let mut s = Source::new();
+        let mut first = [0f64; 4];
+        for _ in 0..8_000 {
+            first[reservoir(4, 4, &mut s)[0]] += 1.0;
+        }
+        assert!(chi(&first, 2000.0) < 16.3, "{first:?}");
+    }
+
     #[test]
     fn a_broken_generator_fails_shuffles_and_samples() {
         for call in [ArrayFn::Shuffle, ArrayFn::SampleOne, ArrayFn::Sample(2)] {
             let e = with_failing_random(|| call.apply(vec![1, 2, 3], &mut Source::new())).unwrap_err();
             assert!(e.starts_with("ERR_RANDOM_UNAVAILABLE"), "{e}");
         }
+        let e = with_failing_random(|| {
+            let mut r = Reservoir::new(2);
+            (0..5).try_for_each(|i| r.offer(i, &mut Source::new()))
+        });
+        assert!(e.is_err());
     }
 
     #[test]

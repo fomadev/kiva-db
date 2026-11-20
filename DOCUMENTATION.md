@@ -1728,6 +1728,7 @@ user:*.role = "dev" and not address.city = "Goma"
 
 ```text
 get where <condition> [order by <field> [asc|desc]] [limit N] [after <key>] [reverse] [return field1, field2]
+get where <pattern | condition> order by random() limit N [return field1, field2]
 ```
 
 The condition is one comparison or several ([11.1](#111-the-condition)).
@@ -1774,6 +1775,39 @@ How values sort:
 * Documents without the field, or holding `null`, an array or an object there, come last in both directions.
 
 With a B-tree index on the field and a `limit`, KivaDB reads the index from its first value (its last, with `desc`). It stops once it has `limit` rows that pass the condition, reading only their documents: `INDEX ORDER SCAN` in `explain` ([11.5](#115-explain--see-how-a-query-will-run)). Otherwise the documents found are sorted in memory: only the first `limit` are kept while they are read, or all of them without a `limit`. A query sorts by one field, and the aggregates do not sort.
+
+#### Random order
+
+`order by random() limit N` draws `N` rows among those the query selects, each as likely as the others, and gives them in a random order. With a pattern alone, without a condition, it draws among every document of the pattern:
+
+<!-- not run: the rows are drawn at random -->
+```text
+kiva> get where user:* order by random() limit 2 return name
+user:3: {"name":"Carol"}
+user:1: {"name":"Alice"}
+(2 matches)
+kiva> get where user:*.age > 20 order by random() limit 1 return name
+user:2: {"name":"Bob"}
+(1 matches)
+```
+
+```text
+kiva> explain get where user:* order by random() limit 2
+Query Plan
+  Filter    : user:* (every document)
+  Strategy  : PREFIX SCAN
+  Index     : none
+  Order     : random: 2 drawn among the keys, then only those documents are read
+  Limit     : 2
+  Estimated : ...
+kiva> get where user:* order by random()
+Error: order by random() needs a limit from 1 to 10000: every row drawn is held until the end (order by random() limit 10)
+```
+
+* **A limit is required**, from 1 to 10 000: the rows drawn are held until the end. When fewer rows match, all of them come, in a random order.
+* **What it reads**: with a pattern alone, KivaDB knows from its key index which keys are documents of the pattern. It draws among the keys, then reads only the `N` documents drawn. With a condition, every candidate is read and tested, as in any query (an index narrows the candidates), and the draw keeps `N` of those that pass. Memory holds `N` rows either way, never the whole result: the draw is a reservoir sample (Vitter's Algorithm L). `explain analyze` shows the keys looked at and the documents read.
+* **No page, no direction**: `after`, `reverse`, `asc` and `desc` are refused, since a random order has no next page. Two runs give two draws, which may hold the same rows.
+* **A read**: it changes nothing, and draws from what the session can read, in its workspace. The draw comes from the operating system's generator, like the functions of [5.11](#511-random-values-and-uuids).
 
 ### 11.3 Aggregates: `count`, `sum`, `avg`, `min`, `max`, `group by`
 
@@ -1991,7 +2025,7 @@ A query reads **one key pattern**, tests its documents against comparisons with 
 | Refused | Example | Instead |
 | :--- | :--- | :--- |
 | Joins | `user:* join order:* on ...`, `user:*, order:*...`, `= order:*.user`, `... and order:*.total > 5` | Keep related data in the same document, or read the related keys by name (`get a and b`) |
-| Sorting pipelines | `distinct`, `having`, `offset`, `group by` on `get`, `order by` on an aggregate | `order by <field>` and `after <key>` on `get where` ([11.2](#112-get-where--find-documents)); the aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
+| Sorting pipelines | `distinct`, `having`, `offset`, `group by` on `get`, `order by` on an aggregate | `order by <field>`, `order by random() limit N` and `after <key>` on `get where` ([11.2](#112-get-where--find-documents)); the aggregates and `group by` ([11.3](#113-aggregates-count-sum-avg-min-max-group-by)); `range` and `keys` return keys in order |
 | Other operators | `between`, `contains`, `matches`, `regexp` | The comparisons of [11.1](#111-the-condition): `age >= 20 and age <= 30` for a range, `in [...]` for several values, `like` / `ilike` for text patterns |
 | Other combinations | `&&`, `\|\|`, `xor` | `and`, `or`, `not` and parentheses |
 | Distributed queries | `@node2`, `across`, `shard`, `explain distributed` | Nothing to do: one server holds all of a workspace's data |
@@ -5829,6 +5863,7 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `set <key> now()` / `today()` / `current_time`, `+ 7 days`, `- 2 hours` | The moment of the action, moved by durations |
 | `set <key> uuid()` / `uuid_v7()` / `random_int(1, 6)` / `random()` / `random_string(16)` / `random_bytes(32)` | A value drawn at random ([5.11](#511-random-values-and-uuids)) |
 | `set <key> shuffle([...])` / `sample([...])` / `sample([...], n)` | An array in random order, one element, or `n` elements ([5.11](#511-random-values-and-uuids)) |
+| `get where <pattern \| condition> order by random() limit N` | `N` documents drawn at random, in a random order ([11.2](#112-get-where--find-documents)) |
 | `add <prefix> <value> [ttl <sec>]` | Create a key named by KivaDB: `<prefix>` + a new identifier ([6.7](#67-add--let-kivadb-name-the-key)) |
 | `get [type] <key>` | Read (`get user:1.name` for a field) |
 | `update [type] <key> <value>` | Replace, same type |
