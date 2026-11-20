@@ -1,0 +1,35 @@
+# A KivaDB 2.0.0-rc.3 home, for the compatibility test of the next versions
+# (tests/compat_rc3.rs). Made once by the published rc.3 executable:
+#   kivadb --home <home> --no-listen run tests/fixtures/v2.0.0-rc.3.kva
+# then the paths of kiva.conf replaced by @HOME@. Never changed afterwards.
+# It holds what rc.3 brought: typed documents (KDOC, storage format 3), an
+# exact decimal key, int and float keys, typed values set by json set.
+changes enable retain 87600h
+set greeting "hello"
+set int n:count 41
+set float ratio 0.5
+set decimal price "12.50"
+set date born "2004-05-09"
+set datetime created_at "2026-10-27T14:30:00Z"
+set session:abc "token" ttl 315360000
+set acc:1 {"name": "Ana", "balance": decimal "1250.50", "opened": date "2026-01-15", "rate": float 8, "limits": [decimal "500", decimal "2500.00"]}
+set acc:2 {"name": "Ben", "balance": decimal "80.25", "opened": date "2025-06-02", "rate": float 2.5, "limits": []}
+set acc:3 {"name": "Chloe", "balance": decimal "0.10", "opened": date "2026-03-30", "rate": float 1, "limits": [decimal "10"]}
+json set acc:1 .last_seen datetime "2026-11-01T08:00:00Z"
+json incr acc:2 .balance decimal "19.75"
+create index on acc: (balance)
+create unique index on acc: (name) ignore case
+set user:1 {"name": "Ana", "role": "dev", "age": 31}
+set user:2 {"name": "Ben", "role": "ops", "age": 45}
+create index on user: (role)
+del greeting
+set greeting "hello again"
+schema set item: {"price": {"type": "decimal", "required": true}, "qty": {"type": "int", "default": 1}}
+set item:1 {"price": decimal "9.99"}
+set item:2 {"price": decimal "100", "qty": int 3}
+project create travel
+workspace create travel.places
+workspace switch travel.places
+set place:1 {"name": "Virunga", "opens": time "07:30", "fee": decimal "50.00"}
+workspace switch default
+create user "app" identified by "app-pw" grant write on travel.* default workspace travel.places
