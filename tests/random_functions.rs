@@ -380,6 +380,88 @@ fn order_by_random_skips_expired_keys_and_other_workspaces_and_changes_nothing()
     assert_eq!(ok(&mut s, "get where k:*.a > 0 limit 10"), before, "a read changes nothing");
 }
 
+/// A structured request posted to `/v1/api`, and its JSON answer.
+fn rest(port: u16, body: &Json) -> (u16, Json) {
+    use std::io::{Read, Write};
+    let body = body.to_string();
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        s,
+        "POST /v1/api HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut answer = String::new();
+    s.read_to_string(&mut answer).unwrap();
+    let status = answer.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let json = answer.split_once("\r\n\r\n").map(|(_, b)| serde_json::from_str(b).unwrap_or(Json::Null)).unwrap();
+    (status, json)
+}
+
+#[test]
+fn structured_requests_and_rest_draw_at_random() {
+    use serde_json::json;
+    let dir = TempDir::new("random_api");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    for i in 0..30 {
+        ok(&mut s, &format!(r#"set a:{i:02} {{"n": {i}, "odd": {}}}"#, i % 2 == 1));
+    }
+    ok(&mut s, r#"set a:text "x""#);
+    let keys = |answer: &Json| -> Vec<String> {
+        answer["rows"].as_array().unwrap().iter().map(|r| r["key"].as_str().unwrap().to_string()).collect()
+    };
+
+    // A pattern alone, and a condition.
+    let r = kivadb::api::handle(&mut s, &json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 4}))
+        .unwrap();
+    let drawn = keys(&r);
+    assert_eq!(drawn.len(), 4);
+    assert_eq!(drawn.iter().collect::<HashSet<_>>().len(), 4);
+    assert!(drawn.iter().all(|k| k != "a:text"));
+    assert!(r["plan"]["order"].as_str().unwrap().contains("drawn among the keys"), "{r}");
+    let r = kivadb::api::handle(
+        &mut s,
+        &json!({"op": "query", "target": "a:*", "where": {"odd": true}, "order_by": "RANDOM()", "limit": 100}),
+    )
+    .unwrap();
+    let mut odd = keys(&r);
+    assert_eq!(odd.len(), 15);
+    odd.sort();
+    assert_eq!(odd, (1..30).step_by(2).map(|i| format!("a:{i:02}")).collect::<Vec<_>>());
+    // explain, and explain analyze: the documents drawn only.
+    let r = kivadb::api::handle(
+        &mut s,
+        &json!({"op": "explain", "target": "a:*", "order_by": "random()", "limit": 3, "analyze": true}),
+    )
+    .unwrap();
+    assert_eq!(r["analyze"]["documents_read"], 3, "{r}");
+    assert_eq!(r["analyze"]["returned"], 3, "{r}");
+
+    for (req, says) in [
+        (json!({"op": "query", "target": "a:*", "order_by": "random()"}), "needs a \"limit\" from 1 to 10000"),
+        (json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 10001}), "from 1 to 10000"),
+        (json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 0}), "from 1 to 10000"),
+        (json!({"op": "query", "target": "a:*", "order_by": "random() desc", "limit": 2}), "no direction"),
+        (json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 2, "after": "a:01"}), "no next page"),
+        (json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 2, "reverse": true}), "\"reverse\""),
+        (json!({"op": "query", "target": "a:*.n", "order_by": "random()", "limit": 2}), "the key pattern alone"),
+        (json!({"op": "query", "target": "a:*", "order_by": "n", "limit": 2}), "expected"),
+        (json!({"op": "aggregate", "target": "a:*", "order_by": "random()"}), "sorting pipelines"),
+    ] {
+        let e = kivadb::api::handle(&mut s, &req).unwrap_err().to_string();
+        assert!(e.contains(says), "{req}: {e}");
+    }
+
+    // The same through REST.
+    let port = kivadb::http::start_http(&inst, "127.0.0.1", 0).unwrap();
+    let (status, r) = rest(port, &json!({"op": "query", "target": "a:*", "order_by": "random()", "limit": 2}));
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(keys(&r).len(), 2);
+    let (status, r) = rest(port, &json!({"op": "query", "target": "a:*", "order_by": "random()"}));
+    assert_eq!(status, 400, "{r}");
+}
+
 #[test]
 fn a_condition_refuses_a_random_function() {
     let dir = TempDir::new("random_conditions");

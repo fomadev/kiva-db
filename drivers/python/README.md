@@ -16,7 +16,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
-| 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`): 2.0.0 or later |
+| 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`): 2.0.0 or later; `order_by="random()"` in `query`: 2.0.0-rc.4 or later |
 | 1.0.0 | KivaDB 2.0.0 | `date`, `time` and `datetime` values, `order_by` and `after` in `query`, `explain(analyze=True)` and `changes`: 2.0.0 or later |
 
 The other methods work with any server from 1.7.0. A minor version adds methods, a patch fixes them; a major version changes how existing ones behave, and says how in the changelog of the repository.
@@ -91,7 +91,7 @@ With a certificate from an authority (your own domain), `tls=True` is enough, or
 | `add(prefix, value, *, ttl, type)` | Stores under a key KivaDB names; returns `(key, id)` |
 | `delete(key)` | Deletes a key; returns whether it existed |
 | `scan(pattern="*", limit=500)` | Keys with their type, size and TTL |
-| `query(pattern, where, *, limit, order_by, after, reverse)` | `(key, document)` pairs; `where` as in the structured requests (`{"role": "dev"}`, `{"field": "age", "cmp": ">", "value": 18}`, `{"and": [...]}`) |
+| `query(pattern, where=None, *, limit, order_by, after, reverse)` | `(key, document)` pairs; `where` as in the structured requests (`{"role": "dev"}`, `{"field": "age", "cmp": ">", "value": 18}`, `{"and": [...]}`). `order_by="random()"` draws `limit` documents at random, in a random order; `where` may then be `None`: every document of the pattern |
 | `explain(pattern, where, *, analyze, ...)` | The plan; with `analyze=True` the query runs and its counts are under `"analyze"` |
 | `aggregate(pattern, compute, *, where, group_by)` | `count`, `sum`, `avg`, `min`, `max` |
 | `similar(target, vector, *, limit, metric, ef, exact)` | Vector search on `"<pattern>.<field>"` |

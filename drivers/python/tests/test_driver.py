@@ -212,6 +212,28 @@ class DriverTest(unittest.TestCase):
         with self.assertRaisesRegex(KivaError, "sorting pipelines"):
             db.api({"op": "query", "target": "q:*", "where": {"n": 1}, "offset": 2})
 
+    def test_documents_drawn_at_random(self) -> None:
+        db = self.connect()
+        for i in range(12):
+            db.set(f"r:{i:02}", {"n": i, "even": i % 2 == 0})
+        db.set("r:text", "not a document")
+        rows = db.query("r:*", order_by="random()", limit=5)
+        keys = [k for k, _ in rows]
+        self.assertEqual(len(set(keys)), 5)
+        self.assertTrue(all(k != "r:text" for k in keys))
+        even = db.query("r:*", {"even": True}, order_by="random()", limit=50)
+        self.assertEqual(sorted(k for k, _ in even), [f"r:{i:02}" for i in range(0, 12, 2)])
+        self.assertTrue(all(doc["n"] % 2 == 0 for _, doc in even))
+        firsts = {db.query("r:*", order_by="random()", limit=12)[0][0] for _ in range(30)}
+        self.assertGreater(len(firsts), 3)
+        plan = db.explain("r:*", order_by="random()", limit=3, analyze=True)
+        self.assertIn("random", plan["plan"]["order"])
+        self.assertEqual(plan["analyze"]["documents_read"], 3)
+        with self.assertRaisesRegex(KivaError, "no next page"):
+            db.query("r:*", order_by="random()", limit=3, after="r:01")
+        with self.assertRaisesRegex(KivaError, "needs a \"limit\" from 1 to 10000"):
+            db.api({"op": "query", "target": "r:*", "order_by": "random()"})
+
     def test_transactions_commit_together_or_not_at_all(self) -> None:
         db = self.connect()
         other = self.connect()
