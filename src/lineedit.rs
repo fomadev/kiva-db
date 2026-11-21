@@ -185,17 +185,19 @@ fn sensitive(line: &str) -> bool {
 pub struct Prompt {
     editor: Option<Editor<KivaHelper, DefaultHistory>>,
     history: Option<PathBuf>,
+    /// `kiva> `, or `kiva[baak.places]> ` in a collection other than `default`.
+    label: String,
 }
 
 impl Prompt {
     pub fn new(history: Option<PathBuf>) -> (Prompt, Sink) {
         if !io::stdin().is_terminal() {
-            return (Prompt { editor: None, history: None }, plain_sink());
+            return (Prompt { editor: None, history: None, label: PROMPT.into() }, plain_sink());
         }
         let config = Config::builder().max_history_size(1000).map(|b| b.auto_add_history(false).build());
         let editor = config.ok().and_then(|c| Editor::<KivaHelper, DefaultHistory>::with_config(c).ok());
         let Some(mut editor) = editor else {
-            return (Prompt { editor: None, history: None }, plain_sink());
+            return (Prompt { editor: None, history: None, label: PROMPT.into() }, plain_sink());
         };
         editor.set_helper(Some(KivaHelper));
         if let Some(path) = &history {
@@ -208,7 +210,7 @@ impl Prompt {
             }))),
             Err(_) => plain_sink(),
         };
-        (Prompt { editor: Some(editor), history }, sink)
+        (Prompt { editor: Some(editor), history, label: PROMPT.into() }, sink)
     }
 
     /// The next line, after `kiva> `, or after ` ...> ` when `more` (a
@@ -221,12 +223,21 @@ impl Prompt {
                 Ok(_) => Input::Line(line.trim_end_matches(['\r', '\n']).to_string()),
             };
         };
-        match editor.readline(if more { CONTINUE } else { PROMPT }) {
+        match editor.readline(if more { CONTINUE } else { &self.label }) {
             Ok(line) => Input::Line(line),
             // Ctrl+C abandons what is being typed, as in most shells.
             Err(ReadlineError::Interrupted) => Input::Cancel,
             Err(_) => Input::End,
         }
+    }
+
+    /// Shows `place` in the prompt: the collection in use, or the project
+    /// chosen by `use <project>`; `None` (and `default`) give `kiva> `.
+    pub fn set_place(&mut self, place: Option<&str>) {
+        self.label = match place.filter(|p| !p.is_empty() && *p != "default") {
+            Some(p) => format!("kiva[{p}]> "),
+            None => PROMPT.into(),
+        };
     }
 
     /// Adds a whole command to the history (never one holding a password).
@@ -266,6 +277,22 @@ mod tests {
         assert_eq!(complete("get sim"), ["similar"]);
         assert_eq!(complete("workspace sw"), ["switch"]);
         assert!(complete("compact x").is_empty());
+    }
+
+    #[test]
+    fn the_prompt_shows_the_collection_or_the_project() {
+        let mut p = Prompt { editor: None, history: None, label: PROMPT.into() };
+        p.set_place(Some("baak.places"));
+        assert_eq!(p.label, "kiva[baak.places]> ");
+        p.set_place(Some("baak"));
+        assert_eq!(p.label, "kiva[baak]> ");
+        // `default`, or nowhere: the prompt everyone knows.
+        p.set_place(Some("default"));
+        assert_eq!(p.label, "kiva> ");
+        p.set_place(None);
+        assert_eq!(p.label, "kiva> ");
+        assert_eq!(complete("collection ren"), ["rename"]);
+        assert!(complete("us").contains(&"use".to_string()));
     }
 
     #[test]

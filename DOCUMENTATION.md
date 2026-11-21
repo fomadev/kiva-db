@@ -575,6 +575,15 @@ In a terminal the shell behaves like a modern command line:
 
 The history is kept between sessions in `history.txt` in the home directory. Commands that contain a password (`create user ... identified by`, `modify user ... password`, `auth`) are never written to it.
 
+**The prompt shows where you are** (since 2.0.0-rc.5): `kiva>` in the `default` collection, `kiva[travel.places]>` in another one, and `kiva[travel]>` after `use travel`, a project with no collection chosen yet ([14.8](#148-collections)). It is the same when the shell is connected to a running server. Scripts and `-e` print no prompt.
+
+**Errors** start with `Error:` and say what went wrong. When the command itself was not understood, a second line gives its form:
+
+```text
+Error: 'collection' is incomplete, or has a word it does not know.
+Usage: collection list [<project>] | current | switch <name> | create <name> [path] | rename|move <name> to <new name> | remove <name>
+```
+
 ### 3.7 Help and exit
 
 | Command | Effect |
@@ -3299,6 +3308,7 @@ kiva> stats
  > Compression          : none (254 bytes -> 254 bytes, 0.0% saved, 0 records)
  > Startup              : 4.12 ms (new database)
  > Checksum Errors      : 0
+ > Expired Keys         : 0 since opening
  > Last Integrity Check : never
  > Auto-Compaction      : on (threshold 30%), 0 run(s)
  > Secondary Indexes    : 1 (+ 0 vector)
@@ -3317,6 +3327,7 @@ kiva> stats
 | Compression | Size of values before and after compression |
 | Startup | How long loading took, and how (`new database`, `from hint file`, `full log scan`) |
 | Checksum Errors | Damaged records detected since start |
+| Expired Keys | Keys whose TTL ran out, as KivaDB saw them since the workspace was opened. `Txn Conflicts` follows when transactions were refused because a watched key changed |
 | Last Integrity Check | When `check` last ran and what it found |
 | Value Cache | Memory used by cached values and the share of reads it answered ([Chapter 18](#chapter-18--keeping-values-in-memory-value-cache)) |
 
@@ -5476,6 +5487,14 @@ kiva_keys 2
 | :--- | :--- |
 | `kiva_requests_total{type=...}` | Operations processed: `get`, `set`, `del`, `other` |
 | `kiva_request_duration_seconds` | Histogram of the time spent executing commands: `_bucket{le=...}` from 0.0001 s to 5 s, `_sum` and `_count` |
+| `kiva_commands_total{command=...}` | Commands run, by kind (below) |
+| `kiva_command_duration_seconds{command=...}` | The same histogram, by kind of command |
+| `kiva_expired_keys_total` | Keys whose TTL ran out, as KivaDB saw them since the workspace was opened |
+| `kiva_transaction_conflicts_total` | Transactions refused because a watched key changed (Redis `WATCH`) or the workspace was reset |
+| `kiva_index_scans_total{strategy=...}` | Queries run (`get where`, `count where`...), by the strategy of their plan: `key_lookup`, `index_scan`, `prefix_scan`... ([11.5](#115-explain--see-how-a-query-will-run)) |
+| `kiva_vector_index_bytes` | Memory held by the vector indexes |
+| `kiva_semantic_cache_hits_total`, `_misses_total`, `_invalidations_total` | The semantic caches of the workspace ([12.8](#128-semantic-cache-reuse-answers-to-the-same-question)) |
+| `kiva_backup_failures_total` | Backup commands run by the server that ended in an error |
 | `kiva_errors_total` | Commands that ended in an error |
 | `kiva_http_requests_total` | HTTP requests received |
 | `kiva_failed_logins_total` | Rejected logins |
@@ -5497,7 +5516,24 @@ The 95th percentile of the last five minutes, in PromQL:
 
 ```text
 histogram_quantile(0.95, rate(kiva_request_duration_seconds_bucket[5m]))
+histogram_quantile(0.95, sum by (command, le) (rate(kiva_command_duration_seconds_bucket[5m])))
 ```
+
+The kinds of command (since 2.0.0-rc.5) are a fixed list, so that the number of series stays small; no key and no user name ever becomes a label:
+
+| `command` | Commands |
+| :--- | :--- |
+| `get`, `set`, `update`, `del` | Those commands (`set` also counts `add`, `change`, `bump`, `convert`) |
+| `query` | `get where`, `get range`, `scan`, `keys`, `range`, `explain`, `has`, `typeof` |
+| `aggregate` | `count`, `sum`, `avg`, `min`, `max` |
+| `similar` | `get similar`, `semantic ...` |
+| `json`, `transaction`, `script`, `changes` | `json ...`; `begin`, `commit`, `rollback`, `savepoint`; `eval`, `script`, `wait`; `changes ...` |
+| `collection` | `use`, `collection`, `workspace`, `project` |
+| `admin` | Administration: users, grants, configuration, indexes, schemas, backups, export and import, compaction... |
+| `auth` | `auth`, `login`, `whoami` |
+| `other` | Everything else, and unknown commands |
+
+These count the commands of the KivaDB language, from the shell, TCP clients and `POST /v1/exec`. Redis commands, REST reads and writes and structured requests are counted by `kiva_requests_total` as before.
 
 A Prometheus configuration to collect them:
 
