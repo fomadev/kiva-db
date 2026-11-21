@@ -2614,14 +2614,14 @@ set active true and age 31 and colors ["red", "green", "blue"]
 -->
 ```text
 kiva> workspace create shop
-Workspace 'shop' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop.
+Workspace 'shop' created at C:\Users\you\AppData\Roaming\KivaDB\collections\shop.
 kiva> workspace switch shop
 Switched to workspace 'shop' (0 keys).
 kiva> set product:1 {"name": "Pen", "price": 2}
 OK: product:1 saved.
 kiva> workspace list
    default              write  C:\Users\you\AppData\Roaming\KivaDB\data
- * shop                 write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop
+ * shop                 write  C:\Users\you\AppData\Roaming\KivaDB\collections\shop
 kiva> workspace switch default
 Switched to workspace 'default' (6 keys).
 ```
@@ -2664,17 +2664,17 @@ When one server holds several applications, their workspaces pile up: `places_tr
 kiva> project create travel
 Project 'travel' created. Its workspaces are named travel.<name>: workspace create travel.places
 kiva> workspace create travel.places
-Workspace 'travel.places' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.places.
+Workspace 'travel.places' created at C:\Users\you\AppData\Roaming\KivaDB\projects\travel\places.
 kiva> workspace create travel.cache
-Workspace 'travel.cache' created at C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.cache.
+Workspace 'travel.cache' created at C:\Users\you\AppData\Roaming\KivaDB\projects\travel\cache.
 kiva> project create school
 kiva> workspace create school.places
 kiva> project list
  school               1 workspace(s): places
  travel               2 workspace(s): cache, places
 kiva> workspace list travel
-   travel.cache         write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.cache
-   travel.places        write  C:\Users\you\AppData\Roaming\KivaDB\workspaces\travel.places
+   travel.cache         write  C:\Users\you\AppData\Roaming\KivaDB\projects\travel\cache
+   travel.places        write  C:\Users\you\AppData\Roaming\KivaDB\projects\travel\places
 ```
 
 * A workspace is used like any other: `workspace switch travel.places`, `kivadb -w travel.places`, `?workspace=travel.places` over HTTP, `SELECT travel.places` or the login `app@travel.places` for Redis clients ([23.4](#234-logins-databases-roles)).
@@ -2745,13 +2745,21 @@ Using collection 'default' (6 keys).
 ```text
 kiva> project create dzoket collections (cache, orders)
 Project 'dzoket' created with 2 collection(s):
-  dzoket.cache  C:\Users\you\AppData\Roaming\KivaDB\workspaces\dzoket.cache
-  dzoket.orders  C:\Users\you\AppData\Roaming\KivaDB\workspaces\dzoket.orders
+  dzoket.cache  C:\Users\you\AppData\Roaming\KivaDB\projects\dzoket\cache
+  dzoket.orders  C:\Users\you\AppData\Roaming\KivaDB\projects\dzoket\orders
 ```
 
 * Every name is checked before anything is made: a project that exists, a collection named twice (capitals do not count, since Windows and macOS do not tell `Orders` from `orders`), or a name with other than letters, digits, `_` and `-` refuses the whole command.
 * If KivaDB stops in the middle, the next start finishes the creation, everything being new and empty, and writes `[WARN] the creation of project 'dzoket', stopped in the middle, was finished.`
 * It needs the admin role, like `project create`.
+
+**Where the files go.** A new collection gets the folder `projects/<project>/<collection>` of the home, or `collections/<name>` outside a project; `default` stays in `data`. The folder is written in `kiva.conf`, as before, so it is the name that matters to KivaDB, not the folder:
+
+* Collections made before 2.0.0-rc.5 keep their folders (`workspaces/<name>`): nothing moves on upgrade, and a home of rc.5 is still read by rc.4. A command to move them into the new layout will come in a later version.
+* A rename (`collection rename`, `move`) changes the name, not the folder.
+* KivaDB does not take over a folder of the layout that already holds files, such as the ones a `collection remove` leaves on disk: `collection create` refuses it and says how to use them, by giving the folder (`collection create travel.places "<folder>"`). A folder given that way is used as it is.
+* A name that differs from another only by capitals (`travel.Places` next to `travel.places`) is refused, since Windows and macOS do not tell their folders apart.
+* A restore puts collections in the same layout ([17.7](#177-backups)).
 
 **In the APIs**, the old names keep being answered next to the new ones, with the same values:
 
@@ -2782,7 +2790,7 @@ cache_size_mb = 256
 max_memory_mb = 0
 
 [workspaces]
-shop = C:\Users\you\AppData\Roaming\KivaDB\workspaces\shop
+shop = C:\Users\you\AppData\Roaming\KivaDB\collections\shop
 
 [network]
 port = 2911
@@ -3479,7 +3487,7 @@ kivadb restore /backups/kivadb-2026-10-22.tar.gz --check                    # on
 kivadb restore /backups/kivadb-2026-10-22.tar.gz --target /srv/kivadb-new   # a whole home
 ```
 
-* **A home backup** is restored into an empty folder (`--target`, or the home of the command if it is empty); its workspaces are placed inside it (`data`, `workspaces/<name>`) and `kiva.conf` is updated to point at them. Then start it: `kivadb --home /srv/kivadb-new start`. To replace a damaged home, move it away first, then restore in its place.
+* **A home backup** is restored into an empty folder (`--target`, or the home of the command if it is empty); its workspaces are placed inside it (`data`, `projects/<project>/<collection>`, `collections/<name>`) and `kiva.conf` is updated to point at them. Then start it: `kivadb --home /srv/kivadb-new start`. To replace a damaged home, move it away first, then restore in its place.
 * **A workspace backup** becomes a workspace of the current home, under its own name or another one: `kivadb restore shop.tar.gz --as shop_old` (`--target` chooses its folder). An existing workspace is never overwritten.
 * A damaged archive is refused with the reason (`its SHA-256 does not match`, `store.kiva does not match its SHA-256`, `checksum mismatch in the record at byte ...`), and nothing changes.
 
@@ -3669,10 +3677,16 @@ KivaDB/
     store.kiva.hint
     store.kiva.meta
     store.kiva.lock
-  workspaces/
-    shop/              another workspace
+  projects/
+    travel/
+      places/          the collection 'travel.places'
+        store.kiva
+        ...
+  collections/
+    shop/              a collection outside a project
       store.kiva
       ...
+  workspaces/          collections made before 2.0.0-rc.5, which keep their folders
 ```
 
 ### 19.2 The files of a workspace

@@ -165,7 +165,8 @@ fn disk_space(r: &mut Report, home: &Path) {
         r.add(Level::Warn, "Disk", "the free space of this disk could not be measured", None);
         return;
     };
-    let data = folder_size(&home.join("data")) + folder_size(&home.join("workspaces"));
+    let data =
+        ["data", "workspaces", "projects", "collections"].iter().map(|d| folder_size(&home.join(d))).sum::<u64>();
     let text = format!("{} free, data takes {}", crate::util::human_size(free), crate::util::human_size(data));
     if free < LOW_DISK || free < data {
         r.add(

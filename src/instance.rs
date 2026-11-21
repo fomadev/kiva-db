@@ -433,14 +433,43 @@ impl Instance {
     /// Registers a workspace. A name such as `travel.places` puts it in the
     /// project `travel`; the commands check that the project exists, not this
     /// (a replica registers the master's workspaces before their projects).
+    ///
+    /// Without a path, the folder is the one of the layout of rc.5
+    /// (`collection_dir`): it must not hold files already, and the name must
+    /// not differ from another only by capitals, which Windows and macOS do
+    /// not tell apart. A path given by an administrator is used as it is.
     pub fn create_workspace(&self, name: &str, dir: Option<&str>) -> Result<PathBuf> {
+        self.create_workspace_in(name, dir, false)
+    }
+
+    /// `create_workspace`; `reuse` lets a folder of the layout that already
+    /// holds files be taken back (a replica, a Redis database number).
+    fn create_workspace_in(&self, name: &str, dir: Option<&str>, reuse: bool) -> Result<PathBuf> {
         check_workspace_name(name)?;
         if self.cfg().workspace_dir(name).is_some() {
             return Err(KivaError::Exists(format!("workspace '{name}' already exists")));
         }
         let dir = match dir {
             Some(d) => PathBuf::from(d),
-            None => self.home.join("workspaces").join(name),
+            None => {
+                let twin = self.workspace_names().into_iter().find(|w| w.eq_ignore_ascii_case(name));
+                if let Some(twin) = twin {
+                    return Err(KivaError::Exists(format!(
+                        "'{name}' differs from the collection '{twin}' only by capitals, which Windows and macOS \
+                         do not tell apart: choose another name"
+                    )));
+                }
+                let dir = collection_dir(&self.home, name);
+                if !reuse && fs::read_dir(&dir).is_ok_and(|mut d| d.next().is_some()) {
+                    return Err(KivaError::Exists(format!(
+                        "the folder {} already holds files: KivaDB does not take them over without being told. \
+                         To use them, give the folder: collection create {name} \"{}\"",
+                        dir.display(),
+                        dir.display()
+                    )));
+                }
+                dir
+            }
         };
         fs::create_dir_all(&dir)?;
         self.cfg_mut().set("workspaces", name, &dir.display().to_string())?;
@@ -658,7 +687,7 @@ impl Instance {
     /// Makes sure a workspace is registered.
     pub fn ensure_workspace(&self, name: &str) -> Result<()> {
         if self.cfg().workspace_dir(name).is_none() {
-            self.create_workspace(name, None)?;
+            self.create_workspace_in(name, None, true)?;
         }
         Ok(())
     }
@@ -847,6 +876,18 @@ pub(crate) fn recover_moves(system: &Engine, cfg: &Config) -> Result<Vec<String>
         }
     }
     Ok(done)
+}
+
+/// The folder a new collection gets when no path is given (rc.5, section 5.1
+/// of docs/architecture/RC5_ARCHITECTURE.md): `<home>/projects/<project>/<collection>`
+/// in a project, `<home>/collections/<name>` outside one. The name has been
+/// checked (`check_workspace_name`): its parts hold no `.`, `/` or `\`.
+/// Collections made before rc.5 keep their folders, written in kiva.conf.
+pub fn collection_dir(home: &Path, name: &str) -> PathBuf {
+    match name.split_once('.') {
+        Some((project, collection)) => home.join("projects").join(project).join(collection),
+        None => home.join("collections").join(name),
+    }
 }
 
 /// The record that marks a `project create ... collections` in progress.
