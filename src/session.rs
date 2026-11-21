@@ -67,6 +67,9 @@ pub struct Session {
     /// Access to the current workspace; `None` when the session is in none
     /// (`ws` is then empty, and `engine` the empty `nowhere` store).
     pub ws_priv: Option<Priv>,
+    /// The project chosen by `use <project>`, while no collection is: data
+    /// commands then ask for one (`use <project>.<collection>`).
+    pub project: Option<String>,
     pub txn: Option<Txn>,
     /// True for the local shell; remote sessions cannot log in with an empty password.
     pub local: bool,
@@ -95,6 +98,7 @@ impl Session {
             ws: "default".into(),
             engine,
             ws_priv: Some(Priv::Read),
+            project: None,
             txn: None,
             local,
             events,
@@ -224,6 +228,7 @@ impl Session {
         self.engine = engine;
         self.ws = workspace.to_string();
         self.ws_priv = Some(level);
+        self.project = None;
         Ok(())
     }
 
@@ -233,6 +238,46 @@ impl Session {
         self.engine = self.inst.nowhere.clone();
         self.ws.clear();
         self.ws_priv = None;
+        self.project = None;
+    }
+
+    /// `use <project>`: leaves the current collection and keeps the project,
+    /// for a user who can reach something in it.
+    pub fn use_project(&mut self, project: &str) -> Result<()> {
+        if self.txn.is_some() {
+            return Err(KivaError::Invalid("cannot change project inside a transaction".into()));
+        }
+        let ctx = self.user.clone().ok_or_else(|| KivaError::Denied("authentication required".into()))?;
+        if !self.inst.project_exists(project) {
+            return Err(KivaError::NotFound(format!("project '{project}' does not exist")));
+        }
+        if ctx.role != Role::Admin {
+            let user = auth::get_user(&self.inst.system, &ctx.name)?;
+            let reaches = user.is_some_and(|u| {
+                u.manages_project(project)
+                    || self
+                        .inst
+                        .workspace_names()
+                        .iter()
+                        .any(|w| auth::project_of(w) == Some(project) && u.access(w).is_some())
+            });
+            if !reaches {
+                return Err(KivaError::Denied(format!("no access to project '{project}'")));
+            }
+        }
+        self.leave();
+        self.project = Some(project.to_string());
+        Ok(())
+    }
+
+    /// The project of the session: the one chosen by `use`, else the one of
+    /// the collection in use.
+    pub fn current_project(&self) -> Option<&str> {
+        match &self.project {
+            Some(p) => Some(p),
+            None if self.ws_priv.is_some() => auth::project_of(&self.ws),
+            None => None,
+        }
     }
 
     // Subscriptions are per workspace: they do not follow the session.
@@ -286,6 +331,12 @@ impl Session {
             return Err(KivaError::Denied("authentication required. Use: auth <user> <password>".into()));
         };
         if matches!(need, Need::Read | Need::Write | Need::Owner) && self.ws_priv.is_none() {
+            if let Some(p) = &self.project {
+                return Err(KivaError::Denied(format!(
+                    "you are in project '{p}' but in no collection: 'collection list' shows its collections, \
+                     'use {p}.<collection>' enters one"
+                )));
+            }
             return Err(KivaError::Denied(
                 "you are in no workspace: 'workspace list' shows the ones you can use, 'workspace switch <name>' \
                  enters one"

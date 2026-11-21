@@ -314,6 +314,7 @@ impl Instance {
                 inst.repl.broadcast(crate::repl::SYSTEM, op);
             }
         });
+        inst.recover_pending_projects()?;
         inst.reload_triggers();
         inst.start_trigger_worker();
         // Open the default workspace eagerly so problems surface at startup.
@@ -565,6 +566,82 @@ impl Instance {
         Ok(())
     }
 
+    /// `project create <name> collections (<c>, ...)`: the project and its
+    /// collections, all new. Every name is checked first; then a record
+    /// `pending:project:<name>` is written, so that a start after a crash
+    /// finishes the creation (`recover_pending_projects`): nothing is lost by
+    /// finishing, since everything is new and empty.
+    pub fn create_project_with(&self, name: &str, collections: &[String]) -> Result<Vec<PathBuf>> {
+        if !auth::valid_name_part(name) {
+            return Err(KivaError::Invalid("project names may only contain letters, digits, '_' and '-'".into()));
+        }
+        if self.project_exists(name) {
+            return Err(KivaError::Exists(format!("project '{name}' already exists")));
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for c in collections {
+            if !auth::valid_name_part(c) {
+                return Err(KivaError::Invalid(format!("collection name '{c}': only letters, digits, '_' and '-'")));
+            }
+            // Windows and macOS do not tell `Places` from `places`.
+            if seen.iter().any(|s| s.eq_ignore_ascii_case(c)) {
+                return Err(KivaError::Invalid(format!("collection '{c}' is named twice (capitals do not count)")));
+            }
+            seen.push(c.clone());
+            if self.cfg().workspace_dir(&format!("{name}.{c}")).is_some() {
+                return Err(KivaError::Exists(format!("collection '{name}.{c}' already exists")));
+            }
+        }
+        let record = pending_project(name);
+        self.system.put(&record, &Value::Doc(serde_json::json!({ "collections": collections })), 0, false)?;
+        self.system.sync()?;
+        let dirs = self.finish_project(name, collections)?;
+        self.system.delete(&record)?;
+        self.system.sync()?;
+        Ok(dirs)
+    }
+
+    /// Creates what is missing of a project and its collections.
+    fn finish_project(&self, name: &str, collections: &[String]) -> Result<Vec<PathBuf>> {
+        if !self.project_exists(name) {
+            self.create_project(name)?;
+        }
+        let mut dirs = Vec::new();
+        for c in collections {
+            let full = format!("{name}.{c}");
+            // The read lock of kiva.conf is let go before `create_workspace` writes it.
+            let known = self.cfg().workspace_dir(&full);
+            let dir = match known {
+                Some(d) => d,
+                None => self.create_workspace(&full, None)?,
+            };
+            dirs.push(dir);
+        }
+        Ok(dirs)
+    }
+
+    /// Finishes the `project create ... collections` that a stop cut short.
+    fn recover_pending_projects(&self) -> Result<()> {
+        for (key, _) in self.system.keys_matching("pending:project:*", 0) {
+            let name = key["pending:project:".len()..].to_string();
+            let collections: Vec<String> = match self.system.get(&key)? {
+                Some((Value::Doc(j), _)) => j["collections"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if auth::valid_name_part(&name) && collections.iter().all(|c| auth::valid_name_part(c)) {
+                self.finish_project(&name, &collections)?;
+                eprintln!("[WARN] the creation of project '{name}', stopped in the middle, was finished.");
+            }
+            self.system.delete(&key)?;
+        }
+        self.system.sync()
+    }
+
     /// Removes an empty project. Returns whether it existed.
     pub fn remove_project(&self, name: &str) -> Result<bool> {
         let inside: Vec<String> =
@@ -770,6 +847,11 @@ pub(crate) fn recover_moves(system: &Engine, cfg: &Config) -> Result<Vec<String>
         }
     }
     Ok(done)
+}
+
+/// The record that marks a `project create ... collections` in progress.
+fn pending_project(name: &str) -> String {
+    format!("pending:project:{name}")
 }
 
 /// Refuses a name that is not `<workspace>` or `<project>.<workspace>`.
