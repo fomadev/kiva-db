@@ -16,6 +16,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
+| next (unreleased) | KivaDB 2.0.0-rc.5 | Nothing new: `collection`, `use()` and `whoami()` work with every server; `collections()` asks an older one under the former name |
 | 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`): 2.0.0 or later; `order_by="random()"` in `query`: 2.0.0-rc.4 or later |
 | 1.0.0 | KivaDB 2.0.0 | `date`, `time` and `datetime` values, `order_by` and `after` in `query`, `explain(analyze=True)` and `changes`: 2.0.0 or later |
 
@@ -85,7 +86,10 @@ With a certificate from an authority (your own domain), `tls=True` is enough, or
 
 | Method | Does |
 | :--- | :--- |
-| `connect(host, port, user, password, *, workspace, timeout, tls, reconnect)` | Opens a connection and logs in; `workspace` to work in one; `timeout` in seconds (8) |
+| `connect(host, port, user, password, *, collection, timeout, tls, reconnect)` | Opens a connection and logs in; `collection` to work in one (`"travel.places"`; `workspace` is the same option under its former name); `timeout` in seconds (8) |
+| `use(collection)` | Works in another collection from now on, and after a reconnection |
+| `collections(project=None)` | The collections the user can reach: `name`, `project`, `path`, `access`, `current` |
+| `whoami()` | The session: `user`, `role`, `collection`, `project`, `access`, `version` |
 | `get(key, default=None)` | The value of a key, or `default` |
 | `set(key, value, *, ttl, mode, type)` | Creates or replaces a key; `mode`: `"upsert"`, `"create"` (fails if it exists), `"update"` (fails if it does not) |
 | `add(prefix, value, *, ttl, type)` | Stores under a key KivaDB names; returns `(key, id)` |

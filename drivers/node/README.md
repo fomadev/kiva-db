@@ -12,6 +12,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
+| next (unreleased) | KivaDB 2.0.0-rc.5 | Nothing new: `collection`, `use`, `whoami`, `explain`, `aggregate` work with every 2.0 server (`changes` needs 2.0.0); `collections` asks an older one under the former name |
 | 1.3.0 | KivaDB 2.0.0 | `types: "extended"` (native values without loss), and `orderBy` in `query`: 2.0.0 or later (`"random()"`: 2.0.0-rc.4 or later) |
 | 1.2.0 | KivaDB 2.0.0 | `date`, `datetime` (a `Date`) and `time`: 2.0.0 or later |
 | 1.1.0 | KivaDB 1.7.0 | `add`, and `in` / `like` / `ilike` in `query`: 1.7.0 or later |
@@ -58,7 +59,13 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 
 | Method | Does |
 | :--- | :--- |
-| `connect({host, port, user, password, timeout, tls, types, decimal})` | Opens a connection and logs in; `tls`: `true` or `{ fingerprint }`; `types`: `"plain"` (default) or `"extended"` (see Native values) |
+| `connect({host, port, user, password, collection, timeout, tls, types, decimal})` | Opens a connection and logs in; `collection`: the collection to work in (`"travel.places"`; `workspace` is the same option under its former name); `tls`: `true` or `{ fingerprint }`; `types`: `"plain"` (default) or `"extended"` (see Native values) |
+| `use(collection)` | Works in another collection from now on |
+| `collections(project)` | The collections the user can reach: `{name, project, path, access, current}` |
+| `whoami()` | The session: `user`, `role`, `collection`, `project`, `access`, `version` |
+| `explain(pattern, where, {limit, orderBy, analyze})` | The plan of a query; with `analyze: true` the query runs and its counts are under `analyze` |
+| `aggregate(pattern, compute, {where, groupBy})` | `count`, `sum`, `avg`, `min`, `max`: `aggregate("emp:*", {n: "count", mean: {avg: "age"}})` |
+| `changes({cursor, consumer, limit, pattern, wait})` | The change journal (`changes enable`): the changes after a cursor (`"beginning"`, `"now"`) or a consumer's position; `wait` ms for one (at most 30000) |
 | `get(key)` | The value, or `undefined`. Bytes come back as a `Buffer`, a `datetime` as a `Date`, a `date` (`"2026-10-27"`) and a `time` (`"14:30:00"`) as text |
 | `set(key, value, {ttl, mode, type})` | Creates or replaces. The KivaDB type follows the JavaScript value (`string`, `number`, `boolean`, `null`, array, object, `Buffer`, `Date` for a `datetime`). For a `date` or a `time`, give the text and the type: `set("born", "2004-05-09", { type: "date" })`. `mode`: `upsert` (default), `create`, `update`. `ttl`: seconds; `0` removes an expiry; omitted keeps it |
 | `add(prefix, value, {ttl, type})` | Stores the value under a key KivaDB names: `add("place:", {name: "Goma"})` resolves to `{key: "place:6adf9c3c...", id: "6adf9c3c..."}`. The identifier has MongoDB's ObjectId format and sorts by creation time |
@@ -69,7 +76,7 @@ With a certificate from an authority (your own domain), `tls: true` is enough.
 | `exec(command)` | Any command of the KivaDB shell language; resolves to the output lines, rejects with `KivaError` on an error |
 | `semanticLookup(cache, {text, vector, threshold})` / `semanticStore(cache, answer, {text, vector, ttl, depends, since})` | Semantic cache: reuse the answer of a question already asked, or of a near-identical one (DOCUMENTATION 12.8) |
 | `semanticCached(cache, {text, vector, threshold, ttl, depends}, compute)` | The cached answer, or `compute()`'s, stored unless the data it depends on changed while it was computed |
-| `api({op, ...})` | Structured request (`whoami`, `workspaces`, `scan`, `get`, `put`, `add`, `del`, `query`, `explain`, `aggregate`, `similar`, `semantic`, `stats`, `users`) |
+| `api({op, ...})` | Structured request (`whoami`, `collections`, `scan`, `get`, `put`, `add`, `del`, `query`, `explain`, `aggregate`, `similar`, `semantic`, `changes`, `stats`, `users`) |
 | `subscribe(pattern)` | Then `db.on("change", e => ...)` receives `{event, key, type}` for every set, update and delete |
 | `stats()`, `ping()`, `close()` | |
 

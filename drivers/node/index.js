@@ -192,6 +192,9 @@ function sameFingerprint(a, b) {
   return norm(a).length === 64 && norm(a) === norm(b);
 }
 
+/** A collection name: `travel.places`, or a name outside a project. */
+const COLLECTION = /^[A-Za-z0-9_.-]{1,64}$/;
+
 function isLocalHost(host) {
   const h = String(host).trim().toLowerCase();
   return h === "localhost" || h === "::1" || h === "[::1]" || h.startsWith("127.");
@@ -220,7 +223,8 @@ class KivaClient extends EventEmitter {
    * @param {object} [options] host (localhost), port (2911), user ("kiva"), password (""), timeout (8000 ms),
    *   tls: true, or { fingerprint } (the server's certificate, from `kivadb tls`), or Node TLS options such as { ca },
    *   types: "plain" (default) or "extended" (native values without loss; needs KivaDB 2.0.0),
-   *   decimal: a class built from a text, e.g. Decimal of decimal.js, for the decimals read in extended mode
+   *   decimal: a class built from a text, e.g. Decimal of decimal.js, for the decimals read in extended mode,
+   *   collection: the collection to work in, e.g. "travel.places" (workspace: the same, under its former name)
    */
   static connect(options = {}) {
     const types = options.types === undefined ? "plain" : options.types;
@@ -237,6 +241,16 @@ class KivaClient extends EventEmitter {
     const timeout = options.timeout || 8000;
     if (!isLocalHost(host) && !password) {
       return Promise.reject(new KivaError("A password is required to connect to a remote server."));
+    }
+    const { collection: inCollection, workspace } = options;
+    if (inCollection !== undefined && workspace !== undefined && inCollection !== workspace) {
+      return Promise.reject(
+        new KivaError(`collection ${JSON.stringify(inCollection)} and workspace ${JSON.stringify(workspace)} name two collections: give one.`),
+      );
+    }
+    const collection = inCollection !== undefined ? inCollection : workspace;
+    if (collection !== undefined && (typeof collection !== "string" || !COLLECTION.test(collection))) {
+      return Promise.reject(new KivaError(`Not a collection name: ${JSON.stringify(collection)}.`));
     }
     const secure = options.tls ? (options.tls === true ? {} : options.tls) : null;
     const fingerprint = secure && secure.fingerprint;
@@ -288,6 +302,9 @@ class KivaClient extends EventEmitter {
             const r = await client._call(CMD.AUTH, Buffer.concat([Buffer.from(user), Buffer.from([0]), Buffer.from(password)]));
             if (r.status !== ST.OK) throw new KivaError(r.payload.toString().replace(/^permission denied: /, ""));
           }
+          // `workspace switch` is understood by every server, 1.x included.
+          if (collection) await client.exec(`workspace switch ${collection}`);
+          client.collection = collection;
           resolve(client);
         } catch (err) {
           client.close();
@@ -458,6 +475,83 @@ class KivaClient extends EventEmitter {
 
   async stats() {
     return this.api({ op: "stats" });
+  }
+
+  /**
+   * The plan of a query (the same arguments as query); with options.analyze,
+   * the query is run and what it read is under "analyze".
+   */
+  async explain(pattern, where, options = {}) {
+    const req = { op: "explain", target: pattern };
+    if (where !== undefined && where !== null) req.where = where;
+    if (options.limit) req.limit = options.limit;
+    if (options.orderBy) req.order_by = options.orderBy;
+    if (options.analyze) req.analyze = true;
+    return this._api(req);
+  }
+
+  /**
+   * count, sum, avg, min, max over the documents of a pattern:
+   * compute "count", or { n: "count", mean: { avg: "age" } }.
+   * @param {object} [options] where, groupBy
+   */
+  async aggregate(pattern, compute = "count", options = {}) {
+    const req = { op: "aggregate", target: pattern, compute };
+    if (options.where !== undefined && options.where !== null) req.where = options.where;
+    if (options.groupBy) req.group_by = options.groupBy;
+    return this._api(req);
+  }
+
+  /**
+   * The change journal (`changes enable`, KivaDB 2.0.0): the changes after
+   * options.cursor ("beginning", "now" or a cursor), or after the last
+   * acknowledgement of options.consumer. options.wait (ms, at most 30000)
+   * waits for a change when there is none yet.
+   */
+  async changes(options = {}) {
+    const req = { op: "changes", limit: options.limit || 100 };
+    if (options.cursor !== undefined) req.cursor = options.cursor;
+    if (options.consumer !== undefined) req.consumer = options.consumer;
+    if (options.pattern !== undefined) req.pattern = options.pattern;
+    if (options.wait) req.wait = options.wait;
+    const r = await this._api(req);
+    r.changes = r.changes.map((c) => ({ ...c, value: this._value(c.value) }));
+    return r;
+  }
+
+  /** The session: user, role, collection (workspace before 2.0.0-rc.5), project, access, version... */
+  async whoami() {
+    return this.api({ op: "whoami" });
+  }
+
+  /** Works in another collection from now on. */
+  async use(collection) {
+    if (typeof collection !== "string" || !COLLECTION.test(collection)) {
+      throw new KivaError(`Not a collection name: ${JSON.stringify(collection)}.`);
+    }
+    await this.exec(`workspace switch ${collection}`);
+    this.collection = collection;
+  }
+
+  /**
+   * The collections the user can reach (those of `project` only, if given):
+   * name, project, path, access, current. A server older than 2.0.0-rc.5 is
+   * asked under the former name.
+   */
+  async collections(project) {
+    const req = project === undefined ? { op: "collections" } : { op: "collections", project };
+    try {
+      return (await this.api(req)).collections;
+    } catch (err) {
+      if (!/unknown operation/.test(err.message)) throw err;
+      const all = (await this.api({ op: "workspaces" })).workspaces;
+      return all.filter((c) => project === undefined || c.project === project);
+    }
+  }
+
+  /** The collection in use, under its former name. */
+  get workspace() {
+    return this.collection;
   }
 
   /**

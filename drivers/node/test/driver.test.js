@@ -183,6 +183,50 @@ test("the driver talks to a real KivaDB", { skip: !binary && "KivaDB is not buil
     assert.deepEqual(out.map((o) => o[0]), Array.from({ length: 40 }, (_, i) => String(i * 3)));
   });
 
+  await t.test("collections: the option, use, the list and whoami", async () => {
+    await db.exec("project create baak collections (places, users)");
+    const places = await connect({ port, collection: "baak.places" });
+    try {
+      assert.equal(places.collection, "baak.places");
+      assert.equal(places.workspace, "baak.places");
+      await places.set("city:1", "Goma");
+      const who = await places.whoami();
+      assert.deepEqual([who.collection, who.project], ["baak.places", "baak"]);
+      assert.deepEqual((await places.collections("baak")).map((c) => c.name), ["baak.places", "baak.users"]);
+      assert.ok((await places.collections()).some((c) => c.name === "default"));
+      await places.use("baak.users");
+      assert.equal(await places.get("city:1"), undefined);
+      assert.equal(places.collection, "baak.users");
+      await assert.rejects(places.use("baak.nothing"), /does not exist/);
+      assert.equal(places.collection, "baak.users", "unchanged by a failed use");
+      await assert.rejects(places.use("a b"), /Not a collection name/);
+    } finally {
+      places.close();
+    }
+    // The former name, and both names agreeing.
+    const old = await connect({ port, workspace: "baak.places" });
+    assert.equal(await old.get("city:1"), "Goma");
+    old.close();
+    await assert.rejects(connect({ port, collection: "baak.places", workspace: "baak.users" }), /name two collections/);
+    await assert.rejects(connect({ port, collection: "a b" }), /Not a collection name/);
+  });
+
+  await t.test("explain, aggregate and the change journal", async () => {
+    await db.exec("changes enable");
+    await db.set("emp:1", { name: "Ana", age: 31 });
+    await db.set("emp:2", { name: "Bo", age: 40 });
+    const plan = await db.explain("emp:*", { field: "age", cmp: ">", value: 35 }, { analyze: true });
+    assert.equal(plan.plan.strategy, "PREFIX SCAN", JSON.stringify(plan));
+    assert.equal(plan.analyze.returned, 1);
+    const agg = await db.aggregate("emp:*", { n: "count", mean: { avg: "age" } });
+    assert.equal(JSON.stringify(agg).includes("35.5"), true, JSON.stringify(agg));
+    const read = await db.changes({ cursor: "beginning", pattern: "emp:*" });
+    assert.deepEqual(read.changes.map((c) => [c.op, c.key]), [["set", "emp:1"], ["set", "emp:2"]]);
+    assert.equal(typeof read.cursor, "string");
+    const none = await db.changes({ cursor: read.cursor, pattern: "emp:*" });
+    assert.equal(none.changes.length, 0);
+  });
+
   db.close();
   await assert.rejects(db.ping(), /Not connected/);
 });
