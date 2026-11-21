@@ -543,7 +543,8 @@ pub fn restore(archive: &Path, home: &Path, opts: &RestoreOptions) -> Result<Vec
         // Workspaces go inside the new home, wherever they were before.
         let mut cfg = crate::config::Config::load(&target)?;
         for name in &names {
-            let dir = if name == "default" { target.join("data") } else { target.join("workspaces").join(name) };
+            let dir =
+                if name == "default" { target.join("data") } else { crate::instance::collection_dir(&target, name) };
             install_workspace(&staging, name, &dir)?;
             if name == "default" {
                 cfg.set("storage", "default_workspace", &dir.display().to_string())?;
@@ -570,7 +571,7 @@ pub fn restore(archive: &Path, home: &Path, opts: &RestoreOptions) -> Result<Vec
         if !valid {
             return Err(KivaError::Invalid("workspace names may only contain letters, digits, '_' and '-'".into()));
         }
-        let dir = opts.target.clone().unwrap_or_else(|| home.join("workspaces").join(&name));
+        let dir = opts.target.clone().unwrap_or_else(|| crate::instance::collection_dir(home, &name));
         if !is_empty_dir(&dir) {
             return Err(KivaError::Exists(format!(
                 "{} is not empty: choose another folder with --target",
