@@ -2675,6 +2675,13 @@ impl Engine {
         self.lock().live(key, now_ms())
     }
 
+    /// Whether `value` may be written under `key` as the schemas of its
+    /// patterns stand, without writing it (`kivadb import --dry-run`).
+    /// Unique indexes are checked only by the write itself.
+    pub fn check_against_schemas(&self, key: &str, value: &Value) -> Result<()> {
+        self.lock().conformed(key, value, Moment::now()).map(|_| ())
+    }
+
     pub fn contains(&self, key: &str) -> bool {
         self.meta(key).is_some()
     }

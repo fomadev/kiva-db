@@ -54,6 +54,8 @@ impl Session {
             "semantic" => self.cmd_semantic(a, out),
             "memory" => self.cmd_memory(a, out),
             "backup" => self.cmd_backup(a, out),
+            "export" => self.cmd_export(a, out),
+            "import" => self.cmd_import(a, out),
             "autocompact" => self.cmd_autocompact(a, out),
             "check" => self.cmd_check(a, out),
             "schema" => self.cmd_schema(a, out),
@@ -1053,6 +1055,55 @@ impl Session {
             }
         }
         Ok(self.inst.create_workspace(name, path)?)
+    }
+
+    /// `export to "<file>" [keys <pattern>]`: the keys of the collection in
+    /// use, as NDJSON in extended JSON (`crate::transfer`).
+    fn cmd_export(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "export to \"<file.ndjson>\" [keys <pattern>]";
+        let mut c = Cur::new(a);
+        if !c.eat("to") || c.peek().is_none() {
+            return Err(usage_line(USAGE));
+        }
+        let file = word(c.next(), "a file")?;
+        let pattern = if c.eat("keys") { word(c.next(), "a key pattern")? } else { "*".to_string() };
+        c.finish(USAGE)?;
+        self.check(Need::Read)?;
+        let path = std::path::PathBuf::from(&file);
+        let n = crate::transfer::export(self, &pattern, &path)?;
+        out.say(format!("Exported {n} key(s) of '{}' to {}.", self.ws, path.display()));
+        Ok(())
+    }
+
+    /// `import from "<file>" [dry run] [replace]`: the lines of an NDJSON
+    /// file into the collection in use; a wrong line refuses the whole file.
+    fn cmd_import(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "import from \"<file.ndjson>\" [dry run] [replace]";
+        let mut c = Cur::new(a);
+        if !c.eat("from") || c.peek().is_none() {
+            return Err(usage_line(USAGE));
+        }
+        let file = word(c.next(), "a file")?;
+        let mut opts = crate::transfer::ImportOptions::default();
+        loop {
+            if c.eat("dry") {
+                if !c.eat("run") {
+                    return Err(usage_line(USAGE));
+                }
+                opts.dry_run = true;
+            } else if c.eat("replace") {
+                opts.replace = true;
+            } else {
+                break;
+            }
+        }
+        c.finish(USAGE)?;
+        if self.txn.is_some() {
+            return Err("import writes in batches of its own: run it outside a transaction.".into());
+        }
+        let report = crate::transfer::import(self, std::path::Path::new(&file), opts)?;
+        out.say(report.text(&self.ws, opts.dry_run));
+        Ok(())
     }
 
     /// `use <project>.<collection>` (or `use <collection>`) enters a

@@ -3550,6 +3550,43 @@ A last record cut short is a warning, not a problem: a write was interrupted by 
 kivadb doctor --json > doctor.json || echo "KivaDB needs attention"
 ```
 
+### 17.10 Export and import (NDJSON)
+
+Since 2.0.0-rc.5, `export` writes the keys of a collection to a text file, one JSON object per line (NDJSON), and `import` reads such a file back into a collection:
+
+```bash
+kivadb export travel.places -o places.ndjson [--keys city:*]
+kivadb import travel.copy places.ndjson --dry-run
+kivadb import travel.copy places.ndjson [--replace]
+```
+
+From the shell, in the collection in use: `export to "places.ndjson" [keys city:*]` and `import from "places.ndjson" [dry run] [replace]`. Both need the admin role, since they read and write files on the server's machine. When KivaDB is running, the command line goes through it; otherwise it opens the files itself.
+
+Each line holds one key:
+
+```json
+{"key": "acc:1", "type": "object", "value": {"name": "Ana", "balance": {"$decimal": "1250.50"}, "opened": {"$date": "2026-01-15"}}, "expires_at": null}
+{"key": "session:1", "type": "string", "value": "abc", "expires_at": "2026-10-27T15:30:00.000Z"}
+```
+
+* `value` is in extended JSON ([20.4](#204-structured-requests-for-tools)): decimals, dates, times and datetimes keep their types, inside documents too. Bytes are in base64. A number of 1.x that is neither an `int` nor a `float` is written as its exact text.
+* `type` is the type of the key: `string`, `int`, `float`, `decimal`, `object`... `expires_at` is when its TTL runs out, or `null`.
+* Other programs can write such a file too: `expires_at` may also be milliseconds since 1970, and blank lines are skipped.
+
+**Import checks the whole file first.** Every line is read and checked: its JSON, its type and value, the key name, and the schemas of the collection ([11.8](#118-schemas-rules-for-the-documents-of-a-pattern)). One wrong line refuses the file before anything is written, and the message names each wrong line by its number (the first 20). `--dry-run` (`dry run`) stops there, writes nothing, and says what would be written. Unique indexes are checked by the writes themselves.
+
+**Running it again is safe.** By default, a key the collection already holds is kept as it is, so importing the same file twice gives the same keys. `--replace` overwrites them with the file's values. A line whose `expires_at` is past is skipped. Keys are written in batches of 500, each batch whole or not at all. If a write fails half-way (a unique index), the message says how many keys were written, and the same file can be imported again.
+
+**Export or backup?**
+
+| | `kivadb backup` ([17.7](#177-backups)) | `kivadb export` |
+| :--- | :--- | :--- |
+| What | The files, as they are: data, indexes, schemas, users, configuration | The keys and values of one collection, filtered by a pattern if you like |
+| Read by | `kivadb restore` | Any program that reads JSON, and `kivadb import` |
+| For | Getting a home or a collection back after a loss | Moving data to another collection or server, feeding another tool, a readable copy |
+
+An export holds neither the indexes, the schemas, nor the change journal: create them in the target before importing.
+
 ---
 
 ## Chapter 18 — Keeping values in memory (value cache)

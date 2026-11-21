@@ -27,6 +27,10 @@ USAGE:
   kivadb doctor [--json]      Look for what could stop KivaDB or lose data (reads only)
   kivadb backup -o <f.tar.gz> Save the home (or -w <workspace>) to an archive, even while running
   kivadb restore <f.tar.gz>   Restore an archive (--target <dir>, --as <name>, --check: only verify)
+  kivadb export <collection> -o <f.ndjson> [--keys <pattern>]
+                              Write the keys of a collection as NDJSON (extended JSON)
+  kivadb import <collection> <f.ndjson> [--dry-run] [--replace]
+                              Load an NDJSON file into a collection (--dry-run: only check)
   kivadb [OPTIONS]            Open the interactive shell
   kivadb serve [OPTIONS]      Run the server in this terminal (Ctrl+C to stop)
 
@@ -72,6 +76,11 @@ struct Args {
     archive: Option<PathBuf>,
     target: Option<PathBuf>,
     rename: Option<String>,
+    /// `export`/`import`: the collection, the pattern, and how to import.
+    collection: Option<String>,
+    keys: Option<String>,
+    dry_run: bool,
+    replace: bool,
     port: Option<u16>,
     bind: Option<String>,
     http_port: Option<u16>,
@@ -112,6 +121,18 @@ fn parse_args() -> Args {
                 args.action = Some("restore");
                 args.archive = Some(PathBuf::from(value(&mut it, "restore")));
             }
+            "export" => {
+                args.action = Some("export");
+                args.collection = Some(value(&mut it, "export"));
+            }
+            "import" => {
+                args.action = Some("import");
+                args.collection = Some(value(&mut it, "import"));
+                args.archive = Some(PathBuf::from(value(&mut it, "import")));
+            }
+            "--keys" => args.keys = Some(value(&mut it, "--keys")),
+            "--dry-run" => args.dry_run = true,
+            "--replace" => args.replace = true,
             "-o" | "--output" => args.output = Some(PathBuf::from(value(&mut it, "--output"))),
             "--target" => args.target = Some(PathBuf::from(value(&mut it, "--target"))),
             "--as" => args.rename = Some(value(&mut it, "--as")),
@@ -566,6 +587,71 @@ fn backup(home: &Path, args: &Args) -> i32 {
     }
 }
 
+/// `kivadb export` and `kivadb import`: through the running server when
+/// there is one (as the user given, else the built-in administrator of the
+/// local shell), else on the files, KivaDB not running.
+fn transfer(home: &Path, args: &Args) -> i32 {
+    let collection = args.collection.clone().unwrap_or_default();
+    let command = if args.action == Some("export") {
+        let Some(output) = &args.output else {
+            eprintln!(
+                "Error: say where to write: kivadb export <collection> --output <file.ndjson> [--keys <pattern>]"
+            );
+            return 2;
+        };
+        // The server may run in another folder: give it an absolute path.
+        let output = std::path::absolute(output).unwrap_or_else(|_| output.clone());
+        let keys = args.keys.as_ref().map(|k| format!(" keys {k}")).unwrap_or_default();
+        format!("export to \"{}\"{keys}", output.display())
+    } else {
+        let file = args.archive.clone().unwrap_or_default();
+        let file = std::path::absolute(&file).unwrap_or(file);
+        let mut c = format!("import from \"{}\"", file.display());
+        if args.dry_run {
+            c.push_str(" dry run");
+        }
+        if args.replace {
+            c.push_str(" replace");
+        }
+        c
+    };
+    if let Some(port) = running_port(home) {
+        let mut opts = args.shell.clone();
+        opts.workspace = None;
+        opts.commands = vec![format!("use {collection}"), command];
+        return shell::run_client(&format!("127.0.0.1:{port}"), opts);
+    }
+    let inst = match Instance::open(home, args.opts.clone()) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let mut sess = kivadb::session::Session::system(inst.clone());
+    let code = match sess.switch_workspace(&collection) {
+        Err(e) => {
+            eprintln!("Error: {e}");
+            1
+        }
+        Ok(()) => {
+            let out = sess.execute(&command);
+            let mut code = 0;
+            for (is_err, line) in &out.lines {
+                if *is_err {
+                    eprintln!("{line}");
+                    code = 1;
+                } else {
+                    println!("{line}");
+                }
+            }
+            code
+        }
+    };
+    inst.shutdown();
+    code
+}
+
 /// `kivadb restore`: checks the archive, then restores it (KivaDB stopped).
 fn restore(home: &Path, args: &Args) -> i32 {
     let archive = args.archive.clone().unwrap_or_default();
@@ -638,6 +724,9 @@ fn main() {
     }
     if args.action == Some("backup") {
         exit(backup(&home, &args));
+    }
+    if matches!(args.action, Some("export" | "import")) {
+        exit(transfer(&home, &args));
     }
     if args.action == Some("doctor") {
         let running = running_port(&home).map(|p| (p, running_pid(&home)));
