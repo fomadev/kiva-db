@@ -1752,6 +1752,14 @@ user:1: {"name":"Alice","role":"admin","age":30,"address":{"city":"Kinshasa"}}
 
 Comparisons are made between values of the same kind: numbers with numbers, text with text (alphabetical order). A document that lacks the field never matches that comparison.
 
+The pattern names the keys. With a wildcard (`user:*`), it is a family of keys; without one (`user`), it is one key, read alone. When that key does not exist but keys `user:...` do, the answer says how to reach them:
+
+```text
+kiva> get where user.city = "Kinshasa"
+(0 matches)
+there is no key 'user'. For the keys user:..., write user:*
+```
+
 #### Order and pages
 
 Rows come in key order; `reverse` starts from the last key. `order by <field>` sorts them by the value of a field instead, `asc` (the default) or `desc`. Rows of the same value come in key order.
@@ -1919,6 +1927,7 @@ Query Plan
 
 | Strategy | Meaning |
 | :--- | :--- |
+| `KEY LOOKUP` | The pattern has no wildcard: it names one key, which is read alone (`get where user.city = ...` reads the key `user`, not `user:1`) |
 | `INDEX SCAN` | A secondary index gives the candidates directly |
 | `INDEX MERGE` | Several indexes, intersected for `and` and merged for `or` |
 | `INDEX ORDER SCAN` | A B-tree index on the field of `order by`, read in order until the `limit` is reached; the condition is checked on the indexes it can be, before a document is read |

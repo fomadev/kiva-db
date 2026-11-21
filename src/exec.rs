@@ -669,9 +669,17 @@ impl<'a> Cur<'a> {
     /// Fails if tokens are left over.
     pub fn finish(&self, usage: &str) -> R {
         match self.peek() {
-            Some(t) => Err(format!("Unexpected '{}'.\nUsage: {usage}", t.text)),
+            Some(t) => Err(format!("Unexpected '{}'.\n{}", t.text, usage_line(usage))),
             None => Ok(()),
         }
+    }
+}
+
+/// `Usage: <form>`, written once: some forms already start with `Usage:`.
+pub(crate) fn usage_line(form: &str) -> String {
+    match form.strip_prefix("Usage:") {
+        Some(rest) => format!("Usage: {}", rest.trim_start()),
+        None => format!("Usage: {form}"),
     }
 }
 
@@ -2043,6 +2051,14 @@ impl Session {
             }
         }
         out.say(format!("({} matches)", rows.len()));
+        // `get where user.city = ...` names the key `user`: when it is not
+        // there but keys `user:...` are, say how to reach them.
+        if rows.is_empty() && !q.pattern.contains(['*', '?']) && !self.engine.contains(&q.pattern) {
+            let family = format!("{}:*", q.pattern);
+            if !self.engine.keys_matching(&family, 1).is_empty() {
+                out.say(format!("there is no key '{}'. For the keys {}:..., write {family}", q.pattern, q.pattern));
+            }
+        }
         Ok(())
     }
 
@@ -2254,7 +2270,8 @@ impl Session {
             // The comparisons an index would serve, and that have none; the
             // field of a limited sort, read in order with a B-tree on it.
             let mut tips: Vec<String> = Vec::new();
-            if plan.index.is_none() {
+            // An exact key is read alone: no index would help.
+            if plan.index.is_none() && plan.strategy != "KEY LOOKUP" {
                 for cond in q.expr.iter().flat_map(|e| e.positive_conditions()) {
                     let tip = format!("create index on {} ({})", cond.pattern, cond.field);
                     if crate::engine::Engine::indexable(cond)
@@ -2265,7 +2282,11 @@ impl Session {
                     }
                 }
             }
-            if let Some(o) = opts.order.as_ref().filter(|_| opts.limit > 0 && plan.strategy != "INDEX ORDER SCAN") {
+            if let Some(o) = opts
+                .order
+                .as_ref()
+                .filter(|_| opts.limit > 0 && !matches!(plan.strategy, "INDEX ORDER SCAN" | "KEY LOOKUP"))
+            {
                 if !self.engine.list_indexes().iter().any(|i| {
                     i.kind == crate::engine::IndexKind::BTree
                         && !i.ignore_case
