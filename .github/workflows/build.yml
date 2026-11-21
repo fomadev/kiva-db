@@ -110,6 +110,20 @@ jobs:
           tar xzf "$RUNNER_TEMP/rc3.tar.gz" -C "$RUNNER_TEMP/rc3"
           echo "KIVADB_RC3_BIN=$RUNNER_TEMP/rc3/kivadb" >> "$GITHUB_ENV"
 
+      - name: Fetch KivaDB 2.0.0-rc.4
+        # tests/compat_rc4.rs runs it on a home written by this version: rc.4
+        # must still read it, a collection in projects/<p>/<c> and an expire
+        # event of the change journal included (KIVADB_RC4_BIN).
+        # Checksum from the SHA256SUMS.txt of the rc.4 release.
+        if: matrix.os-name == 'linux'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/rc4"
+          curl -sSfL -o "$RUNNER_TEMP/rc4.tar.gz" https://github.com/fomadev/kiva-db/releases/download/v2.0.0-rc.4/kivadb_linux_x64.tar.gz
+          echo "7ec7d804b7122a839ab7013056074671f7020e2aa56041c9bfd18ebf5524de61  $RUNNER_TEMP/rc4.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/rc4.tar.gz" -C "$RUNNER_TEMP/rc4"
+          echo "KIVADB_RC4_BIN=$RUNNER_TEMP/rc4/kivadb" >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test
 
