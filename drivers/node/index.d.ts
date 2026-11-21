@@ -26,6 +26,18 @@ export interface ConnectOptions {
   types?: "plain" | "extended";
   /** In extended mode, the class decimals are read as (called `new decimal(text)`), e.g. Decimal of decimal.js. */
   decimal?: new (text: string) => unknown;
+  /** The collection to work in, e.g. "travel.places" (KivaDB 2.0.0-rc.5 calls workspaces collections). */
+  collection?: string;
+  /** The same as `collection`, under its former name. */
+  workspace?: string;
+}
+
+export interface CollectionInfo {
+  name: string;
+  project: string | null;
+  path: string;
+  access: "read" | "write";
+  current: boolean;
 }
 
 export type KivaType =
@@ -115,10 +127,14 @@ export type Where =
 export class KivaClient extends EventEmitter {
   /** First line of the server greeting, e.g. "KivaDB 1.0.0". */
   server: string;
+  /** The collection given to connect or to use, if any. */
+  collection: string | undefined;
+  /** The same, under its former name. */
+  readonly workspace: string | undefined;
   static connect(options?: ConnectOptions): Promise<KivaClient>;
   /** Runs any command of the KivaDB shell language; rejects with KivaError on an error line. */
   exec(command: string): Promise<string[]>;
-  /** Structured request: whoami, workspaces, scan, get, put, add, del, query, explain, aggregate, similar, semantic, stats, users. */
+  /** Structured request: whoami, collections (workspaces), scan, get, put, add, del, query, explain, aggregate, similar, semantic, changes, stats, users. */
   api<T = any>(request: { op: string; [field: string]: unknown }): Promise<T>;
   ping(): Promise<void>;
   get<T = unknown>(key: string): Promise<T | undefined>;
@@ -156,6 +172,32 @@ export class KivaClient extends EventEmitter {
     compute: () => Promise<T>,
   ): Promise<T>;
   stats(): Promise<Record<string, unknown>>;
+  /** The plan of a query; with `analyze`, the query is run and what it read is under "analyze". */
+  explain(
+    pattern: string,
+    where: Where | null,
+    options?: { limit?: number; orderBy?: string; analyze?: boolean },
+  ): Promise<Record<string, any>>;
+  /** count, sum, avg, min, max: `"count"` or `{ n: "count", mean: { avg: "age" } }`. */
+  aggregate(
+    pattern: string,
+    compute?: string | Record<string, unknown>,
+    options?: { where?: Where | null; groupBy?: string },
+  ): Promise<Record<string, any>>;
+  /** The change journal (KivaDB 2.0.0): the changes after a cursor or a consumer's acknowledgement. */
+  changes(options?: {
+    cursor?: string;
+    consumer?: string;
+    limit?: number;
+    pattern?: string;
+    wait?: number;
+  }): Promise<{ cursor: string; more: boolean; changes: Record<string, any>[]; [field: string]: unknown }>;
+  /** The session: user, role, collection, project, access, version... */
+  whoami(): Promise<Record<string, any>>;
+  /** Works in another collection from now on. */
+  use(collection: string): Promise<void>;
+  /** The collections the user can reach, those of `project` only if given. */
+  collections(project?: string): Promise<CollectionInfo[]>;
   /** After this, "change" events are emitted for matching keys. */
   subscribe(pattern?: string): Promise<void>;
   close(): void;

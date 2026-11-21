@@ -63,8 +63,12 @@ class Change:
 
 
 class Client:
-    """One connection, and the session it carries: its workspace, its
+    """One connection, and the session it carries: its collection, its
     transaction, its subscriptions.
+
+    ``collection`` (KivaDB 2.0.0-rc.5 calls workspaces collections) is the
+    one the client works in: ``"travel.places"``, or a name outside a
+    project. ``workspace`` is the same option under its former name.
 
     Use one client per thread for transactions: requests from several
     threads are sent one at a time, but share the session. The client is a
@@ -73,7 +77,7 @@ class Client:
     When the connection is lost, the request that was being sent fails with
     :class:`KivaConnectionError` and is not sent again (it may have been
     applied). The next request opens a new connection, logs in and goes back
-    to the workspace, unless a transaction was open: it is lost, and the
+    to the collection, unless a transaction was open: it is lost, and the
     error says so.
     """
 
@@ -84,6 +88,7 @@ class Client:
         user: str = "kiva",
         password: str = "",
         *,
+        collection: Optional[str] = None,
         workspace: Optional[str] = None,
         timeout: float = 8.0,
         tls: TLS = None,
@@ -94,11 +99,14 @@ class Client:
             raise ValueError(f'types is "plain" or "extended", not {types!r}')
         if not _is_local(host) and not password:
             raise KivaError("A password is required to connect to a remote server.")
-        if workspace is not None and not _WORKSPACE.match(workspace):
-            raise ValueError(f"not a workspace name: {workspace!r}")
+        if collection is not None and workspace is not None and collection != workspace:
+            raise ValueError(f"collection {collection!r} and workspace {workspace!r} name two collections: give one")
+        collection = collection if collection is not None else workspace
+        if collection is not None and not _WORKSPACE.match(collection):
+            raise ValueError(f"not a collection name: {collection!r}")
         self.host, self.port, self.user = host, port, user
         self._password = password
-        self.workspace = workspace
+        self.collection = collection
         self.timeout = timeout
         self._tls = tls
         self._reconnect = reconnect
@@ -139,8 +147,9 @@ class Client:
                 status, payload = self._call(_AUTH, self.user.encode() + b"\0" + self._password.encode())
                 if status != _OK:
                     raise AuthenticationError(payload.decode().replace("permission denied: ", "", 1))
-            if self.workspace:
-                self._exec_now(f"workspace switch {self.workspace}")
+            if self.collection:
+                # `workspace switch` is understood by every server, 1.x included.
+                self._exec_now(f"workspace switch {self.collection}")
         except BaseException:
             self._drop()
             sock.close()
@@ -485,6 +494,47 @@ class Client:
     def stats(self) -> Dict[str, Any]:
         return self.api({"op": "stats"})
 
+    # -- collections ------------------------------------------------------
+
+    @property
+    def workspace(self) -> Optional[str]:
+        """The collection, under its former name."""
+        return self.collection
+
+    @workspace.setter
+    def workspace(self, name: Optional[str]) -> None:
+        self.collection = name
+
+    def use(self, collection: str) -> None:
+        """Works in another collection from now on, and after a reconnection."""
+        if not _WORKSPACE.match(collection):
+            raise ValueError(f"not a collection name: {collection!r}")
+        if self._in_transaction:
+            raise KivaError("cannot change collection inside a transaction")
+        self.exec(f"workspace switch {collection}")
+        self.collection = collection
+
+    def collections(self, project: Optional[str] = None) -> List[Dict[str, Any]]:
+        """The collections the user can reach, those of ``project`` only if
+        given: ``name``, ``project``, ``path``, ``access``, ``current``. A
+        server older than 2.0.0-rc.5 is asked under the former name."""
+        req: Dict[str, Any] = {"op": "collections"}
+        if project is not None:
+            req["project"] = project
+        try:
+            found: List[Dict[str, Any]] = self.api(req)["collections"]
+        except KivaError as e:
+            if "unknown operation" not in str(e):
+                raise
+            found = self.api({"op": "workspaces"})["workspaces"]
+            found = [c for c in found if project is None or c.get("project") == project]
+        return found
+
+    def whoami(self) -> Dict[str, Any]:
+        """The session: ``user``, ``role``, ``collection`` (``workspace``
+        before 2.0.0-rc.5), ``project``, ``access``, ``version``..."""
+        return self.api({"op": "whoami"})
+
     # -- transactions -----------------------------------------------------
 
     @contextmanager
@@ -560,6 +610,7 @@ def connect(
     user: str = "kiva",
     password: str = "",
     *,
+    collection: Optional[str] = None,
     workspace: Optional[str] = None,
     timeout: float = 8.0,
     tls: TLS = None,
@@ -577,7 +628,19 @@ def connect(
     ``"extended"`` (KivaDB 2.0.0 and later): ``Decimal``, ``date``,
     ``time`` and aware ``datetime`` are kept inside documents, and decimals
     come back as ``Decimal`` (:mod:`kivadb.values`).
+
+    ``collection``: the collection to work in (``"travel.places"``);
+    ``workspace`` is the same option under its former name.
     """
     return Client(
-        host, port, user, password, workspace=workspace, timeout=timeout, tls=tls, reconnect=reconnect, types=types
+        host,
+        port,
+        user,
+        password,
+        collection=collection,
+        workspace=workspace,
+        timeout=timeout,
+        tls=tls,
+        reconnect=reconnect,
+        types=types,
     )

@@ -5054,6 +5054,35 @@ OK: place:66f1c2a0e4b0a1b2c3d4e5f7 saved.
 
 The identifiers keep their format, so the applications that read them do not change: a `parentId` that held an `ObjectId` now holds its 24 characters, and `get where place:*.parentId = "66f1c2a0e4b0a1b2c3d4e5f6"` finds the children. Dates become text such as `"2024-09-23T10:00:00Z"` (a date before 1970 or after 9999, which `mongoexport` writes as a number of milliseconds, is turned into the same form), which `>` and `<` compare as moments when the value is one (`created_at > now() - 30 days`, `created_at >= datetime "2026-01-01"`, [11.1](#111-the-condition)), and as text otherwise, correctly as long as they all have this form. `$numberInt`, `$numberLong`, `$numberDouble` and `$numberDecimal` become numbers, with two limits: an integer beyond 2^53 (9 007 199 254 740 992) would lose its last digits, so it stays text; a `Decimal128` keeps about 15 significant digits, enough for measures, not for amounts that must be exact to the last digit (store those as text, or in the smallest unit as an integer). Texts with quotes are safe: `JSON.stringify` writes `\"`, and a document literal is read as JSON (the shell's limit on quotes concerns quoted strings such as `set name "..."`, [4](#chapter-4--syntax-rules)). Type the `node -e` command in bash or Git Bash: Windows PowerShell 5.1 changes the double quotes it passes to programs. The `.kva` file itself may come from any Windows tool: since 1.7.1, `kivadb run` reads UTF-16 and byte-order-marked files ([3.10](#310-command-files-kva)). Create the indexes and the unique indexes before the import: a duplicate already in MongoDB is then refused, with the key that holds the value, instead of being copied (`kivadb run places.kva --keep-going` goes on with the other lines).
 
+### 24.10 What each client can do
+
+The same operations, from each way in (2.0.0-rc.5). Each structured request (`op`, [20.4](#204-structured-requests-for-tools)) has a row; a test (`tests/driver_parity.rs`) fails when the server gains one that this table does not list. Over REST, `POST /v1/api` takes any structured request, and `POST /v1/exec` any shell command. The drivers send any structured request with `api()` and any command with `exec()`. A `-` means "through those".
+
+<!-- parity -->
+| Operation | Shell | Structured `op` | REST | Node.js | Python |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `whoami` | `whoami` | `whoami` | `/v1/api` | `whoami()` | `whoami()` |
+| `collections` | `collection list` | `collections` (`workspaces`) | `/v1/api` | `collections()` | `collections()` |
+| `get` | `get` | `get` | `GET /v1/key/<key>` | `get()` | `get()` |
+| `put` | `set`, `update` | `put` | `POST /v1/key/<key>` | `set()` | `set()` |
+| `add` | `add` | `add` | `/v1/api` | `add()` | `add()` |
+| `del` | `del` | `del` | `DELETE /v1/key/<key>` | `del()` | `delete()` |
+| `scan` | `scan` | `scan` | `GET /v1/scan` | `scan()` | `scan()` |
+| `query` | `get where` | `query` | `/v1/api` | `query()` | `query()` |
+| `explain` | `explain` | `explain` | `/v1/api` | `explain()` | `explain()` |
+| `aggregate` | `count`, `sum`, `avg`, `min`, `max` | `aggregate` | `/v1/api` | `aggregate()` | `aggregate()` |
+| `similar` | `get similar` | `similar` | `/v1/api` | `similar()` | `similar()` |
+| `semantic` | `semantic ...` | `semantic` | `/v1/api` | `semanticLookup()`, `semanticStore()`, `semanticCached()` | - |
+| `changes` | `changes read` | `changes` | `GET /v1/changes` | `changes()` | `changes()` |
+| `stats` | `stats` | `stats` | `GET /v1/stats` | `stats()` | `stats()` |
+| `users` | `users` | `users` | `/v1/api` | - | - |
+| Choose a collection | `use` | the login `user@collection` | `?collection=` | `connect({ collection })`, `use()` | `connect(collection=...)`, `use()` |
+| Transactions | `begin`, `commit`, `rollback` | - | `/v1/exec` | - | `transaction()` |
+| Notifications | `subscribe` | - | `/ws`, `/v1/stream` | `subscribe()` | `subscribe()` |
+<!-- /parity -->
+
+In both drivers, `collection` names the collection to work in, and `workspace` is the same option under its former name. Giving both, with different names, is refused. The driver switches with `workspace switch`, which every server understands, KivaDB 1.x included. `collections()` asks a server older than 2.0.0-rc.5 under the former name.
+
 ---
 
 ## Chapter 25 — Replication

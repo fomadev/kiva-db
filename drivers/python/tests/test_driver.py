@@ -281,6 +281,40 @@ class DriverTest(unittest.TestCase):
         with self.assertRaisesRegex(KivaError, "no access"):
             kivadb.connect(port=self.server.port, user="app", password="pw", workspace="default")
 
+    def test_collections(self) -> None:
+        admin = self.connect()
+        admin.exec("project create baak collections (places, users)")
+        db = self.connect(collection="baak.places")
+        self.assertEqual((db.collection, db.workspace), ("baak.places", "baak.places"))
+        db.set("city:1", "Goma")
+        who = db.whoami()
+        self.assertEqual((who["collection"], who["project"]), ("baak.places", "baak"))
+        names = [c["name"] for c in db.collections("baak")]
+        self.assertEqual(names, ["baak.places", "baak.users"])
+        self.assertIn("default", [c["name"] for c in db.collections()])
+        # Another collection, kept after a reconnection.
+        db.use("baak.users")
+        self.assertIsNone(db.get("city:1"))
+        self.server.stop()
+        self.server.start()
+        # The request under way when the connection broke fails; the next reconnects.
+        with self.assertRaises(KivaConnectionError):
+            db.ping()
+        db.set("u:1", 1)
+        self.assertEqual(db.whoami()["collection"], "baak.users")
+        db.use("baak.places")
+        self.assertEqual(db.get("city:1"), "Goma")
+        # The former name, and both names agreeing.
+        self.assertEqual(self.connect(workspace="baak.places").get("city:1"), "Goma")
+        self.assertEqual(self.connect(collection="baak.places", workspace="baak.places").get("city:1"), "Goma")
+        with self.assertRaisesRegex(ValueError, "name two collections"):
+            kivadb.connect(port=self.server.port, collection="baak.places", workspace="baak.users")
+        with self.assertRaises(ValueError):
+            db.use("a b")
+        with self.assertRaisesRegex(KivaError, "does not exist"):
+            db.use("baak.nothing")
+        self.assertEqual(db.collection, "baak.places", "unchanged by a failed use")
+
     def test_the_change_journal(self) -> None:
         db = self.connect()
         db.exec("workspace create journal")
