@@ -251,7 +251,7 @@ fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAdd
             return;
         }
     }
-    if let Some(ws) = req.query.get("workspace") {
+    if let Some(ws) = req.query.get("collection").or_else(|| req.query.get("workspace")) {
         if let Err(e) = sess.switch_workspace(ws) {
             write_response(&mut stream, &Response::from(e), cors);
             return;
@@ -407,6 +407,7 @@ fn route(sess: &mut Session, req: &Request) -> Result<Response> {
             Ok(Response::ok(json!({ "data": {
                 "version": VERSION,
                 "workspace": sess.ws,
+                "collection": sess.ws,
                 "keys": s.keys,
                 "ttl_keys": s.ttl_keys,
                 "storage_bytes": s.file_bytes,
@@ -709,7 +710,7 @@ fn server_sent_events(mut sess: Session, rx: mpsc::Receiver<String>, mut stream:
         head.push_str("Access-Control-Allow-Origin: *\r\n");
     }
     head.push_str("\r\n");
-    let hello = json!({ "event": "subscribed", "pattern": pattern, "workspace": sess.ws });
+    let hello = json!({ "event": "subscribed", "pattern": pattern, "workspace": sess.ws, "collection": sess.ws });
     let first = format!("{head}retry: 2000\n\nevent: subscribed\ndata: {hello}\n\n");
     if stream.write_all(first.as_bytes()).and_then(|_| stream.flush()).is_err() {
         return;
@@ -775,7 +776,7 @@ fn websocket(mut sess: Session, rx: mpsc::Receiver<String>, mut stream: TcpStrea
             closed.store(true, Ordering::SeqCst);
         });
     }
-    let hello = json!({ "event": "subscribed", "pattern": pattern, "workspace": sess.ws });
+    let hello = json!({ "event": "subscribed", "pattern": pattern, "workspace": sess.ws, "collection": sess.ws });
     if ws_send(&writer, 0x1, hello.to_string().as_bytes()).is_err() {
         return;
     }

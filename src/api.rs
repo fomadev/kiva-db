@@ -426,6 +426,7 @@ pub fn read_changes(
                 read.changes.iter().map(|c| crate::changes::to_json_as(c, &read.cursor_of(c.seq), types)).collect();
             return Ok(json!({
                 "workspace": sess.ws,
+                "collection": sess.ws,
                 "cursor": read.cursor,
                 "more": read.more,
                 "first_seq": read.first_seq,
@@ -456,6 +457,8 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "user": sess.user_name(),
                 "role": role.name(),
                 "workspace": if sess.ws_priv.is_some() { json!(sess.ws) } else { Json::Null },
+                "collection": if sess.ws_priv.is_some() { json!(sess.ws) } else { Json::Null },
+                "project": sess.current_project(),
                 "access": sess.ws_priv.map(|p| p.name()),
                 "can_write": sess.writable().is_ok(),
                 // The same check as the command, so that a tool offers it
@@ -714,6 +717,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             Ok(json!({
                 "version": VERSION,
                 "workspace": sess.ws,
+                "collection": sess.ws,
                 "path": s.path,
                 "keys": s.keys,
                 "ttl_keys": s.ttl_keys,
@@ -770,14 +774,19 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 .collect();
             Ok(json!({ "users": users }))
         }
-        "workspaces" => {
+        // `collections` since rc.5; `workspaces` answers the same list under its old name.
+        "workspaces" | "collections" => {
             sess.check(Need::Login)?;
+            let only = req["project"].as_str();
             let me = match sess.role() {
                 Some(Role::Admin) | None => None,
                 Some(_) => auth::get_user(&sess.inst.system, sess.user_name())?,
             };
             let mut list = Vec::new();
             for (name, path) in sess.inst.workspaces() {
+                if only.is_some() && auth::project_of(&name) != only {
+                    continue;
+                }
                 let access = match &me {
                     Some(u) => match u.access(&name) {
                         Some(p) => p.name(),
@@ -788,7 +797,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 let project = auth::project_of(&name).map(str::to_string);
                 list.push(json!({ "name": name, "project": project, "path": path, "access": access, "current": name == sess.ws }));
             }
-            Ok(json!({ "workspaces": list }))
+            Ok(json!({ op: list }))
         }
         other => Err(invalid(format!("unknown operation '{other}'"))),
     }

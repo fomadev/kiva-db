@@ -2702,6 +2702,64 @@ Workspace 'places_travel' is now 'travel.places'. Its files did not move, and it
 * Replicas are disconnected and copy the master again, under the new names.
 * If KivaDB stops in the middle of a move (a crash, a power cut), the next start finishes it or takes it back, whichever `kiva.conf` says, and writes a line in the log: `[WARN] the move of workspace 'places_travel' to 'travel.places', stopped in the middle, was finished.` The workspace is reachable under one name, by the users who reached it before.
 
+### 14.8 Collections
+
+Since 2.0.0-rc.5, a workspace is called a **collection**. It is the same thing, with the same name, files and grants: `collection` is only the word the commands, the manual and the APIs now use. Every `workspace` command keeps working, with the same answers, until 3.0.
+
+| Collection | Workspace (still accepted) |
+| :--- | :--- |
+| `collection create travel.places [path]` | `workspace create travel.places [path]` |
+| `collection list [travel]`, or `collection` alone | `workspace list [travel]` |
+| `use travel.places`, `collection switch travel.places` | `workspace switch travel.places` |
+| `collection rename travel.cache to travel.sessions` | `workspace move travel.cache to travel.sessions` |
+| `collection move travel.sessions to school.sessions` | the same |
+| `collection remove travel.sessions` | `workspace remove travel.sessions` |
+| `collection current` | `workspace current` |
+
+`rename` and `move` are one command under two names, with the guarantees of [14.7](#147-renaming-or-moving-a-workspace). The answers of `collection ...` say `Collection`; those of `workspace ...` say `Workspace`, as before.
+
+**`use`** enters a collection by its name, or selects a project:
+
+<!-- setup
+project create baak
+collection create baak.places
+collection create baak.users
+-->
+```text
+kiva> use baak
+Using project 'baak' (2 collection(s)). Choose one: use baak.<collection> ('collection list' shows them).
+kiva> get user:1
+Error: permission denied: you are in project 'baak' but in no collection: 'collection list' shows its collections, 'use baak.<collection>' enters one
+kiva> use baak.places
+Using collection 'baak.places' (0 keys).
+kiva> use default
+Using collection 'default' (6 keys).
+```
+
+* After `use baak`, `collection list` lists the project's collections, and `whoami` says `@ project 'baak', in no collection`.
+* A collection outside a project (`lab`, `default`) is entered by its name. If a collection and a project have the same name, `use` enters the collection.
+* A user may select a project where they can reach a collection, or that they manage. `use` is refused inside a transaction.
+
+**Creating a project with its collections:**
+
+```text
+kiva> project create dzoket collections (cache, orders)
+Project 'dzoket' created with 2 collection(s):
+  dzoket.cache  C:\Users\you\AppData\Roaming\KivaDB\workspaces\dzoket.cache
+  dzoket.orders  C:\Users\you\AppData\Roaming\KivaDB\workspaces\dzoket.orders
+```
+
+* Every name is checked before anything is made: a project that exists, a collection named twice (capitals do not count, since Windows and macOS do not tell `Orders` from `orders`), or a name with other than letters, digits, `_` and `-` refuses the whole command.
+* If KivaDB stops in the middle, the next start finishes the creation, everything being new and empty, and writes `[WARN] the creation of project 'dzoket', stopped in the middle, was finished.`
+* It needs the admin role, like `project create`.
+
+**In the APIs**, the old names keep being answered next to the new ones, with the same values:
+
+* the structured request `{"op": "collections"}` answers `{"collections": [...]}`, as `{"op": "workspaces"}` answers `{"workspaces": [...]}`; both take `"project"` to list one project's;
+* `whoami` answers `collection` next to `workspace`, and `project`: the one chosen by `use`, else the one of the collection in use, else `null`;
+* `changes`, `stats` and the subscriptions over HTTP answer `collection` next to `workspace`;
+* REST takes `?collection=travel.places` as well as `?workspace=`; Redis keeps `SELECT travel.places` and the login `app@travel.places`.
+
 ---
 
 ## Chapter 15 — Configuration

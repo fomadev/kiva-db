@@ -8,7 +8,7 @@
 use crate::auth::{self, Priv, Role};
 use crate::compress::Compression;
 use crate::engine::{IndexKind, VectorIndexKind};
-use crate::exec::{key_for_read, uint, word, Cur, Out, R};
+use crate::exec::{key_for_read, uint, usage_line, word, Cur, Out, R};
 use crate::lexer::{Kind, Token};
 use crate::repl;
 use crate::script;
@@ -25,7 +25,9 @@ impl Session {
             "auth" | "login" => self.cmd_auth(a, out),
             "whoami" => {
                 let role = self.role().map(|r| r.name()).unwrap_or("-");
-                if self.ws_priv.is_none() {
+                if let (None, Some(p)) = (self.ws_priv, &self.project) {
+                    out.say(format!("{} ({role}) @ project '{p}', in no collection", self.user_name()));
+                } else if self.ws_priv.is_none() {
                     out.say(format!("{} ({role}), in no workspace", self.user_name()));
                 } else {
                     out.say(format!("{} ({role}) @ workspace '{}'", self.user_name(), self.ws));
@@ -44,7 +46,9 @@ impl Session {
             "modify" => self.cmd_modify(a, out),
             "audit" => self.cmd_audit(a, out),
             "config" => self.cmd_config(a, out),
-            "workspace" => self.cmd_workspace(a, out),
+            "workspace" => self.cmd_workspace(a, out, "workspace"),
+            "collection" | "collections" => self.cmd_workspace(a, out, "collection"),
+            "use" => self.cmd_use(a, out),
             "hint" => self.cmd_hint(a, out),
             "encryption" => self.cmd_encryption(a, out),
             "semantic" => self.cmd_semantic(a, out),
@@ -925,13 +929,21 @@ impl Session {
         }
     }
 
-    fn cmd_workspace(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: workspace list [<project>] | current | switch <name> | create <name> [path] | \
-                             move <name> to <new name> | remove <name>";
+    /// `workspace ...` and `collection ...`: the same commands, `noun` naming
+    /// the thing in what they answer. `collection` is the name since rc.5;
+    /// `workspace` stays until 3.0, its answers unchanged.
+    fn cmd_workspace(&mut self, a: &[Token], out: &mut Out, noun: &str) -> R {
+        let usage = format!(
+            "Usage: {noun} list [<project>] | current | switch <name> | create <name> [path] | \
+             rename|move <name> to <new name> | remove <name>"
+        );
+        let usage = usage.as_str();
+        let title = if noun == "collection" { "Collection" } else { "Workspace" };
+        let a_name = format!("a {noun} name");
         let mut c = Cur::new(a);
-        if c.eat("list") {
-            let project = c.next().map(|t| t.text.clone());
-            c.finish(USAGE)?;
+        if c.eat("list") || (noun == "collection" && c.peek().is_none()) {
+            let project = c.next().map(|t| t.text.clone()).or_else(|| self.project.clone());
+            c.finish(usage)?;
             let me = match (&self.user, self.role()) {
                 (Some(u), Some(r)) if r != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
                 _ => None,
@@ -952,60 +964,38 @@ impl Session {
             }
             Ok(())
         } else if c.eat("current") {
-            if self.ws_priv.is_none() {
-                out.say("(no workspace)");
+            c.finish(usage)?;
+            if let (None, Some(p)) = (self.ws_priv, &self.project) {
+                out.say(format!("(project '{p}', no {noun})"));
+            } else if self.ws_priv.is_none() {
+                out.say(format!("(no {noun})"));
             } else {
                 out.say(format!("{} ({})", self.ws, self.engine.path().display()));
             }
             Ok(())
         } else if c.eat("switch") || c.eat("use") {
-            let name = word(c.next(), "a workspace name")?;
-            c.finish(USAGE)?;
+            let name = word(c.next(), &a_name)?;
+            c.finish(usage)?;
             self.switch_workspace(&name)?;
-            out.say(format!("Switched to workspace '{name}' ({} keys).", self.engine.len()));
+            out.say(format!("Switched to {noun} '{name}' ({} keys).", self.engine.len()));
             Ok(())
         } else if c.eat("create") {
-            let name = word(c.next(), "a workspace name")?;
+            let name = word(c.next(), &a_name)?;
             let path = c.next().map(|t| t.text.clone());
-            c.finish(USAGE)?;
-            let me = match &self.user {
-                Some(u) if u.role != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
-                _ => None,
-            };
-            crate::instance::check_workspace_name(&name)?;
-            if let Some(p) = auth::project_of(&name) {
-                if !self.inst.project_exists(p) {
-                    return Err(format!("project '{p}' does not exist (create it with: project create {p})."));
-                }
-            }
-            // Outside administrators, the project's managers create its workspaces, in its folder.
-            if let Some(u) = &me {
-                if !u.manages(&name) {
-                    return Err(match auth::project_of(&name) {
-                        Some(p) => format!(
-                            "creating a workspace in project '{p}' requires the admin role, or write access to \
-                             every workspace of it (grant write on {p}.*)"
-                        ),
-                        None => "creating a workspace outside a project requires the admin role".into(),
-                    });
-                }
-                if path.is_some() {
-                    return Err("only an administrator chooses the folder of a workspace".into());
-                }
-            }
-            let dir = self.inst.create_workspace(&name, path.as_deref())?;
-            out.say(format!("Workspace '{name}' created at {}.", dir.display()));
+            c.finish(usage)?;
+            let dir = self.create_collection(&name, path.as_deref(), noun)?;
+            out.say(format!("{title} '{name}' created at {}.", dir.display()));
             Ok(())
-        } else if c.eat("move") {
-            const MOVE: &str = "workspace move <name> to <new name>";
-            let from = word(c.next(), "a workspace name")?;
+        } else if c.eat("move") || c.eat("rename") {
+            let form = format!("{noun} rename|move <name> to <new name>");
+            let from = word(c.next(), &a_name)?;
             if !c.eat("to") {
-                return Err(format!("Usage: {MOVE}"));
+                return Err(usage_line(&form));
             }
             let to = word(c.next(), "the new name")?;
-            c.finish(MOVE)?;
+            c.finish(&form)?;
             if from == self.ws {
-                return Err("you cannot move the workspace you are in.".into());
+                return Err(format!("you cannot move the {noun} you are in."));
             }
             if let Some(p) = auth::project_of(&to) {
                 if !self.inst.project_exists(p) {
@@ -1013,25 +1003,86 @@ impl Session {
                 }
             }
             self.inst.rename_workspace(&from, &to)?;
-            out.say(format!("Workspace '{from}' is now '{to}'. Its files did not move, and its grants followed it."));
+            out.say(format!("{title} '{from}' is now '{to}'. Its files did not move, and its grants followed it."));
             Ok(())
         } else if c.eat("remove") {
-            let name = word(c.next(), "a workspace name")?;
-            c.finish(USAGE)?;
+            let name = word(c.next(), &a_name)?;
+            c.finish(usage)?;
             if name == "default" {
-                return Err("the default workspace cannot be removed.".into());
+                return Err(format!("the default {noun} cannot be removed."));
             }
             if name == self.ws {
-                return Err("you cannot remove the workspace you are in.".into());
+                return Err(format!("you cannot remove the {noun} you are in."));
             }
             if !self.inst.remove_workspace(&name)? {
-                return Err(format!("workspace '{name}' does not exist."));
+                return Err(format!("{noun} '{name}' does not exist."));
             }
-            out.say(format!("Workspace '{name}' unregistered. Its data files were left on disk."));
+            out.say(format!("{title} '{name}' unregistered. Its data files were left on disk."));
             Ok(())
         } else {
-            Err(USAGE.into())
+            Err(usage.into())
         }
+    }
+
+    /// Creates one collection after the checks of the command: its name, its
+    /// project, and who may (an administrator, or the project's managers,
+    /// who do not choose the folder).
+    fn create_collection(&mut self, name: &str, path: Option<&str>, noun: &str) -> Result<std::path::PathBuf, String> {
+        let me = match &self.user {
+            Some(u) if u.role != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
+            _ => None,
+        };
+        crate::instance::check_workspace_name(name)?;
+        if let Some(p) = auth::project_of(name) {
+            if !self.inst.project_exists(p) {
+                return Err(format!("project '{p}' does not exist (create it with: project create {p})."));
+            }
+        }
+        if let Some(u) = &me {
+            if !u.manages(name) {
+                return Err(match auth::project_of(name) {
+                    Some(p) => format!(
+                        "creating a {noun} in project '{p}' requires the admin role, or write access to \
+                         every {noun} of it (grant write on {p}.*)"
+                    ),
+                    None => format!("creating a {noun} outside a project requires the admin role"),
+                });
+            }
+            if path.is_some() {
+                return Err(format!("only an administrator chooses the folder of a {noun}"));
+            }
+        }
+        Ok(self.inst.create_workspace(name, path)?)
+    }
+
+    /// `use <project>.<collection>` (or `use <collection>`) enters a
+    /// collection; `use <project>` selects the project, in no collection.
+    /// A collection outside a project wins over a project of the same name.
+    fn cmd_use(&mut self, a: &[Token], out: &mut Out) -> R {
+        const USAGE: &str = "use <project>.<collection> | <collection> | <project>";
+        if a.is_empty() {
+            return Err(usage_line(USAGE));
+        }
+        let mut c = Cur::new(a);
+        let name = word(c.next(), "a collection or a project")?;
+        c.finish(USAGE)?;
+        if self.inst.cfg().workspace_dir(&name).is_some() || name.contains('.') {
+            self.switch_workspace(&name)?;
+            out.say(format!("Using collection '{name}' ({} keys).", self.engine.len()));
+        } else if self.inst.project_exists(&name) {
+            self.use_project(&name)?;
+            let inside =
+                self.inst.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name.as_str())).count();
+            out.say(format!(
+                "Using project '{name}' ({inside} collection(s)). Choose one: use {name}.<collection> \
+                 ('collection list' shows them)."
+            ));
+        } else {
+            return Err(format!(
+                "there is no collection or project named '{name}' ('project list', 'collection list')."
+            ));
+        }
+        Ok(())
     }
 
     /// `format` shows the formats dates are written and read in;
@@ -1134,7 +1185,7 @@ impl Session {
     /// `project list | create <name> | remove <name>`: projects group
     /// workspaces (`travel.places`, `travel.cache`) under one name.
     fn cmd_project(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: project list | create <name> | remove <name>";
+        const USAGE: &str = "Usage: project list | create <name> [collections (<name>, ...)] | remove <name>";
         let mut c = Cur::new(a);
         if c.eat("list") || c.peek().is_none() {
             c.finish(USAGE)?;
@@ -1159,6 +1210,16 @@ impl Session {
             Ok(())
         } else if c.eat("create") {
             let name = word(c.next(), "a project name")?;
+            if c.eat("collections") || c.eat("collection") {
+                let inside = name_list(&mut c, USAGE)?;
+                c.finish(USAGE)?;
+                let dirs = self.inst.create_project_with(&name, &inside)?;
+                out.say(format!("Project '{name}' created with {} collection(s):", dirs.len()));
+                for (c, dir) in inside.iter().zip(&dirs) {
+                    out.say(format!("  {name}.{c}  {}", dir.display()));
+                }
+                return Ok(());
+            }
             c.finish(USAGE)?;
             self.inst.create_project(&name)?;
             out.say(format!(
@@ -2177,4 +2238,26 @@ fn parse_index_target(c: &mut Cur, usage: &str) -> Result<(String, String), Stri
 fn workspace_names(inst: &crate::instance::Instance) -> String {
     let names: Vec<String> = inst.workspaces().into_iter().map(|(n, _)| n).collect();
     format!("{} ({})", names.len(), names.join(", "))
+}
+
+/// `(cache, places, users)`: names between parentheses, separated by commas.
+fn name_list(c: &mut Cur, usage: &str) -> Result<Vec<String>, String> {
+    if !c.peek().is_some_and(|t| t.kind == Kind::LParen) {
+        return Err(usage_line(usage));
+    }
+    c.next();
+    let mut names = Vec::new();
+    loop {
+        let t = c.next().ok_or_else(|| usage_line(usage))?;
+        match t.kind {
+            Kind::RParen if !names.is_empty() => return Ok(names),
+            Kind::Comma | Kind::LParen | Kind::RParen => return Err(usage_line(usage)),
+            _ => names.push(t.text.clone()),
+        }
+        match c.next() {
+            Some(t) if t.kind == Kind::Comma => {}
+            Some(t) if t.kind == Kind::RParen => return Ok(names),
+            _ => return Err(usage_line(usage)),
+        }
+    }
 }

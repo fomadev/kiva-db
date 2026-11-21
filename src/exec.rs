@@ -1441,8 +1441,10 @@ impl Session {
         ];
         let audited = AUDITED.contains(&cmd.as_str())
             || (cmd == "config" && tokens.get(1).is_some_and(|t| t.is_kw("set")))
-            || (cmd == "workspace"
-                && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("move")))
+            || (matches!(cmd.as_str(), "workspace" | "collection" | "collections")
+                && tokens
+                    .get(1)
+                    .is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("move") || t.is_kw("rename")))
             || (cmd == "project" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
             || (cmd == "check" && tokens.get(1).is_some_and(|t| t.is_kw("repair")))
             || (cmd == "script" && tokens.get(1).is_some_and(|t| t.is_kw("load") || t.is_kw("delete")));
@@ -2904,8 +2906,14 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "project" if sub("create") || sub("remove") => Need::Admin,
         "project" => Need::Login,
         // Creating is checked against the project: its managers may.
-        "workspace" if sub("remove") || sub("move") => Need::Admin,
-        "workspace" if sub("create") || sub("list") || sub("current") || sub("switch") || sub("use") => Need::Login,
+        "workspace" | "collection" | "collections" if sub("remove") || sub("move") || sub("rename") => Need::Admin,
+        "workspace" | "collection" | "collections"
+            if sub("create") || sub("list") || sub("current") || sub("switch") || sub("use") =>
+        {
+            Need::Login
+        }
+        "collection" | "collections" if t.len() == 1 => Need::Login,
+        "use" => Need::Login,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
         | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
