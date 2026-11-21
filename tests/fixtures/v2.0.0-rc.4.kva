@@ -1,0 +1,41 @@
+# A KivaDB 2.0.0-rc.4 home, for the compatibility test of the next versions
+# (tests/compat_rc4.rs). Made once by the published rc.4 executable:
+#   kivadb --home <home> --no-listen run tests/fixtures/v2.0.0-rc.4.kva
+# then the paths of kiva.conf replaced by @HOME@. Never changed afterwards.
+# It holds what rc.4 brought (random values and UUIDs, kept as drawn), the
+# workspaces of a project in the layout of rc.4 (<home>/workspaces/<p.c>),
+# a workspace outside a project, and a key whose expiry has passed long
+# before a later version opens the home.
+changes enable retain 87600h
+set greeting "hello"
+set int n:count 41
+set decimal price "12.50"
+set date born "2004-05-09"
+set id:fixed "0192f4a3-7b1c-7def-8123-456789abcdef"
+set id:drawn uuid_v7()
+set session:abc "token" ttl 315360000
+set temp:gone "short" ttl 1
+set acc:1 {"name": "Ana", "balance": decimal "1250.50", "opened": date "2026-01-15"}
+set acc:2 {"name": "Ben", "balance": decimal "80.25", "opened": date "2025-06-02"}
+set acc:3 {"name": "Chloe", "balance": decimal "0.10", "opened": date "2026-03-30"}
+create index on acc: (balance)
+create unique index on acc: (name) ignore case
+set draw:1 {"id": uuid(), "score": random_int(7, 7), "order": shuffle([1, 2, 3]), "pick": sample([decimal "1.5", decimal "2.5"])}
+changes read from beginning as search limit 4
+schema set item: {"price": {"type": "decimal", "required": true}, "qty": {"type": "int", "default": 1}}
+set item:1 {"price": decimal "9.99"}
+del greeting
+set greeting "hello again"
+project create travel
+workspace create travel.places
+workspace switch travel.places
+set place:1 {"name": "Virunga", "fee": decimal "50.00"}
+workspace create travel.cache
+workspace switch travel.cache
+set hit:1 "cached"
+workspace create lab
+workspace switch lab
+set note:1 "outside a project"
+workspace switch default
+create user "app" identified by "app-pw" grant write on travel.* default workspace travel.places
+create user "guest" identified by "guest-pw" role viewer grant read on travel.places
