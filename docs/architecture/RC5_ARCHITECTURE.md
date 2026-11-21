@@ -8,7 +8,7 @@ This is an audit, and a design for the fifth release candidate. It covers:
 - metrics, the shell, the drivers;
 - full-text and hybrid search, as a study only.
 
-**Nothing here is implemented.** Each lot waits for the maintainer's approval of the decisions in section 12. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
+**Approved on 2026-11-21:** decisions D1 to D11 of section 12, as recommended. Nothing is implemented yet; each code lot is merged after its own review, green CI and the maintainer's approval. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
 
 Statements about the code refer to `main` at `d173b56`.
 
@@ -290,3 +290,9 @@ Instance
 | D9 | Full-text and hybrid | Specification in rc.5, code in 2.1 | Code in rc.5 |
 | D10 | Import and export | NDJSON with extended JSON, `--dry-run`, in rc.5 | JSON only |
 | D11 | Order of the lots | P0 → B → C → E → G → H → I, one PR each, then rc.5 | — |
+
+**All approved on 2026-11-21, as recommended.**
+
+- In rc.5: lots P0, B, C (without `relocate`), E, G, H and I, and the specification of J.
+- In 2.1: grants on a prefix (F), non-unique indexes on several fields (D), the code of J, and `kivadb relocate`.
+- The tag `v2.0.0-rc.5` is pushed by the maintainer only.
