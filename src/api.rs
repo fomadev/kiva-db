@@ -362,7 +362,7 @@ pub fn value_from_extended(j: &Json) -> Result<Value> {
 
 /// [`value_in`] for a request in `types`: in extended JSON a document is
 /// read with its tags, and a typed scalar may come tagged as it was read.
-fn value_in_as(ty: Type, j: &Json, types: Types) -> Result<Value> {
+pub(crate) fn value_in_as(ty: Type, j: &Json, types: Types) -> Result<Value> {
     if types == Types::Plain {
         return value_in(ty, j);
     }

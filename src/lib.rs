@@ -51,6 +51,7 @@ pub mod session;
 pub mod shell;
 pub mod time;
 pub mod tls;
+pub mod transfer;
 pub mod update;
 pub mod util;
 pub mod value;

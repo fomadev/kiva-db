@@ -1447,6 +1447,8 @@ impl Session {
                     .is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("move") || t.is_kw("rename")))
             || (cmd == "project" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
             || (cmd == "check" && tokens.get(1).is_some_and(|t| t.is_kw("repair")))
+            || cmd == "export"
+            || cmd == "import"
             || (cmd == "script" && tokens.get(1).is_some_and(|t| t.is_kw("load") || t.is_kw("delete")));
         if audited {
             inst.audit.log(self.user_name(), &redact(&cmd, &tokens, line), !out.has_err());
@@ -2915,7 +2917,7 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "collection" | "collections" if t.len() == 1 => Need::Login,
         "use" => Need::Login,
         "compress" | "config" | "create" | "drop" | "grant" | "revoke" | "users" | "audit" | "replica" | "failover"
-        | "bench" | "shutdown" | "encryption" | "backup" | "tune" => Need::Admin,
+        | "bench" | "shutdown" | "encryption" | "backup" | "tune" | "export" | "import" => Need::Admin,
         "check" if sub("repair") => Need::Admin,
         "schema" if sub("set") || sub("drop") => Need::Admin,
         "changes" if sub("enable") || sub("disable") || sub("forget") => Need::Admin,
