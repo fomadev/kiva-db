@@ -1660,7 +1660,9 @@ impl Inner {
     fn live(&mut self, key: &str, now: i64) -> Option<Entry> {
         let e = self.index.get(key)?;
         if e.is_expired(now) {
-            self.idx_remove(key);
+            if let Some(old) = self.idx_remove(key) {
+                self.journal_expire(key, old.expires_at);
+            }
             self.expired(key);
             return None;
         }
@@ -1715,6 +1717,46 @@ impl Inner {
         if let Some(j) = self.changes.as_mut() {
             if let Err(e) = j.append(file_id, list, txn) {
                 eprintln!("[WARN] the change journal could not be written: {e}");
+            }
+        }
+    }
+
+    /// Journals the expiry of `key`, seen now: outside any transaction, at
+    /// the place the data file stands (an expiry writes no data record).
+    fn journal_expire(&mut self, key: &str, expires_at: i64) {
+        if self.changes.is_some() {
+            let change = NewChange {
+                kind: ChangeKind::Expire,
+                key,
+                ty: 0,
+                raw: &[],
+                enc: DocEnc::Json,
+                timestamp: now_secs(),
+                expires_at,
+                created: None,
+                data_end: self.file_len,
+            };
+            self.journal(&[change], false);
+        }
+    }
+
+    /// The keys found expired when the data file was opened, journaled once
+    /// the journal is open, except those it already holds: seen before a
+    /// stop, they are still in the data file until a compaction. An expiry
+    /// that a stop kept from the journal is written now ("at least once").
+    fn journal_expired_at_open(&mut self, expired: Vec<(String, i64)>) {
+        let Some(j) = self.changes.as_ref() else { return };
+        let Some(earliest) = expired.iter().map(|(_, at)| *at).min() else { return };
+        let known = match j.expiries_since(earliest.div_euclid(1000)) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("[WARN] the change journal could not be read for expiries: {e}");
+                return;
+            }
+        };
+        for (key, at) in expired {
+            if !known.contains(&(key.clone(), at)) {
+                self.journal_expire(&key, at);
             }
         }
     }
@@ -2035,7 +2077,9 @@ impl Inner {
         let dead: Vec<String> =
             self.expiry.iter().take_while(|(t, _)| *t <= now).take(PURGE_BATCH).map(|(_, k)| k.clone()).collect();
         for k in &dead {
-            self.idx_remove(k);
+            if let Some(old) = self.idx_remove(k) {
+                self.journal_expire(k, old.expires_at);
+            }
             self.expired(k);
         }
         dead.len()
@@ -2203,7 +2247,14 @@ impl Engine {
         }
 
         let now = now_ms();
-        index.retain(|_, e| !e.is_expired(now));
+        let mut expired_at_open = Vec::new();
+        index.retain(|k, e| {
+            let live = !e.is_expired(now);
+            if !live {
+                expired_at_open.push((k.clone(), e.expires_at));
+            }
+            live
+        });
         // A missing or wrong key shows now, not at the first read.
         if let Some((k, e)) = index.iter().find(|(_, e)| e.flags & FLAG_ENCRYPTED != 0) {
             let mut rec = vec![0u8; e.rec_len() as usize];
@@ -2342,6 +2393,7 @@ impl Engine {
         }
         if let Some(settings) = changes_settings {
             inner.open_changes(&path, settings);
+            inner.journal_expired_at_open(expired_at_open);
         }
         inner.load.ms = started.elapsed().as_secs_f64() * 1000.0;
 
