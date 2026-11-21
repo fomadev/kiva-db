@@ -58,6 +58,9 @@ const F_CREATED: u8 = 8;
 const F_REBUILT: u8 = 16;
 /// The value is a `KDOC` document (`crate::doc`).
 const F_KDOC: u8 = 32;
+/// On a deletion: the key's TTL ran out (`ChangeKind::Expire`). An earlier
+/// KivaDB, which ignores the flag, reads the deletion the expiry is.
+const F_EXPIRE: u8 = 64;
 
 /// How long and how much the journal keeps, and whether it keeps the values.
 #[derive(Clone, Debug, PartialEq)]
@@ -97,6 +100,10 @@ pub enum ChangeKind {
     Set,
     Del,
     Reset,
+    /// A key whose TTL ran out, written when the engine sees it gone: on a
+    /// read, or by the sweep of every second. `expires_at` says when it ran
+    /// out, `timestamp` when it was seen.
+    Expire,
 }
 
 /// A change about to be journaled: where its data record ends, and what it did.
@@ -349,6 +356,10 @@ impl Journal {
                 ChangeKind::Set => KIND_SET,
                 ChangeKind::Del => KIND_DEL,
                 ChangeKind::Reset => KIND_RESET,
+                ChangeKind::Expire => {
+                    flags |= F_EXPIRE;
+                    KIND_DEL
+                }
             };
             let body = body(Body {
                 seq,
@@ -372,6 +383,33 @@ impl Journal {
         self.last_pos = Some((file_id, last.data_end));
         self.written += changes.len() as u64;
         Ok(())
+    }
+
+    /// The expiries the journal holds, as (key, `expires_at`), from the
+    /// segments that hold changes seen at `since_secs` or later. Read when a
+    /// workspace opens, so that an expiry journaled before a stop is not
+    /// journaled again when the key, still in the data file, is seen expired.
+    pub fn expiries_since(&self, since_secs: i64) -> Result<std::collections::HashSet<(String, i64)>> {
+        let mut seen = std::collections::HashSet::new();
+        let id = self.id;
+        for (n, seg) in self.segments.iter().enumerate() {
+            let active = n + 1 == self.segments.len();
+            if !active && seg.last_ts > 0 && seg.last_ts < since_secs {
+                continue;
+            }
+            let data = fs::read(&seg.path)?;
+            let mut pos = HEADER_LEN as usize;
+            while pos < data.len().min(seg.len as usize) {
+                let Some((body, end)) = frame(&data, pos) else { break };
+                let Ok(body) = open_body(self.keys.as_deref(), id, body) else { break };
+                let Some(r) = parse_body(&body) else { break };
+                if r.kind == KIND_DEL && r.flags & F_EXPIRE != 0 {
+                    seen.insert((r.key, r.expires_at));
+                }
+                pos = end;
+            }
+        }
+        Ok(seen)
     }
 
     /// Records where the data file stands without a change: after a
@@ -668,6 +706,7 @@ pub fn to_json_as(c: &Change, cursor: &str, types: crate::api::Types) -> Json {
         ChangeKind::Set => "set",
         ChangeKind::Del => "delete",
         ChangeKind::Reset => "reset",
+        ChangeKind::Expire => "expire",
     };
     let ty = crate::value::Type::from_u8(c.ty).filter(|_| c.kind == ChangeKind::Set);
     let value = match (&c.value, ty) {
@@ -836,6 +875,7 @@ impl Parsed {
         Change {
             seq: self.seq,
             kind: match self.kind {
+                KIND_DEL if self.flags & F_EXPIRE != 0 => ChangeKind::Expire,
                 KIND_DEL => ChangeKind::Del,
                 KIND_RESET => ChangeKind::Reset,
                 _ => ChangeKind::Set,

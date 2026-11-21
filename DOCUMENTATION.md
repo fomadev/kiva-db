@@ -4240,7 +4240,7 @@ curl "http://localhost:8080/v1/changes?cursor=54a087b71d59813c0000000000000004&w
 | `pattern` | Only the keys matching it; the cursor still moves past the others |
 | `wait` | Milliseconds to wait for a change when there is none yet (at most 30 000): a long poll, answered as soon as one comes |
 
-`op` is `set` (with `created`: `true` for a new key, `false` for a key overwritten), `delete` or `reset` (`del all keys`). `value` is the value written, as the REST API gives it (bytes in base64, dates as ISO 8601 in UTC), `null` with `keys only`. The changes of one transaction carry the number of its first change in `txn`, and its last one has `txn_end`: a program can apply a transaction whole. Any other command that changes keys gives its changes too: `json set` and the other field changes, Redis clients, scripts, the REST API, the defaults of a schema ([11.8](#118-schemas-rules-for-the-documents-of-a-pattern)).
+`op` is `set` (with `created`: `true` for a new key, `false` for a key overwritten), `delete`, `expire` (a key whose TTL ran out, below) or `reset` (`del all keys`). `value` is the value written, as the REST API gives it (bytes in base64, dates as ISO 8601 in UTC), `null` with `keys only`. The changes of one transaction carry the number of its first change in `txn`, and its last one has `txn_end`: a program can apply a transaction whole. Any other command that changes keys gives its changes too: `json set` and the other field changes, Redis clients, scripts, the REST API, the defaults of a schema ([11.8](#118-schemas-rules-for-the-documents-of-a-pattern)).
 
 #### What is guaranteed
 
@@ -4249,6 +4249,22 @@ curl "http://localhost:8080/v1/changes?cursor=54a087b71d59813c0000000000000004&w
 * **Cursors** are opaque texts (the identity of the journal and a number). A cursor stands for a change: reading from it gives the changes **after** it, and the answer's `cursor` is where to go on. Cursors survive restarts and compactions (which remove old values from the data file, not changes from the journal).
 * **At least once.** A reader may get a change again: after a restart that rebuilt it, or when it reads from a cursor older than what it had handled. Make applying a change idempotent (`seq` is unique in a journal) rather than counting on exactly once.
 * **Expired and invalid cursors are refused**, never silently skipped. Past the retention, `CURSOR_EXPIRED: ...` (the oldest number kept is in the message): resynchronise, then read from `now` or the beginning. `CURSOR_INVALID: ...` for a cursor of another journal: another node, a journal disabled and enabled again, or restored from a backup.
+
+#### Expiries
+
+Since 2.0.0-rc.5, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys-ttl)) gives a change `expire`, so that a program mirroring the data learns it is gone:
+
+```json
+{"seq": 9, "op": "expire", "key": "session:1", "type": null, "value": null, "created": null,
+ "timestamp": "2026-10-27T15:30:01.000Z", "expires_at": "2026-10-27T15:30:00.250Z", "txn": null, "txn_end": false}
+```
+
+* It is written **when KivaDB sees the key expired**: when it is read, or by the sweep that runs every second. So it comes at most about a second after the deadline, not at the deadline itself. `expires_at` is when the TTL ran out, `timestamp` when the expiry was seen. In the shell: `expire session:1 (its TTL ran out at ...)`.
+* **Once per key and expiry.** A key written again with a TTL and expired again gives another one.
+* **After a stop.** An expiry KivaDB had not seen yet, or had not written to the journal, is written when the workspace opens again. One already in the journal is not written again.
+* It belongs to **no transaction** (`txn` is `null`), even when a command of a transaction is what saw it.
+* Each node keeps its own journal: a replica writes the expiries it sees itself.
+* On disk it is a deletion carrying a flag: a KivaDB older than 2.0.0-rc.5 reading the same journal sees a `delete`.
 
 #### Retention, slow readers, consumers and at-least-once delivery
 
@@ -4263,7 +4279,7 @@ Reading the journal needs read access to the workspace, checked at every read (a
 #### Limits
 
 * **Per node.** Each node keeps its own journal and numbers its own changes. A replica with `changes enable` journals what its master sends; a cursor of the master means nothing there (`CURSOR_INVALID`). After a failover, readers resynchronise from the new master.
-* **Expirations** (keys whose TTL ran out) are not changes: they are not written to the data file either. A reader that mirrors keys with a TTL applies the `expires_at` of their changes.
+* **Expirations** are changes since 2.0.0-rc.5 (`expire`, above), but they are journaled when seen, about a second after the deadline at most. A reader that must hide a key at its exact deadline also applies the `expires_at` of its `set`. Before 2.0.0-rc.5 they were not journaled.
 * **Backups** hold the data, not the journal: a restored workspace starts a new journal (its cursors are new), as does a reset cut short by a crash.
 * Writes cost a little more with a journal (the record is written twice, the value once more unless `keys only`); a workspace without one pays nothing.
 * KivaDB 1.x ignores the journal (`store.kiva.changes`), which does not change the data file.

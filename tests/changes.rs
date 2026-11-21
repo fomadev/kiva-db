@@ -34,6 +34,7 @@ fn summary(e: &Engine, from: ChangesFrom) -> Vec<(u64, String, String)> {
                 ChangeKind::Set => "set",
                 ChangeKind::Del => "delete",
                 ChangeKind::Reset => "reset",
+                ChangeKind::Expire => "expire",
             };
             (c.seq, op.to_string(), c.key.clone())
         })

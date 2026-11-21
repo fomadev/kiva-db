@@ -1419,6 +1419,11 @@ impl Session {
                         ),
                         crate::changes::ChangeKind::Del => format!("delete {}", ch.key),
                         crate::changes::ChangeKind::Reset => "reset (all keys deleted)".to_string(),
+                        crate::changes::ChangeKind::Expire => format!(
+                            "expire {} (its TTL ran out at {})",
+                            ch.key,
+                            j["expires_at"].as_str().unwrap_or("?")
+                        ),
                     };
                     let txn = match (ch.txn, ch.txn_end) {
                         (Some(t), true) => format!(" [transaction {t}, end]"),
