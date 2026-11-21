@@ -5053,7 +5053,10 @@ impl Engine {
     fn choose(inner: &Inner, q: &Query, opts: &ReadOpts, estimate: bool) -> Chosen {
         let total_keys = inner.index.len();
         let limit = opts.limit;
-        if let Some(o) = opts.order.as_ref().filter(|_| limit > 0) {
+        // A pattern without a wildcard names one key: that key is read, and
+        // nothing else, whatever the indexes or the order.
+        let exact = !q.pattern.contains(['*', '?']);
+        if let Some(o) = opts.order.as_ref().filter(|_| limit > 0 && !exact) {
             if let Some(oi) = Self::order_index(inner, &q.pattern, o) {
                 // Reading the order index until `limit` documents pass takes
                 // about limit * n / c of its n keys when c pass, each checked
@@ -5083,9 +5086,16 @@ impl Engine {
                 }
             }
         }
-        let listed = q.expr.as_ref().and_then(|e| Self::index_plan(inner, e));
+        let listed = q.expr.as_ref().filter(|_| !exact).and_then(|e| Self::index_plan(inner, e));
         let entries = listed.as_ref().map_or(0, |p| p.entries);
         let (source, mut plan) = match listed {
+            None if exact => {
+                let keys: Vec<String> =
+                    inner.index.contains_key(q.pattern.as_str()).then(|| q.pattern.clone()).into_iter().collect();
+                let plan =
+                    Plan { strategy: "KEY LOOKUP", index: None, candidates: keys.len(), total_keys, order: None };
+                (Source::Keys(keys), plan)
+            }
             Some(p) => {
                 let plan = p.plan(total_keys);
                 (Source::Keys(p.keys), plan)

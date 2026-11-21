@@ -67,6 +67,8 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 ### Fixed
 
+* `get where user.city = ...`, whose pattern has no wildcard, names the one key `user`: it is now read alone (`KEY LOOKUP` in `explain`), instead of every key starting with `user`, and no index is suggested for it. The rows do not change. When that key does not exist but keys `user:...` do, the answer says to write `user:*` ([11.2](DOCUMENTATION.md#112-get-where--find-documents)).
+* A usage text that already started with `Usage:` was shown as `Usage: Usage: ...` after a word too many (`json`, `explain`, `config`, `audit`, `format`, `timezone`, `workspace`, `bump`, `convert`, `modify user`).
 * **Security:** when the operating system's random generator failed, KivaDB made password salts and identifiers from the clock instead, without saying so, and those values were predictable. It now refuses the operation with `ERR_RANDOM_UNAVAILABLE`: no account is created and no password is changed, an encrypted write is not made, `kivadb keygen` makes no key, and `HRANDFIELD`, `SRANDMEMBER`, `SPOP` and `ZRANDMEMBER` answer an error. Encryption no longer panics when the generator fails: the write is refused, and vector graphs are not saved rather than saved in clear. Existing accounts and data are unchanged.
 * `kivadb update` ignored the suffix of a pre-release, so that a release candidate never saw its release as newer. `2.0.0` is now newer than `2.0.0-rc.1`.
 * `CHANGELOG.md` held the markers of an unresolved merge in the section of 2.0.
