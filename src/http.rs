@@ -513,6 +513,30 @@ fn metrics(sess: &Session) -> String {
     lines.push(format!("kiva_request_duration_seconds_sum {}", load(&m.micros) as f64 / 1e6));
     lines.push(format!("kiva_request_duration_seconds_count {timed}"));
     metric("kiva_request_duration_seconds", "histogram", "Time spent executing commands.", &lines);
+    // By kind of command: a fixed list (COMMAND_KINDS), never a key or a user.
+    let kinds = crate::instance::COMMAND_KINDS;
+    let counts: Vec<String> = kinds
+        .iter()
+        .zip(&m.commands)
+        .map(|(k, c)| format!("kiva_commands_total{{command=\"{k}\"}} {}", load(&c.count)))
+        .collect();
+    metric("kiva_commands_total", "counter", "Commands run, by kind.", &counts);
+    let mut lines = Vec::new();
+    for (k, c) in kinds.iter().zip(&m.commands) {
+        let mut below = 0;
+        for (i, bound) in crate::instance::LATENCY_BUCKETS_US.iter().enumerate() {
+            below += load(&c.latency[i]);
+            lines.push(format!(
+                "kiva_command_duration_seconds_bucket{{command=\"{k}\",le=\"{}\"}} {below}",
+                *bound as f64 / 1e6
+            ));
+        }
+        let all = below + load(&c.latency[crate::instance::LATENCY_BUCKETS_US.len()]);
+        lines.push(format!("kiva_command_duration_seconds_bucket{{command=\"{k}\",le=\"+Inf\"}} {all}"));
+        lines.push(format!("kiva_command_duration_seconds_sum{{command=\"{k}\"}} {}", load(&c.micros) as f64 / 1e6));
+        lines.push(format!("kiva_command_duration_seconds_count{{command=\"{k}\"}} {all}"));
+    }
+    metric("kiva_command_duration_seconds", "histogram", "Time spent executing commands, by kind.", &lines);
     metric(
         "kiva_errors_total",
         "counter",
@@ -556,6 +580,60 @@ fn metrics(sess: &Session) -> String {
         "counter",
         "Records that failed checksum verification.",
         &[format!("kiva_checksum_errors_total {}", s.corrupted_detected)],
+    );
+    metric(
+        "kiva_expired_keys_total",
+        "counter",
+        "Keys whose TTL ran out, as seen since the workspace was opened.",
+        &[format!("kiva_expired_keys_total {}", s.expired_keys)],
+    );
+    metric(
+        "kiva_transaction_conflicts_total",
+        "counter",
+        "Transactions refused because a watched key changed or the workspace was reset.",
+        &[format!("kiva_transaction_conflicts_total {}", s.transaction_conflicts)],
+    );
+    let scans: Vec<String> = s
+        .scans
+        .iter()
+        .map(|(strategy, n)| {
+            format!("kiva_index_scans_total{{strategy=\"{}\"}} {n}", strategy.to_ascii_lowercase().replace(' ', "_"))
+        })
+        .collect();
+    if !scans.is_empty() {
+        metric("kiva_index_scans_total", "counter", "Queries run, by the strategy of their plan.", &scans);
+    }
+    metric(
+        "kiva_vector_index_bytes",
+        "gauge",
+        "Bytes held by the vector indexes of the workspace.",
+        &[format!("kiva_vector_index_bytes {}", s.vector_bytes)],
+    );
+    let caches = inst.semantic.stats(&sess.ws);
+    let total = |f: fn(&crate::semantic_cache::CacheStats) -> u64| caches.iter().map(f).sum::<u64>();
+    metric(
+        "kiva_semantic_cache_hits_total",
+        "counter",
+        "Questions answered by the semantic cache.",
+        &[format!("kiva_semantic_cache_hits_total {}", total(|c| c.hits))],
+    );
+    metric(
+        "kiva_semantic_cache_misses_total",
+        "counter",
+        "Questions the semantic cache could not answer.",
+        &[format!("kiva_semantic_cache_misses_total {}", total(|c| c.misses))],
+    );
+    metric(
+        "kiva_semantic_cache_invalidations_total",
+        "counter",
+        "Answers dropped from the semantic cache because data they depend on changed.",
+        &[format!("kiva_semantic_cache_invalidations_total {}", total(|c| c.invalidated))],
+    );
+    metric(
+        "kiva_backup_failures_total",
+        "counter",
+        "Backup commands run by the server that ended in an error.",
+        &[format!("kiva_backup_failures_total {}", load(&m.backup_failures))],
     );
     metric(
         "kiva_compactions_total",

@@ -147,6 +147,15 @@ fn connect_secure(addr: &str, opts: &ShellOpts) -> Result<TcpStream, String> {
 
 trait Backend {
     fn exec(&mut self, line: &str) -> (Vec<(bool, String)>, Action);
+    /// What the prompt shows: the collection in use, or the project chosen
+    /// without a collection.
+    fn place(&mut self) -> Option<String>;
+}
+
+/// The commands after which the prompt may have to change.
+fn moves(line: &str) -> bool {
+    let first = line.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    matches!(first.as_str(), "use" | "collection" | "collections" | "workspace" | "auth" | "login" | "project")
 }
 
 struct Local {
@@ -157,6 +166,15 @@ impl Backend for Local {
     fn exec(&mut self, line: &str) -> (Vec<(bool, String)>, Action) {
         let out = self.sess.execute(line);
         (out.lines, out.action)
+    }
+
+    fn place(&mut self) -> Option<String> {
+        let s = &self.sess;
+        if s.ws_priv.is_some() {
+            Some(s.ws.clone())
+        } else {
+            s.project.clone()
+        }
     }
 }
 
@@ -183,6 +201,21 @@ impl Backend for Remote {
             _ => Action::None,
         };
         (lines, action)
+    }
+
+    /// Asked with the structured request `whoami`; an older server, or a
+    /// session not logged in, leaves the prompt as it is.
+    fn place(&mut self) -> Option<String> {
+        if write_frame(&mut self.stream, CMD_API, br#"{"op":"whoami"}"#).is_err() {
+            return None;
+        }
+        let (code, payload) = self.rx.recv().ok()?;
+        if code != ST_OK {
+            return None;
+        }
+        let j: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+        let place = j["collection"].as_str().or(j["workspace"].as_str()).or(j["project"].as_str());
+        place.map(String::from)
     }
 }
 
@@ -251,6 +284,9 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
         println!("KivaDB Shell v{VERSION}\nType 'help' or 'h' for command list");
     }
     let mut code = 0;
+    if interactive {
+        prompt.set_place(backend.place().as_deref());
+    }
     loop {
         // A command goes on over several lines while a { or [ is open.
         let mut line = match prompt.read(false) {
@@ -287,6 +323,9 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
         let start = Instant::now();
         let (lines, action) = backend.exec(&line);
         let elapsed = start.elapsed();
+        if interactive && moves(&line) {
+            prompt.set_place(backend.place().as_deref());
+        }
         if lines.iter().any(|(e, _)| *e) {
             code = 1;
         }

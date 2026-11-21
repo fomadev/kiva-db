@@ -206,6 +206,15 @@ pub struct EngineStats {
     pub compact_threshold: u8,
     pub indexes: usize,
     pub seq: u64,
+    /// Keys whose TTL ran out, as seen since the workspace was opened.
+    pub expired_keys: u64,
+    /// Transactions refused because a watched key changed (Redis `WATCH`)
+    /// or the workspace was reset during them.
+    pub transaction_conflicts: u64,
+    /// Queries run (`get where`, `count where`...), by the strategy of their plan.
+    pub scans: Vec<(&'static str, u64)>,
+    /// Bytes held by the vector indexes.
+    pub vector_bytes: u64,
 }
 
 /// Where a read of the change journal starts.
@@ -1019,6 +1028,10 @@ struct Inner {
     corrupted_detected: u64,
     last_check: Option<(i64, usize, usize)>,
     compactions: u64,
+    /// Counters for the metrics (`EngineStats`).
+    expired_keys: u64,
+    conflicts: u64,
+    scans: BTreeMap<&'static str, u64>,
     last_compact: Option<i64>,
     compact_error: Option<String>,
     closed: bool,
@@ -1661,6 +1674,7 @@ impl Inner {
         let e = self.index.get(key)?;
         if e.is_expired(now) {
             if let Some(old) = self.idx_remove(key) {
+                self.expired_keys += 1;
                 self.journal_expire(key, old.expires_at);
             }
             self.expired(key);
@@ -2078,6 +2092,7 @@ impl Inner {
             self.expiry.iter().take_while(|(t, _)| *t <= now).take(PURGE_BATCH).map(|(_, k)| k.clone()).collect();
         for k in &dead {
             if let Some(old) = self.idx_remove(k) {
+                self.expired_keys += 1;
                 self.journal_expire(k, old.expires_at);
             }
             self.expired(k);
@@ -2302,6 +2317,9 @@ impl Engine {
             corrupted_detected: corrupted,
             last_check: None,
             compactions: 0,
+            expired_keys: expired_at_open.len() as u64,
+            conflicts: 0,
+            scans: BTreeMap::new(),
             last_compact: None,
             compact_error: None,
             closed: false,
@@ -2941,10 +2959,12 @@ impl Engine {
         let now = now_ms();
         let ts = now / 1000;
         if let Some(key) = watched.and_then(|w| Self::changed(&mut inner, w, now)) {
+            inner.conflicts += 1;
             return Err(KivaError::Conflict(format!("the watched key '{key}' changed")));
         }
         if let Some(begin) = begin_seq {
             if inner.reset_seq > begin {
+                inner.conflicts += 1;
                 return Err(KivaError::Conflict("the database was reset during the transaction".into()));
             }
             for op in &ops {
@@ -3522,6 +3542,10 @@ impl Engine {
             cache_hits: inner.cache.hits,
             cache_misses: inner.cache.misses,
             seq: inner.seq,
+            expired_keys: inner.expired_keys,
+            transaction_conflicts: inner.conflicts,
+            scans: inner.scans.iter().map(|(k, v)| (*k, *v)).collect(),
+            vector_bytes: inner.vec_bytes() as u64,
             ..Default::default()
         };
         let mut mem = std::mem::size_of::<Engine>() + std::mem::size_of::<Inner>();
@@ -5321,6 +5345,7 @@ impl Engine {
         let started = Instant::now();
         let mut inner = self.lock();
         let chosen = Self::choose(&inner, q, opts, estimate);
+        *inner.scans.entry(chosen.plan.strategy).or_insert(0) += 1;
         let mut m = Measured { index_entries: chosen.entries, ..Measured::default() };
         m.plan_time = started.elapsed();
         let now = now_ms();

@@ -146,6 +146,66 @@ pub struct Metrics {
     pub latency: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
     pub http_requests: AtomicU64,
     pub failed_logins: AtomicU64,
+    /// Commands by kind (`COMMAND_KINDS`), with their durations.
+    pub commands: [CommandStat; COMMAND_KINDS.len()],
+    pub backup_failures: AtomicU64,
+}
+
+/// The kinds commands are counted by in the metrics: a fixed list, never a
+/// key or a user, so that the number of series stays small.
+pub const COMMAND_KINDS: [&str; 15] = [
+    "get",
+    "set",
+    "update",
+    "del",
+    "query",
+    "aggregate",
+    "similar",
+    "json",
+    "transaction",
+    "script",
+    "changes",
+    "collection",
+    "admin",
+    "auth",
+    "other",
+];
+
+/// The count and durations of one kind of command.
+#[derive(Default)]
+pub struct CommandStat {
+    pub count: AtomicU64,
+    pub micros: AtomicU64,
+    pub latency: [AtomicU64; LATENCY_BUCKETS_US.len() + 1],
+}
+
+/// The kind of a command for the metrics: its first word, and for `get` the
+/// second (`get where` is a query, `get similar` a vector search).
+pub fn command_kind(cmd: &str, second: Option<&str>) -> usize {
+    let kind = match cmd {
+        "get" => match second.map(str::to_ascii_lowercase).as_deref() {
+            Some("where" | "range") => "query",
+            Some("similar") => "similar",
+            _ => "get",
+        },
+        "set" | "add" | "change" | "bump" | "convert" => "set",
+        "update" => "update",
+        "del" => "del",
+        "scan" | "keys" | "range" | "explain" | "has" | "typeof" => "query",
+        "count" | "sum" | "avg" | "min" | "max" => "aggregate",
+        "semantic" => "similar",
+        "json" => "json",
+        "begin" | "commit" | "rollback" | "savepoint" | "transaction" => "transaction",
+        "eval" | "script" | "wait" => "script",
+        "changes" => "changes",
+        "use" | "collection" | "collections" | "workspace" | "project" => "collection",
+        "auth" | "login" | "whoami" => "auth",
+        "create" | "drop" | "tune" | "grant" | "revoke" | "users" | "modify" | "config" | "backup" | "export"
+        | "import" | "compact" | "autocompact" | "check" | "schema" | "schemas" | "encryption" | "replica"
+        | "failover" | "audit" | "memory" | "hint" | "compress" | "shutdown" => "admin",
+        _ => "other",
+    };
+    COMMAND_KINDS.iter().position(|k| *k == kind).unwrap_or(COMMAND_KINDS.len() - 1)
 }
 
 /// Upper bounds of the latency histogram, in microseconds: from a value read
@@ -158,6 +218,15 @@ impl Metrics {
         self.micros.fetch_add(micros, Ordering::Relaxed);
         let i = LATENCY_BUCKETS_US.iter().position(|b| micros <= *b).unwrap_or(LATENCY_BUCKETS_US.len());
         self.latency[i].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A command of `kind` (`command_kind`) that took `micros`.
+    pub fn record_command(&self, kind: usize, micros: u64) {
+        let c = &self.commands[kind];
+        c.count.fetch_add(1, Ordering::Relaxed);
+        c.micros.fetch_add(micros, Ordering::Relaxed);
+        let i = LATENCY_BUCKETS_US.iter().position(|b| micros <= *b).unwrap_or(LATENCY_BUCKETS_US.len());
+        c.latency[i].fetch_add(1, Ordering::Relaxed);
     }
 }
 

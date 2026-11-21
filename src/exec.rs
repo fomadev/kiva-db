@@ -675,6 +675,19 @@ impl<'a> Cur<'a> {
     }
 }
 
+/// An error as the shell writes it: `Error: <what>`, and on the next line
+/// `Usage: <form>` when the command was not understood. A command that gave
+/// back its usage alone gets a line saying what is wrong first, so that every
+/// error starts by saying what went wrong.
+pub(crate) fn error_line(cmd: &str, e: &str) -> String {
+    if e.starts_with("Usage:") {
+        let cmd = cmd.to_ascii_lowercase();
+        format!("Error: '{cmd}' is incomplete, or has a word it does not know.\n{e}")
+    } else {
+        format!("Error: {e}")
+    }
+}
+
 /// `Usage: <form>`, written once: some forms already start with `Usage:`.
 pub(crate) fn usage_line(form: &str) -> String {
     match form.strip_prefix("Usage:") {
@@ -1411,7 +1424,7 @@ impl Session {
             Err(e) => Err(e.to_string()),
         };
         if let Err(e) = res {
-            out.err(format!("Error: {e}"));
+            out.err(error_line(&cmd, &e));
         }
 
         // An error inside a transaction aborts it.
@@ -1460,8 +1473,14 @@ impl Session {
         }
         if out.has_err() {
             m.errors.fetch_add(1, Ordering::Relaxed);
+            if cmd == "backup" {
+                m.backup_failures.fetch_add(1, Ordering::Relaxed);
+            }
         }
-        m.record_latency(started.elapsed().as_micros() as u64);
+        let micros = started.elapsed().as_micros() as u64;
+        m.record_latency(micros);
+        let second = tokens.get(1).filter(|t| t.is_bare()).map(|t| t.text.as_str());
+        m.record_command(crate::instance::command_kind(&cmd, second), micros);
         out
     }
 
@@ -1537,7 +1556,7 @@ impl Session {
                 seg.remove(0);
             }
             if let Err(e) = f(self, &seg, out) {
-                out.err(format!("Error: {e}"));
+                out.err(error_line(&t[0].text, &e));
             }
         }
         Ok(())
@@ -2825,6 +2844,10 @@ impl Session {
             ));
         }
         out.say(format!(" > Checksum Errors      : {}", s.corrupted_detected));
+        out.say(format!(" > Expired Keys         : {} since opening", s.expired_keys));
+        if s.transaction_conflicts > 0 {
+            out.say(format!(" > Txn Conflicts        : {}", s.transaction_conflicts));
+        }
         match s.last_check {
             Some((ts, ok, bad)) => {
                 out.say(format!(" > Last Integrity Check : {} (OK: {ok}, corrupted: {bad})", fmt_time(ts)))
