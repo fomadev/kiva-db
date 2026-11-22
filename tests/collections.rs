@@ -336,3 +336,118 @@ fn renaming_the_collection_in_use_says_rename() {
     ok(&mut s, "use baak.locations");
     assert_eq!(ok(&mut s, "get k"), "k: 1 [int]");
 }
+
+#[test]
+fn use_collection_looks_only_in_the_current_project() {
+    let dir = TempDir::new("collections_use_collection");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "project create baak collections (places, users, lab)");
+    ok(&mut s, "project create dzoket collections (clients)");
+    // A project and a collection outside a project, named like collections of baak.
+    ok(&mut s, "project create places collections (demo)");
+    ok(&mut s, "collection create lab");
+    ok(&mut s, "use baak.lab");
+    ok(&mut s, r#"set k "baak""#);
+    ok(&mut s, "use lab");
+    ok(&mut s, r#"set k "outside""#);
+
+    // No current project: nothing outside a project is looked at.
+    ok(&mut s, "use default");
+    let err = fails(&mut s, "use collection lab");
+    assert!(err.contains("no current project: use <project> first"), "{err}");
+    assert!(ok(&mut s, "whoami").contains("'default'"), "a refusal changes nothing");
+
+    ok(&mut s, "use baak");
+    // The project `places` and the collection `lab` are passed over.
+    assert!(ok(&mut s, "use collection places").starts_with("Using collection 'baak.places'"));
+    let lab = ok(&mut s, "use collection lab");
+    assert!(lab.starts_with("Using collection 'baak.lab'") && !lab.contains("also exists"), "{lab}");
+    assert_eq!(ok(&mut s, "get k"), "k: baak [string]");
+    // After a collection chosen by its full name, its project is the current one.
+    ok(&mut s, "use baak.places");
+    assert!(ok(&mut s, "use collection users").starts_with("Using collection 'baak.users'"));
+    // Another project.
+    ok(&mut s, "use dzoket");
+    assert!(ok(&mut s, "use collection clients").starts_with("Using collection 'dzoket.clients'"));
+
+    // Unknown, or with a dot: refused, and the session stays where it is.
+    let err = fails(&mut s, "use collection nothing");
+    assert!(err.contains("collection 'dzoket.nothing' does not exist in project 'dzoket'"), "{err}");
+    let err = fails(&mut s, "use collection baak.places");
+    assert!(err.contains("for a full name: use baak.places"), "{err}");
+    assert!(ok(&mut s, "whoami").contains("dzoket.clients"));
+
+    // The old forms keep their meaning.
+    ok(&mut s, "use baak");
+    assert!(ok(&mut s, "use lab").starts_with("Using collection 'lab'"));
+    ok(&mut s, "use baak");
+    assert!(ok(&mut s, "use places").starts_with("Using project 'places'"));
+    assert!(ok(&mut s, "collection switch baak.users").contains("Switched to collection 'baak.users'"));
+    assert!(fails(&mut s, "collection switch users").contains("does not exist"));
+    // A collection named `collection` is still entered by `use collection`.
+    ok(&mut s, "collection create collection");
+    assert!(ok(&mut s, "use collection").starts_with("Using collection 'collection'"));
+    assert!(fails(&mut s, "use collection a b").contains("Usage: use"));
+
+    // Not inside a transaction.
+    ok(&mut s, "use baak.places");
+    ok(&mut s, "begin");
+    ok(&mut s, "set t 1");
+    assert!(fails(&mut s, "use collection users").contains("inside a transaction"));
+    assert!(fails(&mut s, "use project dzoket").contains("inside a transaction"));
+    ok(&mut s, "commit");
+    assert_eq!(ok(&mut s, "get t"), "t: 1 [int]");
+    ok(&mut s, "use collection users");
+    assert!(ok(&mut s, "get t").contains("(nil)"));
+
+    // After a restart: the project comes from the collection one arrives in.
+    drop(s);
+    inst.shutdown();
+    drop(inst);
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "use baak.users");
+    assert!(ok(&mut s, "use collection places").contains("(1 keys)"));
+}
+
+#[test]
+fn use_project_selects_the_project_even_behind_a_collection_of_its_name() {
+    let dir = TempDir::new("collections_use_project");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "project create baak collections (places)");
+    ok(&mut s, "collection create baak");
+    // `use baak` keeps entering the collection outside a project.
+    assert!(ok(&mut s, "use baak").starts_with("Using collection 'baak'"));
+    assert!(ok(&mut s, "use project baak").starts_with("Using project 'baak' (1 collection(s))"));
+    assert!(ok(&mut s, "whoami").contains("project 'baak', in no collection"));
+    assert!(ok(&mut s, "use collection places").starts_with("Using collection 'baak.places'"));
+    assert!(fails(&mut s, "use project nothing").contains("project 'nothing' does not exist"));
+    assert!(fails(&mut s, "use project baak.places").contains("a project name has no '.': use project baak"));
+    assert!(ok(&mut s, "whoami").contains("baak.places"));
+}
+
+#[test]
+fn use_collection_asks_the_same_grants() {
+    let dir = TempDir::new("collections_use_collection_grants");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "project create baak collections (cache, places)");
+    ok(&mut admin, "project create places collections (demo)");
+    ok(&mut admin, r#"create user "analyst" identified by "pw" grant read on baak.places"#);
+    ok(&mut admin, "config set auth_required true");
+
+    let mut s = Session::new(inst.clone(), false, None);
+    ok(&mut s, "auth analyst pw");
+    ok(&mut s, "use baak");
+    // The collision of the audit: the explicit form goes to baak.places.
+    assert!(fails(&mut s, "use places").contains("no access to project 'places'"));
+    assert!(ok(&mut s, "use collection places").starts_with("Using collection 'baak.places'"));
+    assert!(fails(&mut s, "set k 1").contains("read access"));
+    let short = fails(&mut s, "use collection cache");
+    assert_eq!(short, fails(&mut s, "use baak.cache"), "the same refusal as the full name");
+    assert!(short.contains("no access"), "{short}");
+    assert!(ok(&mut s, "whoami").contains("baak.places"));
+    assert!(fails(&mut s, "use project places").contains("no access to project 'places'"));
+}

@@ -1366,8 +1366,11 @@ const HELP: &str = r#"
   autocompact on|off|status|threshold <N>
   compress lz4|zlib|none            : Re-encode the whole workspace.
 
-  WORKSPACES & CONFIG:
-  workspace list|current|switch <n>|create <n> [path]|remove <n>
+  COLLECTIONS & CONFIG:
+  use <project>.<collection>        : Enter a collection by its full name.
+  use <project> | use project <p>   : Select a project; then 'use collection <c>' enters one of its collections.
+  use <name>                        : A collection outside a project, else a project, else a collection of the current project.
+  collection (or workspace) list|current|switch <n>|create <n> [path]|rename <n> to <m>|remove <n>
   config list | config get <key> | config set <key> <value>
 
   USERS (admin):
