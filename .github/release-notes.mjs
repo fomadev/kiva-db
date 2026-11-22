@@ -164,7 +164,7 @@ out.push(`KivaDB **${version}**, released on ${date}.`, "");
 if (candidate) {
   out.push(
     absolute(
-      `A ${kind} of ${core}, to try before ${core} itself is released. ` +
+      `${/^[aeiou]/.test(kind) ? "An" : "A"} ${kind} of ${core}, to try before ${core} itself is released. ` +
         "`kivadb update` does not install it, nor the install scripts unless asked (below). Read " +
         "[the upgrade guide](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20) first."
     ),
