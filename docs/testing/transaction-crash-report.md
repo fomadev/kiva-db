@@ -67,8 +67,10 @@ finds the same pair. "Checksums": `check` reports no damaged record.
 * Performance: a build without the feature compiles every crash point to
   nothing; the fix adds a few comparisons per record read at start. Not
   measured with a benchmark.
-* Linux and macOS: the same two test files run in the CI of the pull
-  request, step "Test crash points (test F)".
+* CI of the pull request, step "Test crash points (test F)": Windows
+  (x64), Linux (x64) and macOS (arm64) each passed `tests/crash.rs`
+  (11 tests) and `tests/txn_recovery.rs` (5 tests), and the check that the
+  build without the feature holds no crash point.
 
 ## To run them again
 
