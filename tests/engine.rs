@@ -209,16 +209,29 @@ fn bit_rot_is_detected_and_repaired() {
     assert_eq!(report.corrupted[0], "victim");
     assert!(e.contains("victim"));
 
+    let whole = fs::read(&path).unwrap();
     let report = e.check(true).unwrap();
     assert_eq!(report.repaired, 1);
-    assert!(report.backup.as_ref().unwrap().exists());
+    let first = report.backup.clone().unwrap();
+    assert_eq!(fs::read(&first).unwrap(), whole, "the copy is the file before the repair");
     assert!(!e.contains("victim"));
     assert_eq!(e.check(false).unwrap().corrupted.len(), 0);
     assert!(e.stats().corrupted_detected >= 1);
+
+    // P4. A second repair keeps a copy of its own: the first one is never
+    // replaced.
+    e.put("victim2", &s("damaged too"), 0, false).unwrap();
+    let entry = e.meta("victim2").unwrap();
+    flip_byte(&path, entry.offset + entry.rec_len() - 3);
+    let report = e.check(true).unwrap();
+    assert_eq!(report.repaired, 1);
+    let second = report.backup.unwrap();
+    assert_ne!(second, first);
+    assert_eq!(fs::read(&first).unwrap(), whole);
 }
 
 #[test]
-fn a_damaged_record_in_the_middle_is_skipped_at_startup() {
+fn a_damaged_record_in_the_middle_stops_the_opening() {
     let dir = TempDir::new("midrot");
     let path = dir.path().join("store.kiva");
     let crashed = dir.path().join("crash/store.kiva");
@@ -232,11 +245,16 @@ fn a_damaged_record_in_the_middle_is_skipped_at_startup() {
         crash_copy(&path, &crashed, false);
     }
     flip_byte(&crashed, entry.offset + entry.rec_len() - 2);
-    let e = Engine::open(&crashed, quiet()).unwrap();
-    assert_eq!(get_str(&e, "a").as_deref(), Some("alpha"));
-    assert!(get_str(&e, "b").is_none());
-    assert_eq!(get_str(&e, "c").as_deref(), Some("charlie"));
-    assert_eq!(e.stats().corrupted_detected, 1);
+    // Read after the last clean stop (no hint): leaving the record out
+    // would lose what it holds without a word. The opening is refused, the
+    // file left as it is.
+    let bytes = fs::read(&crashed).unwrap();
+    let err = Engine::open(&crashed, quiet()).err().expect("a damaged file was opened").to_string();
+    assert!(
+        err.contains(&format!("is damaged at byte {}: a whole record whose checksum does not match", entry.offset)),
+        "{err}"
+    );
+    assert_eq!(fs::read(&crashed).unwrap(), bytes);
 }
 
 #[test]

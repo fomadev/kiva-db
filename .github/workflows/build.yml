@@ -179,6 +179,17 @@ jobs:
       - name: Compile KivaDB
         run: cargo build --release
 
+      - name: Check the release executable holds no crash point
+        # The executable that goes into the archive, and from it into the
+        # release: built without the feature crash-points (test F).
+        shell: bash
+        run: |
+          for name in KIVADB_CRASH_ARMED KIVADB-CRASH-POINT batch.torn_append open.before_truncate; do
+            if grep -a -q "$name" target/release/${{ matrix.binary }}; then
+              echo "the release executable holds '$name'"; exit 1
+            fi
+          done
+
       # --- Archivage ---
       - name: Archive Binary
         shell: bash

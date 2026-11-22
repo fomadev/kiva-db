@@ -30,6 +30,12 @@ damaged record, and a second start that finds the same.
 | F10 | `batch.after_append`, 5th passage | default | alpha 99 995, beta 100 005 | Five successive commits on the same keys, the fifth stopped |
 | F11 | `batch.torn_append`, then `open.before_truncate`, then `open.after_truncate` | default | **before**, then a new transfer goes through | A crash during recovery; recovery done again, idempotent |
 | F12 | `batch.before_append` named but not armed | default | **after** | A point fires only when armed |
+| F13a | `batch.after_append`, 40th passage, on a server with 4 clients making transfers at once | default | exactly 40 transfers; every answered one there | The batch stopped reached the system |
+| F13b | `batch.before_sync`, 40th passage, same | `sync_writes = true` | exactly 40; every answered one there | Batches waiting on the same group fsync reached the system too |
+| F13c | `batch.torn_append`, 40th passage, same | default | exactly 39; every answered one there | The batch cut short is left out, and kept in a copy |
+
+F11 also checks that each attempt of the recovery kept the bytes it was
+about to cut, the same bytes each time.
 
 A case fails when the child process was not stopped, or stopped anywhere
 else than the point asked for (its `KIVADB-CRASH-POINT` line on stderr), or
@@ -39,14 +45,24 @@ where the client is not answered yet.
 ## Damaged or cut logs (`tests/txn_recovery.rs`, every build)
 
 The transfer committed, KivaDB stopped and its hint removed (the next start
-reads the whole log, as after a crash), then the file changed:
+reads the whole log, as after a crash), then the file changed. "Refused":
+the start fails with `ERR_DATA_CORRUPTED`, the byte and the damage, the file
+byte for byte as it was, no copy of a cut beside it, the same at every
+start.
 
-| Case | Change | Allowed | Before the fix |
-|---|---|---|---|
-| R1 | One bit flipped in the alpha record of the transfer (first of the batch) | **before**, the same at every start | **alpha 100 000, beta 100 001** |
-| R2 | One bit flipped in the commit record, with another write after it | **before**; the later write kept | before |
-| R3 | A broken batch the file ends in, then a new transfer written | the new transfer | the new transfer |
-| R4 | The file cut 3 bytes before its end (in the commit record) | **before**, the same at every start | before |
+| Case | Change | Expected (2.0.0) | rc.10 | rc.9 |
+|---|---|---|---|---|
+| R1 | One bit flipped in the alpha record of the transfer (first of the batch) | **refused** | before | **alpha 100 000, beta 100 001** |
+| R2 | One bit flipped in the commit record, with another write after it | **refused** | before | before |
+| R3 | A damaged record of a batch whose commit record was cut away | **refused** | before | before |
+| R4 / P3 | The file cut 3 bytes before its end (in the commit record), then again after a new transfer | **before**, each cut kept in a copy of its own, the first unchanged | before, bytes deleted | before, bytes deleted |
+| P1 | One bit flipped in the commit record, the last of the file | **refused** | before, bytes deleted | before, bytes deleted |
+| P2 | One bit of the size of the first record (+256 MiB, then +4 KiB); `kivadb doctor` | **refused**; doctor FAIL `damaged at byte 16` | **file cut to 16 bytes** | idem |
+| Z | Everything after the transfer's first record turned to zeros (an end never written) | **before**, kept | before | before |
+| L | The size of the very last record made larger, nothing valid after it | **before**, kept (the limit of the format) | before | before |
+| E | An encrypted record altered, its CRC fixed (`tests/encryption.rs`) | **refused** | record skipped | record skipped |
+| M | A record in the middle, a byte changed (`tests/engine.rs`) | **refused** | record skipped | record skipped |
+| P4 | `check repair` twice (`tests/engine.rs`) | two copies, the first unchanged and equal to the file before | first copy replaced | idem |
 
 ## Concurrency (`tests/txn_recovery.rs`)
 
@@ -54,11 +70,11 @@ reads the whole log, as after a crash), then the file changed:
 |---|---|---|
 | C1 | 4 clients, 100 transfers each of 1 from alpha to beta, each reading both balances in its transaction; a conflict is retried | alpha 99 600, beta 100 400: no lost update; conflicts answered `modified by another session` |
 | C2 | A transaction rolled back after a write | Nothing of it remains |
+| C3 | Two transactions each reading two keys and writing a different one; then writing both | Both committed (write skew, as 13.7 documents); writing both keys, the second conflicts |
 
 ## Not covered
 
 * A crash of the operating system, a power cut, a disk that loses sectors
   or lies about its fsync: `abort()` does not stand for them.
-* A crash point during concurrent commits of several clients of one server.
-* Write skew (a transaction that reads a key and writes another): allowed by
-  the documented isolation, so not a failure; not tested as one.
+* Write skew is allowed by the documented isolation: C3 checks that it is,
+  and that writing the key a decision depends on prevents it.

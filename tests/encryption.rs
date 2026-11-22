@@ -112,10 +112,11 @@ fn a_changed_byte_is_detected_even_with_a_valid_checksum() {
     std::fs::write(&path, &data).unwrap();
     std::fs::remove_file(sidecar(&path, "hint")).unwrap();
 
-    let e = Engine::open(&path, opts(keys(1))).unwrap();
-    assert!(e.get("balance").unwrap().is_none(), "the altered record must not be accepted");
-    assert_eq!(e.get("other").unwrap().unwrap().0, Value::Str("x".into()));
-    assert_eq!(e.stats().corrupted_detected, 1);
+    // Read after the last clean stop (no hint): the opening is refused,
+    // rather than the altered record left out without a word.
+    let err = Engine::open(&path, opts(keys(1))).err().expect("an altered record was accepted").to_string();
+    assert!(err.contains("is damaged at byte 16: an encrypted record that fails its authentication"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), data, "a refused file must not change");
 }
 
 #[test]

@@ -418,8 +418,9 @@ pub fn run_embedded(inst: Arc<Instance>, opts: ShellOpts) -> i32 {
     let load = sess.engine.stats();
     if load.recovered_bytes > 0 {
         eprintln!(
-            "[INFO] Recovered after an unclean shutdown: {} bytes of incomplete log discarded.",
-            load.recovered_bytes
+            "[INFO] Recovered after an unclean shutdown: {} bytes of incomplete log discarded{}.",
+            load.recovered_bytes,
+            load.recovered_copy.as_ref().map(|p| format!(" (kept in {})", p.display())).unwrap_or_default()
         );
     }
     let mut backend = Local { sess };

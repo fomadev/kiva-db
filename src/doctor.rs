@@ -402,7 +402,9 @@ fn data(r: &mut Report, home: &Path, cfg: &Config) {
                 let how = if name == "system" {
                     "users and scripts live there: restore system/system.kiva from a backup".to_string()
                 } else {
-                    format!("open it (workspace switch {name}) and run check, then check repair")
+                    format!(
+                        "KivaDB refuses to open a file damaged after its last clean stop: restore it from a backup.                          If it still opens (workspace switch {name}), run check, then check repair"
+                    )
                 };
                 r.add(
                     Level::Fail,

@@ -265,7 +265,7 @@ fn place_new(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Writes the new name of a file to the disk, on Linux and macOS (Windows
 /// has no way to do it from the standard library; NTFS journals it).
-fn sync_folder(file: &Path) -> io::Result<()> {
+pub(crate) fn sync_folder(file: &Path) -> io::Result<()> {
     #[cfg(unix)]
     if let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) {
         File::open(dir)?.sync_all()?;
@@ -394,14 +394,18 @@ pub fn check_log(path: &Path) -> std::result::Result<u64, String> {
     let mut pos = FILE_HEADER_LEN as usize;
     let mut records = 0;
     while pos < data.len() {
-        if data.len() - pos < REC_HEADER_LEN {
-            return Err(format!("truncated record at byte {pos}"));
-        }
-        let h = parse_header(&data[pos..]);
-        let end = pos + h.total_len() as usize;
-        if h.k_size == 0 || end > data.len() {
-            return Err(format!("truncated record at byte {pos}"));
-        }
+        let h = (data.len() - pos >= REC_HEADER_LEN).then(|| parse_header(&data[pos..]));
+        let end = h.as_ref().map_or(usize::MAX, |h| pos.saturating_add(h.total_len() as usize));
+        let Some(h) = h.filter(|h| h.k_size != 0 && end <= data.len()) else {
+            // Cut short (a crash), or damaged: what KivaDB tells apart when
+            // it opens the file.
+            let file = File::open(path).map_err(|e| e.to_string())?;
+            return Err(match crate::engine::tail_verdict(&file, pos as u64, data.len() as u64) {
+                Ok(None) => format!("truncated record at byte {pos}"),
+                Ok(Some(what)) => format!("damaged at byte {pos}: {what}"),
+                Err(e) => e.to_string(),
+            });
+        };
         if crc32fast::hash(&data[pos + 4..end]) != h.crc {
             return Err(format!("checksum mismatch in the record at byte {pos}"));
         }

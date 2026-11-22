@@ -56,10 +56,16 @@ is older or missing, so the end of the log is read again (`scan_log`):
 * the records of a batch wait until its commit record shows up, then apply
   together; a batch without it is left out, and the file is cut where it
   started;
-* a record whose header or body is cut at the end of the file is a torn
-  write: the file is cut there;
-* a record whose CRC does not match, in the middle of the file, is skipped
-  and counted (`corrupted_detected`).
+* a record whose header or body is cut at the end of the file, with no
+  valid record after it, or an end of zeros, is a torn write: the file is
+  cut there, after a copy of the bytes cut (`store.kiva.cut-<ms>`, written
+  and synced first);
+* anything else stops the start, which changes nothing in the file
+  (`ERR_DATA_CORRUPTED`, with the byte and the damage): a whole record whose
+  CRC does not match, the last one included; an encrypted record that fails
+  its authentication; a header no record could have, or that does not frame
+  its record although a valid record follows it. Since 2.0.0 (see section
+  9); before, such a record was skipped and counted.
 
 The change journal is then brought in line with the data file
 ([22.5](../../DOCUMENTATION.md#225-the-change-journal-changes-kept-read-again-from-a-cursor));
@@ -89,12 +95,12 @@ left out whole`. `rebuild_changes` does the same for the change journal.
 
 ## 6. Windows of vulnerability that are not defects
 
-* **A commit record damaged at the very end of the file** is read as a torn
-  write: the transaction is left out and the file cut. A transaction that
-  was acknowledged disappears, as consistently as if it had never been
-  committed, but without a word beyond the usual `incomplete log discarded`.
-  Telling a damaged commit record from a write cut short would need a
-  marker the format does not have.
+* **The size of the very last record, damaged** so that it runs past the
+  end of the file, with nothing valid after it, cannot be told from a write
+  cut short: the format has no marker for it. The transaction it ends is
+  left out, as after a crash, and its bytes are kept in the copy the start
+  names. (Until 2.0.0, a damaged commit record at the end was read the same
+  way, and its bytes deleted: see section 9.)
 * **Reads before the fsync.** With `sync_writes`, another session can read a
   transaction between steps 6 and 7. A power cut there may take away what
   it read; a crash of the process cannot.
@@ -140,5 +146,25 @@ unwinding, no `Drop`, no rollback, no flush.
   are lost), or a disk that lies about its fsync or loses sectors. Those
   need a virtual machine stopped at random, or a file system that drops what
   was not synced; none is run here.
-* A crash during concurrent commits of several clients of one server is not
-  tested with crash points; concurrent transfers are tested without crash.
+* Concurrent commits stopped by a crash point are tested on a server with
+  four clients (F13); the points are those of one commit, reached by
+  whichever client gets there.
+
+## 9. The production readiness audit of 2.0.0
+
+The recovery of 2.0.0-rc.10 still took two kinds of damage for a write cut
+short, and deleted what it cut:
+
+| # | Damage | 2.0.0-rc.10 | 2.0.0 |
+|---|---|---|---|
+| P1 | The commit record at the end of the file, whole, its CRC wrong | Transaction left out, bytes deleted, `incomplete log discarded` | Not opened, file unchanged |
+| P2 | One bit of the size of the first record (54 keys in the file) | File cut to its header: every key lost, no copy | Not opened, file unchanged |
+| P3 | Any cut at start | Bytes deleted (a whole-file copy beyond 4 MiB, over the previous one) | Bytes kept in `store.kiva.cut-<ms>` first |
+| P4 | `check repair` twice | Second copy over the first (`store.kiva.bak`) | `store.kiva.bak-<ms>`, never replaced |
+
+A mid-file record with a wrong CRC was skipped, and the start went on; that
+is now refused too, as the owner of the release chose: applying what follows
+damage can apply part of a transaction, and leaving it out loses it without
+a word. The rule, and how a cut write is told from damage, is in
+`tail_verdict` ([src/engine.rs](../../src/engine.rs)); the results in
+[production-readiness-2.0.0.md](production-readiness-2.0.0.md).

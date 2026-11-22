@@ -5,6 +5,10 @@ cases: [transaction-crash-matrix.md](transaction-crash-matrix.md).
 
 ## Verdict
 
+> Superseded for 2.0.0 by [production-readiness-2.0.0.md](production-readiness-2.0.0.md):
+> a damaged record is now refused at start, not left out, and the cases
+> R1–R3 expect that ([transaction-crash-matrix.md](transaction-crash-matrix.md)).
+
 **Atomicity and durability against a crash of the process: PASS** on the
 cases tested, after the fix of one defect (a damaged record let part of its
 transaction apply, see the audit, section 5).
