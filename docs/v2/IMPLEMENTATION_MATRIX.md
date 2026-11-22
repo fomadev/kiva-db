@@ -6,7 +6,7 @@ Status: **done** (in `main`, tested and documented), **existing** (already in 1.
 
 ## Baseline
 
-* Version in `Cargo.toml`: `2.0.0-rc.6`, the sixth release candidate, not tagged yet; `v2.0.0-rc.1` was published without its Docker image, `v2.0.0-rc.2` on 2026-10-29, `v2.0.0-rc.3` and `v2.0.0-rc.4` on 2026-11-20, `v2.0.0-rc.5` on 2026-11-21 ([RELEASE.md](RELEASE.md)); the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
+* Version in `Cargo.toml`: `2.0.0-rc.7`, the seventh release candidate, not tagged yet; `v2.0.0-rc.1` was published without its Docker image, `v2.0.0-rc.2` on 2026-10-29, `v2.0.0-rc.3` and `v2.0.0-rc.4` on 2026-11-20, `v2.0.0-rc.5` on 2026-11-21, `v2.0.0-rc.6` on 2026-11-22 ([RELEASE.md](RELEASE.md)); the work goes to the section "Unreleased (2.0.0)" of [CHANGELOG.md](../../CHANGELOG.md).
 * `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass on Windows, Linux and macOS (CI), with no known failure.
 * Storage in 1.7.1: an append-only log per workspace (`store.kiva`), file header `KIVA` + format version 1 (`src/format.rs`), CRC32 on every record, a hint file with its own version (`src/hint.rs`), index definitions in `store.kiva.meta`, HNSW graphs in `store.kiva.graphs`. Type codes 1 to 7 are those of 1.x and are never reused.
 
@@ -76,7 +76,8 @@ Decimals, dates, times and datetimes kept as such inside documents, and typed nu
 | S | a home of `rc.2`, the path 1.7.1 → `rc.2` → 2.0.0, a crash during `convert`, the examples of the manual run, benchmarks | done | `tests/compat_rc2.rs`, `tests/manual.rs`, [benchmarks/versions.md](benchmarks/versions.md) | published as `v2.0.0-rc.3` |
 | R | random values and UUIDs (R1), `shuffle` and `sample` of arrays (R2), `order by random() limit N` (R3), REST, structured requests and drivers (R4) | done | `src/random.rs` (unit and χ² tests), `tests/random_functions.rs` (replication, change journal, backup, queries), `tests/compat_rc3.rs`, [RANDOM_FUNCTIONS.md](../architecture/RANDOM_FUNCTIONS.md) section 12 | published as `v2.0.0-rc.4` |
 | rc.5 | collections (alias `workspace`) and projects (B), the layout `projects/<p>/<c>` with nothing moved (C), expire events in the change journal (E), NDJSON export and import (G), metrics by command and the prompt (H), the drivers' `collection` and the parity table (I), exact keys in `get where` (P0) | done | `tests/collections.rs`, `tests/collection_layout.rs`, `tests/expire_events.rs`, `tests/import_export.rs`, `tests/observability.rs`, `tests/driver_parity.rs`, `tests/exact_keys.rs`, `tests/compat_rc4.rs`, [RC5_ARCHITECTURE.md](../architecture/RC5_ARCHITECTURE.md), [benchmarks/rc5.md](benchmarks/rc5.md) | published as `v2.0.0-rc.5`; F, D and J in 2.1 |
-| rc.6 | `use <collection>` inside a project enters a collection of the current project, after the names that worked before; `project list` counts collections | done | `tests/collections.rs` | the candidate `2.0.0-rc.6` |
+| rc.6 | `use <collection>` inside a project enters a collection of the current project, after the names that worked before; `project list` counts collections | done | `tests/collections.rs` | published as `v2.0.0-rc.6` |
+| rc.7 | after the audit of the Windows tests of rc.6: the note `also exists` of `use` and the hint of a refusal name only a collection the user may enter; renaming the collection in use says `rename`; tests of a transaction refusing every change of collection | done | `tests/collections.rs` | the candidate `2.0.0-rc.7` |
 
 ## P2 and later
 
