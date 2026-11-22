@@ -1288,6 +1288,8 @@ struct ScanOutcome {
     /// Length of the valid prefix of the log.
     end: u64,
     corrupted: u64,
+    /// Batches left out whole because one of their records was damaged.
+    dropped_txns: u64,
 }
 
 /// Replays the log from `start`, applying records to `index`. Encrypted
@@ -1311,6 +1313,11 @@ fn scan_log(
     // Records of an atomic batch wait here until its commit record shows up.
     let mut pending: Vec<(String, Option<Entry>)> = Vec::new();
     let mut pending_start = 0u64;
+    // A batch one of whose records is damaged: the rest of it, up to its
+    // commit record, is left out too, so that it applies whole or not at
+    // all. From the byte where that batch starts.
+    let mut poisoned: Option<u64> = None;
+    let mut dropped_txns = 0u64;
 
     let mut apply = |index: &mut BTreeMap<String, Entry>, key: String, entry: Option<Entry>| {
         *seq += 1;
@@ -1372,6 +1379,19 @@ fn scan_log(
                 break; // last record: a torn write
             }
             corrupted += 1;
+            // Its flags may be damaged too: a batch is taken as broken when
+            // records of it came before, or when this one says it is in a
+            // batch that it does not close.
+            let in_batch = !pending.is_empty() || h.flags & FLAG_TXN != 0;
+            let closes = h.flags & FLAG_TXN_COMMIT != 0;
+            if in_batch && poisoned.is_none() {
+                dropped_txns += 1;
+                if !closes {
+                    poisoned = Some(if pending.is_empty() { pos } else { pending_start });
+                }
+            } else if closes {
+                poisoned = None;
+            }
             pending.clear();
             pos += total;
             continue;
@@ -1399,7 +1419,12 @@ fn scan_log(
                 version: 0,
             })
         };
-        if h.flags & FLAG_TXN != 0 {
+        if h.flags & FLAG_TXN != 0 && poisoned.is_some() {
+            // The rest of a broken batch: left out, up to its commit.
+            if h.flags & FLAG_TXN_COMMIT != 0 {
+                poisoned = None;
+            }
+        } else if h.flags & FLAG_TXN != 0 {
             if pending.is_empty() {
                 pending_start = pos;
             }
@@ -1411,13 +1436,20 @@ fn scan_log(
             }
         } else {
             pending.clear();
+            poisoned = None;
             apply(index, key, entry);
         }
         pos += total;
     }
-    // A batch without its commit record never happened.
-    let end = if pending.is_empty() { pos } else { pending_start };
-    Ok(ScanOutcome { end, corrupted })
+    // A batch without its commit record never happened; nor does a broken
+    // one that the file ends in, whose bytes go with it, so that a batch
+    // written after them later is not taken for its end.
+    let end = match poisoned {
+        Some(start) => start,
+        None if pending.is_empty() => pos,
+        None => pending_start,
+    };
+    Ok(ScanOutcome { end, corrupted, dropped_txns })
 }
 
 impl Inner {
@@ -1852,6 +1884,7 @@ impl Inner {
             end: u64,
         }
         let mut pending: Vec<Owned> = Vec::new();
+        let mut broken = false;
         let mut pos = 0usize;
         let file_id = self.file_id;
         let flush = |j: &mut Journal, list: &[Owned], txn: bool| -> Result<()> {
@@ -1879,14 +1912,23 @@ impl Inner {
             }
             let rec = &data[pos..pos + total];
             pos += total;
-            if !verify_record(rec) {
-                pending.clear();
-                continue;
-            }
-            let Ok((k, stored)) = crypt::open_record(keys.as_deref(), rec) else {
+            // As in scan_log: a damaged record breaks its batch, whose rest
+            // is left out up to its commit record.
+            let opened = if verify_record(rec) { crypt::open_record(keys.as_deref(), rec).ok() } else { None };
+            let Some((k, stored)) = opened else {
+                if (!pending.is_empty() || h.flags & FLAG_TXN != 0) && h.flags & FLAG_TXN_COMMIT == 0 {
+                    broken = true;
+                } else if h.flags & FLAG_TXN_COMMIT != 0 {
+                    broken = false;
+                }
                 pending.clear();
                 continue;
             };
+            if broken && h.flags & FLAG_TXN != 0 {
+                broken = h.flags & FLAG_TXN_COMMIT == 0;
+                continue;
+            }
+            broken = false;
             let del = h.flags & FLAG_TOMBSTONE != 0;
             let raw = if del { Vec::new() } else { compress::unpack(&stored, h.compression())? };
             let change = Owned {
@@ -2255,9 +2297,26 @@ impl Engine {
                 if recovered_bytes > 4 * 1024 * 1024 {
                     let _ = fs::copy(&path, sidecar(&path, "bak"));
                 }
+                crate::crash_point!("open.before_truncate");
                 file.set_len(outcome.end)?;
                 file.sync_data()?;
                 file_len = outcome.end;
+                crate::crash_point!("open.after_truncate");
+            }
+            if outcome.corrupted > 0 {
+                eprintln!(
+                    "[WARN] {}: {} damaged record(s) skipped{}; 'kivadb doctor' names them, a backup brings them back",
+                    path.display(),
+                    outcome.corrupted,
+                    if outcome.dropped_txns > 0 {
+                        format!(
+                            ", and {} transaction(s) left out whole, since one of their records was",
+                            outcome.dropped_txns
+                        )
+                    } else {
+                        String::new()
+                    }
+                );
             }
         }
 
@@ -3075,7 +3134,16 @@ impl Engine {
                 }
             }
         }
+        crate::crash_point!("batch.before_append");
+        if crate::crash::aimed_at("batch.torn_append") {
+            // A write cut short: the first record whole, half of the next.
+            let cut = offs.get(1).map(|o| o + (buf.len() - o) / 2).unwrap_or(buf.len() / 2);
+            let end = inner.file_len;
+            let _ = inner.file.seek(SeekFrom::Start(end)).and_then(|_| inner.file.write_all(&buf[..cut]));
+        }
+        crate::crash_point!("batch.torn_append");
         let base = inner.append(&buf, false)?;
+        crate::crash_point!("batch.after_append");
         if inner.changes.is_some() {
             let ends: Vec<u64> = offs.iter().zip(&recs).map(|(o, r)| base + (*o + r.len()) as u64).collect();
             let list: Vec<NewChange> = staged
@@ -3109,7 +3177,10 @@ impl Engine {
             inner.journal(&list, true);
         }
 
-        for s in staged {
+        for (i, s) in staged.into_iter().enumerate() {
+            if i == 1 {
+                crate::crash_point!("batch.mid_index");
+            }
             inner.seq += 1;
             let seq = inner.seq;
             match s {
@@ -3138,7 +3209,10 @@ impl Engine {
         self.after_write(&inner);
         let mark = self.durable_mark(&inner);
         drop(inner);
-        self.make_durable(mark, arriving)
+        crate::crash_point!("batch.before_sync");
+        self.make_durable(mark, arriving)?;
+        crate::crash_point!("batch.after_sync");
+        Ok(())
     }
 
     /// Wipes every key. The data file is recreated from scratch.

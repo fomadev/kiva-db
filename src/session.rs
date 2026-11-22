@@ -623,6 +623,8 @@ impl Session {
         self.engine.txn_end();
         res?;
         self.wrote = n > 0;
+        // Committed, the client not answered yet.
+        crate::crash_point!("commit.before_reply");
         Ok(n)
     }
 

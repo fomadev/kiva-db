@@ -28,6 +28,11 @@ harness = false
 name = "documents"
 harness = false
 
+[features]
+# Crash points for the tests of tests/crash.rs only: never in a release
+# (src/crash.rs).
+crash-points = []
+
 [dependencies]
 crc32fast = "1"
 lz4_flex = "0.11"

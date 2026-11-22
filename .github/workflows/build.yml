@@ -127,6 +127,21 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Test crash points (test F)
+        # A build of its own, in its own folder: the executables of the other
+        # steps, and of the release, never hold a crash point.
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/crash-points
+        run: |
+          cargo clippy --features crash-points --all-targets -- -D warnings
+          cargo test --features crash-points --test crash --test txn_recovery
+          # The executable of the step before, built without the feature,
+          # holds none of it.
+          if grep -a -q KIVADB_CRASH_ARMED "$GITHUB_WORKSPACE"/target/debug/kivadb*; then
+            echo "a build without crash-points holds crash points"; exit 1
+          fi
+
       - name: Test with real Redis client libraries
         # ioredis, node-redis (RESP3), rate-limiter-flexible and rate-limit-redis, sets, sorted sets, publish/subscribe.
         if: matrix.os-name == 'linux'

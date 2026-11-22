@@ -2599,7 +2599,9 @@ When that happens, start again: `begin`, read the fresh values, redo the changes
 
 ### 13.7 Guarantees
 
-* **Atomic on disk.** A committed transaction is written as one batch whose last record marks the commit. If the machine stops in the middle, the incomplete batch is ignored at the next start.
+* **Atomic on disk.** A committed transaction is written as one batch whose last record marks the commit. If the machine stops in the middle, the incomplete batch is ignored at the next start. If one record of a batch is damaged on the disk, the whole batch is left out at the next start, never a part of it, and the log of the start says so (`1 transaction(s) left out whole`); `kivadb doctor` names the damaged record, and a backup brings the transaction back.
+* **Durable when answered.** A crash or kill of the process loses no committed transaction: its records reached the operating system before `commit` answers. Against a power cut, only with `sync_writes = true`, which waits for the disk ([17.2](#172-what-survives-what)). A client whose connection drops before the answer to `commit` cannot know whether it was made: read again before trying once more.
+* **Conflicts on the keys written.** A commit is refused only when a key it writes changed since `begin` ([13.6](#136-conflicts-between-users)). A key that a transaction only reads is not checked: write the keys a decision depends on, as a transfer writes both accounts.
 * **Leaving cancels.** Closing the shell or losing the connection with a transaction open is a rollback.
 * `del all keys` and `workspace switch` are refused inside a transaction.
 
