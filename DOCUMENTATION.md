@@ -3495,7 +3495,9 @@ SHA-256: 3b0c...e91f (also in /backups/kivadb-2026-10-22.tar.gz.sha256)
 * `-w shop` saves one workspace only.
 * Next to the archive, `<archive>.sha256` holds its SHA-256, in the format of `sha256sum -c`. Inside, a manifest lists every file with its own SHA-256.
 * The index snapshot and the HNSW graphs are not saved: KivaDB rebuilds them. Encrypted data stays encrypted in the archive ([16.12](#1612-encryption-at-rest)): keep the key apart from the backups, and do not lose it.
-* An existing file is never overwritten: give each backup its own name, for example with the date. From the shell, `backup to "/backups/x.tar.gz"` does the same (admin; the path is on the server).
+* An existing file is never overwritten: give each backup its own name, for example with the date. Two backups started at once with the same name do not mix: each writes its own temporary file (`<archive>.<random>.partial`), one of them puts its archive in place, and the other answers `already exists`. A backup reported as written has its `.sha256`; when the checksum cannot be written, the archive is taken away and the command fails. A stop in the middle can leave a `.partial` file, which no restore reads: delete it.
+* An error says what failed, and on which file (`cannot create the archive C:\kivadb.tar.gz.<random>.partial: access denied`). On Windows, only an administrator may create files at the root of a drive: write backups to a folder, such as `%USERPROFILE%\kivadb-backups`.
+* From the shell, `backup to "/backups/x.tar.gz"` does the same (admin; the path is on the server).
 
 **Restoring.** KivaDB must be stopped on the home that receives the data. Nothing is written until the whole archive has been checked: its SHA-256 against the `.sha256` file, every file against the manifest, and the checksum of every record.
 

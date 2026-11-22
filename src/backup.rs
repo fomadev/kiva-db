@@ -189,15 +189,24 @@ impl<W: Write> Writer<W> {
 
 /// Writes a backup of `scope` to `output`, a new `.tar.gz` file, and its
 /// checksum next to it. Works while the instance serves clients.
+///
+/// Two backups to the same file, at once, never mix: each writes its own
+/// temporary file (`<file>.<random>.partial`, created only if it does not
+/// exist), and only one of them puts it in place, without ever replacing a
+/// file; the other fails with `already exists`, leaving that archive alone.
+/// The checksum is written by the one that placed the archive, and if it
+/// cannot be, the archive is taken away again: a backup reported as written
+/// always has its checksum.
 pub fn backup(inst: &Instance, scope: &Scope, output: &Path) -> Result<BackupReport> {
+    let exists = || KivaError::Exists(format!("{} already exists: choose another file name", output.display()));
     if output.exists() {
-        return Err(KivaError::Exists(format!("{} already exists: choose another file name", output.display())));
+        return Err(exists());
     }
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(|e| io_at("create the folder", parent, e))?;
     }
     let mut tmp = output.as_os_str().to_owned();
-    tmp.push(".partial");
+    tmp.push(format!(".{:016x}.partial", crate::util::random_u64()?));
     let tmp = PathBuf::from(tmp);
     let result = write_archive(inst, scope, &tmp);
     let (sha, workspaces, files) = match result {
@@ -207,9 +216,20 @@ pub fn backup(inst: &Instance, scope: &Scope, output: &Path) -> Result<BackupRep
             return Err(e);
         }
     };
-    fs::rename(&tmp, output)?;
+    let placed = place_new(&tmp, output);
+    let _ = fs::remove_file(&tmp);
+    match placed {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(exists()),
+        Err(e) => return Err(io_at("put the archive in place as", output, e)),
+    }
     let name = output.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    fs::write(checksum_path(output), format!("{sha}  {name}\n"))?;
+    let sum = checksum_path(output);
+    if let Err(e) = crate::util::write_atomic(&sum, format!("{sha}  {name}\n").as_bytes()) {
+        // An archive without its checksum is not a backup to report.
+        let _ = fs::remove_file(output);
+        return Err(io_at("write the checksum", &sum, e));
+    }
     Ok(BackupReport {
         path: output.to_path_buf(),
         bytes: fs::metadata(output)?.len(),
@@ -220,8 +240,57 @@ pub fn backup(inst: &Instance, scope: &Scope, output: &Path) -> Result<BackupRep
     })
 }
 
+/// Gives the file `from` the name `to`, which must not exist: one of two
+/// callers with the same `to` wins, the other gets `AlreadyExists`, and no
+/// file is ever replaced. `from` keeps its name too; the caller removes it.
+///
+/// A hard link does it in one step on NTFS, ext4, APFS and the like. Where
+/// there are none (FAT, exFAT, some network shares), `to` is first created
+/// empty, only if it does not exist, which only one caller can do; that
+/// caller then renames `from` over its own empty file. Until then, `to` is
+/// an empty file, which no restore accepts, nor a checksum describes.
+fn place_new(from: &Path, to: &Path) -> io::Result<()> {
+    match fs::hard_link(from, to) {
+        Ok(()) => return sync_folder(to),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {}
+    }
+    fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    if let Err(e) = fs::rename(from, to) {
+        let _ = fs::remove_file(to);
+        return Err(e);
+    }
+    sync_folder(to)
+}
+
+/// Writes the new name of a file to the disk, on Linux and macOS (Windows
+/// has no way to do it from the standard library; NTFS journals it).
+fn sync_folder(file: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(dir) = file.parent().filter(|d| !d.as_os_str().is_empty()) {
+        File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    Ok(())
+}
+
+/// An I/O error that says what was being done, and to which file. Access
+/// denied gets the usual way out: on Windows, only an administrator creates
+/// files at the root of a drive (`C:\`).
+fn io_at(what: &str, path: &Path, e: io::Error) -> KivaError {
+    let hint = if e.kind() == io::ErrorKind::PermissionDenied {
+        ". Choose a folder you can write to (on Windows, not the root of a drive: %USERPROFILE%\\kivadb-backups, \
+         say)"
+    } else {
+        ""
+    };
+    KivaError::Io(io::Error::new(e.kind(), format!("cannot {what} {}: {e}{hint}", path.display())))
+}
+
 fn write_archive(inst: &Instance, scope: &Scope, path: &Path) -> Result<(String, Vec<String>, usize)> {
-    let file = Hashing::new(File::create(path)?);
+    let created = fs::OpenOptions::new().write(true).create_new(true).open(path);
+    let file = Hashing::new(created.map_err(|e| io_at("create the archive", path, e))?);
     let gz = GzEncoder::new(file, flate2::Compression::default());
     let mut w = Writer { tar: tar::Builder::new(gz), files: Vec::new(), storage_format: 0 };
     let names: Vec<String> = match scope {
