@@ -8,6 +8,7 @@
 use crate::auth::{self, Priv, Role};
 use crate::compress::Compression;
 use crate::engine::{IndexKind, VectorIndexKind};
+use crate::error::KivaError;
 use crate::exec::{key_for_read, uint, usage_line, word, Cur, Out, R};
 use crate::lexer::{Kind, Token};
 use crate::repl;
@@ -997,7 +998,9 @@ impl Session {
             let to = word(c.next(), "the new name")?;
             c.finish(&form)?;
             if from == self.ws {
-                return Err(format!("you cannot move the {noun} you are in."));
+                let verb =
+                    if a.first().is_some_and(|t| t.text.eq_ignore_ascii_case("rename")) { "rename" } else { "move" };
+                return Err(format!("you cannot {verb} the {noun} you are in: enter another one first (use default)."));
             }
             if let Some(p) = auth::project_of(&to) {
                 if !self.inst.project_exists(p) {
@@ -1128,21 +1131,29 @@ impl Session {
             }
             _ => None,
         };
+        // Named in a note or a hint only to a user who may enter it, so that
+        // `use` tells no one of a collection that `collection list` hides.
+        let reachable = in_project.clone().filter(|q| self.may_enter(q));
+        // A refusal of the name found first points to the project's collection.
+        let hint = |e: KivaError| match (&e, &reachable) {
+            (KivaError::Denied(_), Some(q)) => format!("{e}. {q} is in your project: use {q}"),
+            _ => e.to_string(),
+        };
         if self.inst.cfg().workspace_dir(&name).is_some() || name.contains('.') {
-            self.switch_workspace(&name)?;
+            self.switch_workspace(&name).map_err(hint)?;
             out.say(format!("Using collection '{name}' ({} keys).", self.engine.len()));
-            if let Some(q) = in_project {
+            if let Some(q) = &reachable {
                 out.say(format!("{q} also exists: use {q}"));
             }
         } else if self.inst.project_exists(&name) {
-            self.use_project(&name)?;
+            self.use_project(&name).map_err(hint)?;
             let inside =
                 self.inst.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name.as_str())).count();
             out.say(format!(
                 "Using project '{name}' ({inside} collection(s)). Choose one: use {name}.<collection> \
                  ('collection list' shows them)."
             ));
-            if let Some(q) = in_project {
+            if let Some(q) = &reachable {
                 out.say(format!("{q} also exists: use {q}"));
             }
         } else if let Some(q) = in_project {

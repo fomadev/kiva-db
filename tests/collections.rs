@@ -251,3 +251,88 @@ fn use_by_a_short_name_asks_the_same_grants() {
     assert_eq!(short, full, "the same refusal as the full name");
     assert!(short.contains("no access"), "{short}");
 }
+
+#[test]
+fn a_refused_short_name_points_to_the_project_and_hides_the_rest() {
+    let dir = TempDir::new("collections_use_hint");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "project create baak collections (cache, places, users)");
+    // A project and a collection outside a project, named like collections of baak.
+    ok(&mut admin, "project create places collections (demo)");
+    ok(&mut admin, "project create cache collections (demo)");
+    ok(&mut admin, "collection create users");
+    ok(&mut admin, r#"create user "analyst" identified by "pw" grant read on baak.places"#);
+    ok(&mut admin, r#"create user "u3" identified by "pw" grant read on users"#);
+    ok(&mut admin, "grant read on baak.places to u3");
+    ok(&mut admin, "config set auth_required true");
+
+    let mut s = Session::new(inst.clone(), false, None);
+    ok(&mut s, "auth analyst pw");
+    ok(&mut s, "use baak");
+    // The order stays: the project `places` comes first and is refused, with
+    // the way to the collection of the project the user may enter.
+    let err = fails(&mut s, "use places");
+    assert!(err.contains("no access to project 'places'"), "{err}");
+    assert!(err.contains("baak.places is in your project: use baak.places"), "{err}");
+    // The refusal changed nothing.
+    assert!(ok(&mut s, "whoami").contains("@ project 'baak', in no collection"));
+    // No hint toward a collection the user may not enter.
+    let err = fails(&mut s, "use cache");
+    assert!(err.contains("no access to project 'cache'") && !err.contains("baak.cache"), "{err}");
+    assert!(ok(&mut s, "use baak.places").starts_with("Using collection 'baak.places'"));
+
+    // The note names the project's collection only to who may enter it.
+    let mut u = Session::new(inst.clone(), false, None);
+    ok(&mut u, "auth u3 pw");
+    ok(&mut u, "use baak.places");
+    let used = ok(&mut u, "use users");
+    assert!(used.starts_with("Using collection 'users'") && !used.contains("baak.users"), "{used}");
+    ok(&mut admin, "use baak.places");
+    assert!(ok(&mut admin, "use users").contains("baak.users also exists: use baak.users"));
+}
+
+#[test]
+fn a_transaction_keeps_its_collection_whatever_the_name() {
+    let dir = TempDir::new("collections_use_txn");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "project create baak collections (cache, places)");
+    ok(&mut s, "use baak.places");
+    ok(&mut s, "begin");
+    ok(&mut s, "set t 1");
+    for cmd in
+        ["use cache", "use baak.cache", "use baak", "collection switch baak.cache", "workspace switch baak.cache"]
+    {
+        assert!(fails(&mut s, cmd).contains("inside a transaction"), "{cmd}");
+    }
+    ok(&mut s, "set t2 2");
+    ok(&mut s, "commit");
+    assert!(ok(&mut s, "whoami").contains("baak.places"));
+    assert_eq!(ok(&mut s, "get t2"), "t2: 2 [int]");
+    ok(&mut s, "use cache");
+    assert!(ok(&mut s, "get t").contains("(nil)") && ok(&mut s, "get t2").contains("(nil)"));
+    ok(&mut s, "begin");
+    ok(&mut s, "set r 1");
+    ok(&mut s, "rollback");
+    assert!(ok(&mut s, "get r").contains("(nil)"));
+}
+
+#[test]
+fn renaming_the_collection_in_use_says_rename() {
+    let dir = TempDir::new("collections_rename_in_use");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "project create baak collections (places)");
+    ok(&mut s, "use baak.places");
+    ok(&mut s, "set k 1");
+    let err = fails(&mut s, "collection rename baak.places to baak.locations");
+    assert!(err.contains("you cannot rename the collection you are in"), "{err}");
+    assert!(fails(&mut s, "workspace move baak.places to baak.locations").contains("cannot move the workspace"));
+    // Nothing changed.
+    assert!(ok(&mut s, "collection list").contains("baak.places"));
+    ok(&mut s, "use default");
+    ok(&mut s, "collection rename baak.places to baak.locations");
+    ok(&mut s, "use baak.locations");
+    assert_eq!(ok(&mut s, "get k"), "k: 1 [int]");
+}

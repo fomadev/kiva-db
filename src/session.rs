@@ -307,6 +307,18 @@ impl Session {
         self.enter(workspace, level)
     }
 
+    /// Whether `switch_workspace` would let this session into `workspace`,
+    /// from the stored account; nothing changes.
+    pub fn may_enter(&self, workspace: &str) -> bool {
+        match &self.user {
+            Some(u) if u.role == Role::Admin => true,
+            Some(u) => {
+                auth::get_user(&self.inst.system, &u.name).ok().flatten().is_some_and(|u| u.access(workspace).is_some())
+            }
+            None => false,
+        }
+    }
+
     /// Whether this session may still read its workspace, from the stored
     /// account: for a long wait, during which a grant may be revoked.
     pub fn check_reads_now(&self) -> Result<()> {

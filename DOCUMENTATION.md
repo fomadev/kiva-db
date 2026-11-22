@@ -2706,7 +2706,7 @@ Workspace 'places_travel' is now 'travel.places'. Its files did not move, and it
 ```
 
 * The data stays in the same folder; only the name changes. The grants on that workspace, and the users whose default workspace it was, follow it. A grant on a whole project (`travel.*`) applies to what the project holds, so moving a workspace out of `travel` takes it out of that grant.
-* It needs the admin role, and is refused while a session is in the workspace (`workspace 'places_travel' is in use`), as for the one you are in: run it when the applications are stopped, then give them the new name.
+* It needs the admin role, and is refused while a session is in the workspace (`workspace 'places_travel' is in use`), as for the one you are in (`you cannot move the workspace you are in: enter another one first`): run it when the applications are stopped, then give them the new name.
 * Applications that named the old workspace (`?workspace=`, `SELECT`, `kivadb -w`) must use the new name.
 * Replicas are disconnected and copy the master again, under the new names.
 * If KivaDB stops in the middle of a move (a crash, a power cut), the next start finishes it or takes it back, whichever `kiva.conf` says, and writes a line in the log: `[WARN] the move of workspace 'places_travel' to 'travel.places', stopped in the middle, was finished.` The workspace is reachable under one name, by the users who reached it before.
@@ -2749,6 +2749,7 @@ Using collection 'default' (6 keys).
 
 * After `use baak`, `collection list` lists the project's collections, and `whoami` says `@ project 'baak', in no collection`.
 * A name without a dot is looked for in this order: a collection outside a project (`lab`, `default`), then a project, then a collection of the current project, the one chosen by `use baak` or the one of the collection in use. So `use users`, in the project `baak`, enters `baak.users`. The current project comes last so that a name keeps the meaning it had: if `lab` exists outside a project and `baak.lab` too, `use lab` enters `lab` and adds `baak.lab also exists: use baak.lab`. A full name (`baak.users`) never looks into the current project, and neither do `collection switch` and `workspace switch`. A short name asks the same grants as the full one.
+* The note `also exists` names only a collection you may enter. When the name found first is refused, for instance the project `places` to a user who reads only `baak.places`, the order stays and the error ends with the collection of your project, if you may enter it: `permission denied: no access to project 'places'. baak.places is in your project: use baak.places`. A refusal says that the name exists (`no access`, where an unknown name gives `does not exist`), which `collection list` and `project list` do not show to that user.
 * A user may select a project where they can reach a collection, or that they manage. `use` is refused inside a transaction.
 
 **Creating a project with its collections:**
