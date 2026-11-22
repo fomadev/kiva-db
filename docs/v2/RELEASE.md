@@ -8,7 +8,7 @@ Before the tag:
 
 1. `version = "2.0.0-rc.N"` in `Cargo.toml` (and `Cargo.lock` rebuilt). The release stops if the tag and this version differ.
 2. `main` is green on Windows, Linux and macOS, with `KIVADB_V1_BIN` (the real 1.7.1), `KIVADB_RC2_BIN` (the real `2.0.0-rc.2`), `KIVADB_RC3_BIN` (the real `2.0.0-rc.3`) and `KIVADB_RC4_BIN` (the real `2.0.0-rc.4`) on Linux: the homes of all four open (`tests/compat.rs`, `tests/compat_rc2.rs`, `tests/compat_rc3.rs`, `tests/compat_rc4.rs`), one home goes from 1.7.1 through `rc.2` to this version, `rc.3` and `rc.4` still read a home this version wrote (for `rc.4`, a collection in `projects/<p>/<c>` and an expire event included), and the examples of the manual give the answers it shows (`tests/manual.rs`).
-3. `CHANGELOG.md` has its section `## Unreleased (2.0.0)`, with its `### Known limits`: the notes of the candidate are taken from it.
+3. `CHANGELOG.md` has its section `## Unreleased (2.0.0)`, with its `### Known limits`: the notes of the candidate are taken from it, keeping only the entries added or rewritten since the previous tag.
 4. The upgrade has been tried on a copy of a real 1.7.1 home, following [Chapter 33](../../DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20).
 
 What the tag does (`.github/workflows/build.yml`):
