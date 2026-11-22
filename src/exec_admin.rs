@@ -1115,10 +1115,26 @@ impl Session {
     /// project, a project, then a collection of the current project
     /// (`use baak` then `use places` enters `baak.places`). The last comes
     /// last so that a name that worked before keeps its meaning.
+    /// `use collection <name>` and `use project <name>` say which one is
+    /// meant: the collection of the current project, or the project.
     fn cmd_use(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "use <project>.<collection> | <collection> | <project>";
+        const USAGE: &str =
+            "use <project>.<collection> | <collection> | <project> | collection <name> | project <name>";
         if a.is_empty() {
             return Err(usage_line(USAGE));
+        }
+        // Two words only: `use collection` alone still enters a collection
+        // named `collection`.
+        if a.len() == 2 {
+            let kind = a[0].text.to_ascii_lowercase();
+            if kind == "collection" || kind == "project" {
+                let name = word(a.get(1), "a name")?;
+                return if kind == "collection" {
+                    self.use_collection_here(&name, out)
+                } else {
+                    self.use_project_named(&name, out)
+                };
+            }
         }
         let mut c = Cur::new(a);
         let name = word(c.next(), "a collection or a project")?;
@@ -1147,12 +1163,7 @@ impl Session {
             }
         } else if self.inst.project_exists(&name) {
             self.use_project(&name).map_err(hint)?;
-            let inside =
-                self.inst.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name.as_str())).count();
-            out.say(format!(
-                "Using project '{name}' ({inside} collection(s)). Choose one: use {name}.<collection> \
-                 ('collection list' shows them)."
-            ));
+            self.say_project(&name, out);
             if let Some(q) = &reachable {
                 out.say(format!("{q} also exists: use {q}"));
             }
@@ -1168,6 +1179,49 @@ impl Session {
                 "there is no collection or project named '{name}'{also} ('project list', 'collection list')."
             ));
         }
+        Ok(())
+    }
+
+    fn say_project(&self, name: &str, out: &mut Out) {
+        let inside = self.inst.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name)).count();
+        out.say(format!(
+            "Using project '{name}' ({inside} collection(s)). Choose one: use {name}.<collection> \
+             ('collection list' shows them)."
+        ));
+    }
+
+    /// `use collection <name>`: the collection `<name>` of the current
+    /// project and nothing else, neither a project nor a collection outside
+    /// a project of that name.
+    fn use_collection_here(&mut self, name: &str, out: &mut Out) -> R {
+        if name.contains('.') {
+            return Err(format!(
+                "use collection takes the name of a collection of the current project; for a full name: use {name}"
+            ));
+        }
+        if self.txn.is_some() {
+            return Err("cannot switch collection inside a transaction".into());
+        }
+        let Some(p) = self.current_project().map(str::to_string) else {
+            return Err("no current project: use <project> first, or use <project>.<collection>.".into());
+        };
+        let q = format!("{p}.{name}");
+        if self.inst.cfg().workspace_dir(&q).is_none() {
+            return Err(format!("collection '{q}' does not exist in project '{p}' ('collection list' shows them)."));
+        }
+        self.switch_workspace(&q)?;
+        out.say(format!("Using collection '{q}' ({} keys).", self.engine.len()));
+        Ok(())
+    }
+
+    /// `use project <name>`: the project, even when a collection outside a
+    /// project has its name.
+    fn use_project_named(&mut self, name: &str, out: &mut Out) -> R {
+        if let Some(p) = auth::project_of(name) {
+            return Err(format!("a project name has no '.': use project {p}"));
+        }
+        self.use_project(name)?;
+        self.say_project(name, out);
         Ok(())
     }
 

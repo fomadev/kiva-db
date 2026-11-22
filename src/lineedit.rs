@@ -120,6 +120,7 @@ fn followers(first: &str) -> &'static [&'static str] {
         "autocompact" => &["on", "off", "status", "threshold"],
         "workspace" | "collection" => &["list", "current", "switch", "create", "rename", "move", "remove"],
         "project" => &["list", "create", "remove"],
+        "use" => &["collection", "project"],
         "config" => &["list", "get", "set"],
         "create" => &["user", "index", "vector", "trigger"],
         "drop" => &["user", "index", "vector", "trigger"],
@@ -276,6 +277,7 @@ mod tests {
         assert!(complete("s").contains(&"stats".to_string()));
         assert_eq!(complete("get sim"), ["similar"]);
         assert_eq!(complete("workspace sw"), ["switch"]);
+        assert_eq!(complete("use coll"), ["collection"]);
         assert!(complete("compact x").is_empty());
     }
 

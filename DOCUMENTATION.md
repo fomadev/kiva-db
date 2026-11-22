@@ -2743,11 +2743,14 @@ kiva> use baak.places
 Using collection 'baak.places' (0 keys).
 kiva> use users
 Using collection 'baak.users' (0 keys).
+kiva> use collection places
+Using collection 'baak.places' (0 keys).
 kiva> use default
 Using collection 'default' (6 keys).
 ```
 
 * After `use baak`, `collection list` lists the project's collections, and `whoami` says `@ project 'baak', in no collection`.
+* **`use collection <name>`** is the explicit form, the one to prefer inside a project: it enters the collection `<name>` of the current project and looks at nothing else, neither a project nor a collection outside a project with that name. Without a current project it answers `no current project: use <project> first, or use <project>.<collection>.`; it takes no full name, which `use baak.places` enters. **`use project <name>`** selects the project even when a collection outside a project has its name, the one `use baak` enters then. `use collection` alone still enters a collection named `collection`. `collection use <name>`, another name of `collection switch`, stays strict: a full name, never the current project.
 * A name without a dot is looked for in this order: a collection outside a project (`lab`, `default`), then a project, then a collection of the current project, the one chosen by `use baak` or the one of the collection in use. So `use users`, in the project `baak`, enters `baak.users`. The current project comes last so that a name keeps the meaning it had: if `lab` exists outside a project and `baak.lab` too, `use lab` enters `lab` and adds `baak.lab also exists: use baak.lab`. A full name (`baak.users`) never looks into the current project, and neither do `collection switch` and `workspace switch`. A short name asks the same grants as the full one.
 * The note `also exists` names only a collection you may enter. When the name found first is refused, for instance the project `places` to a user who reads only `baak.places`, the order stays and the error ends with the collection of your project, if you may enter it: `permission denied: no access to project 'places'. baak.places is in your project: use baak.places`. A refusal says that the name exists (`no access`, where an unknown name gives `does not exist`), which `collection list` and `project list` do not show to that user.
 * A user may select a project where they can reach a collection, or that they manage. `use` is refused inside a transaction.
