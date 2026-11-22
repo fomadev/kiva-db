@@ -957,7 +957,7 @@ fn projects_group_workspaces_and_grants_name_them() {
     let mut lost = Session::new(inst.clone(), false, None);
     assert!(fails(&mut lost, "auth app@travel.nowhere pw").contains("does not exist"));
     assert!(fails(&mut lost, "whoami").contains("authentication required"));
-    assert!(ok(&mut app, "project list").contains("travel               2 workspace(s): cache, places"));
+    assert!(ok(&mut app, "project list").contains("travel               2 collection(s): cache, places"));
     // A grant on a whole project covers its workspaces created later.
     ok(&mut admin, "workspace create travel.logs");
     ok(&mut app, "workspace switch travel.logs");

@@ -142,7 +142,7 @@ fn a_project_is_created_with_its_collections_and_finished_after_a_crash() {
         for c in ["baak.cache", "baak.places", "baak.users"] {
             assert!(made.contains(c), "{made}");
         }
-        assert!(ok(&mut s, "project list").contains("3 workspace(s): cache, places, users"));
+        assert!(ok(&mut s, "project list").contains("3 collection(s): cache, places, users"));
         ok(&mut s, "use baak.users");
         ok(&mut s, "set u:1 1");
 
@@ -179,4 +179,75 @@ fn a_project_is_created_with_its_collections_and_finished_after_a_crash() {
     // What existed is untouched.
     ok(&mut s, "use baak.users");
     assert!(ok(&mut s, "get u:1").contains('1'));
+}
+
+#[test]
+fn use_finds_a_collection_of_the_current_project_last() {
+    let dir = TempDir::new("collections_use_short");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst.clone(), true, None);
+    ok(&mut s, "project create baak collections (cache, places, users, lab, other)");
+    ok(&mut s, "collection create lab");
+    ok(&mut s, "project create other");
+    ok(&mut s, "use baak.places");
+    ok(&mut s, r#"set city:1 "Kinshasa""#);
+
+    // After `use baak`, a collection of the project by its short name.
+    ok(&mut s, "use baak");
+    assert!(ok(&mut s, "use cache").starts_with("Using collection 'baak.cache' (0 keys)."));
+    // From a collection of the project too.
+    assert!(ok(&mut s, "use places").starts_with("Using collection 'baak.places' (1 keys)."));
+    assert_eq!(ok(&mut s, "get city:1"), "city:1: Kinshasa [string]");
+    assert_eq!(kivadb::api::handle(&mut s, &json!({"op": "whoami"})).unwrap()["collection"], "baak.places");
+    assert!(ok(&mut s, "use users").starts_with("Using collection 'baak.users'"));
+
+    // What worked before keeps its meaning: a collection outside a project
+    // first, then a project, each saying that the project has one too.
+    let lab = ok(&mut s, "use lab");
+    assert!(
+        lab.starts_with("Using collection 'lab' (0 keys).") && lab.contains("baak.lab also exists: use baak.lab"),
+        "{lab}"
+    );
+    ok(&mut s, "use baak");
+    let other = ok(&mut s, "use other");
+    assert!(other.starts_with("Using project 'other'") && other.contains("baak.other also exists"), "{other}");
+    ok(&mut s, "use baak");
+    assert!(ok(&mut s, "use default").starts_with("Using collection 'default'"));
+    assert!(ok(&mut s, "use baak.lab").starts_with("Using collection 'baak.lab'"));
+
+    // Out of a project, nothing new; inside, the error names both.
+    ok(&mut s, "use default");
+    assert!(fails(&mut s, "use places").contains("no collection or project named 'places' ("));
+    ok(&mut s, "use baak");
+    let err = fails(&mut s, "use nothing");
+    assert!(err.contains("named 'nothing', nor a collection 'baak.nothing' in the project 'baak'"), "{err}");
+    // A full name never looks into the project; neither does `collection switch`.
+    assert!(fails(&mut s, "use baak.baak.places").contains("does not exist"));
+    assert!(fails(&mut s, "collection switch places").contains("does not exist"));
+    assert!(fails(&mut s, "workspace switch places").contains("does not exist"));
+    // Not inside a transaction.
+    ok(&mut s, "use baak.cache");
+    ok(&mut s, "begin");
+    assert!(fails(&mut s, "use places").contains("inside a transaction"));
+    ok(&mut s, "rollback");
+}
+
+#[test]
+fn use_by_a_short_name_asks_the_same_grants() {
+    let dir = TempDir::new("collections_use_short_grants");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "project create baak collections (cache, places)");
+    ok(&mut admin, r#"create user "analyst" identified by "pw" grant read on baak.places"#);
+    ok(&mut admin, "config set auth_required true");
+
+    let mut s = Session::new(inst.clone(), false, None);
+    ok(&mut s, "auth analyst pw");
+    ok(&mut s, "use baak");
+    assert!(ok(&mut s, "use places").starts_with("Using collection 'baak.places'"));
+    assert!(fails(&mut s, "set k 1").contains("read access"));
+    let short = fails(&mut s, "use cache");
+    let full = fails(&mut s, "use baak.cache");
+    assert_eq!(short, full, "the same refusal as the full name");
+    assert!(short.contains("no access"), "{short}");
 }
