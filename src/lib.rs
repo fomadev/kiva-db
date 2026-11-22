@@ -16,6 +16,7 @@ pub mod changes;
 pub mod client;
 pub mod compress;
 pub mod config;
+pub mod crash;
 pub mod crypt;
 pub mod doc;
 pub mod docpath;
