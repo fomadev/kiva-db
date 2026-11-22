@@ -266,3 +266,101 @@ fn an_encrypted_home_stays_encrypted_in_its_backup() {
     assert!(err(&kivadb(&target, &["-e", "get secret"])).contains("encrypted"));
     assert!(out(&run(&target, &["-e", "get secret"])).contains("Kinshasa-0042"));
 }
+
+/// What a folder holds besides the archive and its checksum: no backup
+/// leaves its temporary file behind.
+fn leftovers(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".partial"))
+        .collect()
+}
+
+#[test]
+fn two_backups_to_one_file_never_mix() {
+    let dir = TempDir::new("backup_concurrent");
+    let inst = instance(&dir);
+    {
+        // Enough data for the two writes to overlap.
+        let mut s = Session::new(inst.clone(), true, None);
+        for i in 0..3000 {
+            ok(&mut s, &format!("set r:{i} random_string(1024)"));
+        }
+    }
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let archive = out_dir.join("same.tar.gz");
+    for round in 0..12 {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let (inst, archive, barrier) = (inst.clone(), archive.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    backup::backup(&inst, &Scope::Home, &archive)
+                })
+            })
+            .collect();
+        let results: Vec<_> = runs.into_iter().map(|t| t.join().unwrap()).collect();
+        let won: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+        assert_eq!(won.len(), 1, "round {round}: exactly one backup is written: {results:?}");
+        let lost = results.iter().find_map(|r| r.as_ref().err()).unwrap().to_string();
+        assert!(lost.contains("already exists"), "round {round}: {lost}");
+        // The archive is the winner's, whole, and its checksum describes it.
+        let checked = backup::check(&archive, &dir.path().join("check")).unwrap();
+        assert!(checked.lines.iter().any(|l| l.starts_with("Archive SHA-256 matches")), "{:?}", checked.lines);
+        let sum = std::fs::read_to_string(backup::checksum_path(&archive)).unwrap();
+        assert!(sum.starts_with(&won[0].sha256), "round {round}: {sum}");
+        drop(checked);
+        assert!(leftovers(&out_dir).is_empty(), "round {round}: {:?}", leftovers(&out_dir));
+        std::fs::remove_file(&archive).unwrap();
+        std::fs::remove_file(backup::checksum_path(&archive)).unwrap();
+    }
+}
+
+#[test]
+fn a_backup_never_replaces_a_file_and_says_what_failed() {
+    let dir = TempDir::new("backup_refusals");
+    let inst = instance(&dir);
+    ok(&mut Session::new(inst.clone(), true, None), "set k 1");
+
+    // A file already there is left as it was.
+    let there = dir.path().join("there.tar.gz");
+    std::fs::write(&there, b"an older archive").unwrap();
+    let e = backup::backup(&inst, &Scope::Home, &there).unwrap_err().to_string();
+    assert!(e.contains("already exists"), "{e}");
+    assert_eq!(std::fs::read(&there).unwrap(), b"an older archive");
+
+    // A folder that cannot be made: the error names what and where.
+    let file = dir.path().join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let e = backup::backup(&inst, &Scope::Home, &file.join("sub").join("b.tar.gz")).unwrap_err().to_string();
+    assert!(e.contains("cannot create the folder") && e.contains("a-file"), "{e}");
+
+    // The checksum cannot be written: no archive is left to be taken for a
+    // backup, and no temporary file.
+    let out = dir.path().join("out");
+    let archive = out.join("c.tar.gz");
+    std::fs::create_dir_all(backup::checksum_path(&archive)).unwrap();
+    let e = backup::backup(&inst, &Scope::Home, &archive).unwrap_err().to_string();
+    assert!(e.contains("cannot write the checksum"), "{e}");
+    assert!(!archive.exists(), "the archive went away with its checksum");
+    assert!(leftovers(&out).is_empty(), "{:?}", leftovers(&out));
+}
+
+#[test]
+fn a_backup_goes_to_a_folder_with_spaces_and_accents() {
+    let dir = TempDir::new("backup_names");
+    let home = dir.path().join("home");
+    fill(&home);
+    let archive = dir.path().join("mes sauvegardes").join("données é").join("rc test.tar.gz");
+    let o = kivadb(&home, &["backup", "-o", s(&archive)]);
+    assert!(o.status.success() && out(&o).contains("Backup written:"), "{}{}", out(&o), err(&o));
+    let o = kivadb(&home, &["restore", s(&archive), "--check"]);
+    assert!(out(&o).contains("Archive SHA-256 matches"), "{}{}", out(&o), err(&o));
+    let target = dir.path().join("restauré");
+    assert!(kivadb(&home, &["restore", s(&archive), "--target", s(&target)]).status.success());
+    assert!(out(&kivadb(&target, &["-e", "get user:1.city"])).contains("Goma"));
+}
