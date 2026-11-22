@@ -2679,8 +2679,8 @@ Workspace 'travel.cache' created at C:\Users\you\AppData\Roaming\KivaDB\projects
 kiva> project create school
 kiva> workspace create school.places
 kiva> project list
- school               1 workspace(s): places
- travel               2 workspace(s): cache, places
+ school               1 collection(s): places
+ travel               2 collection(s): cache, places
 kiva> workspace list travel
    travel.cache         write  C:\Users\you\AppData\Roaming\KivaDB\projects\travel\cache
    travel.places        write  C:\Users\you\AppData\Roaming\KivaDB\projects\travel\places
@@ -2741,12 +2741,14 @@ kiva> get user:1
 Error: permission denied: you are in project 'baak' but in no collection: 'collection list' shows its collections, 'use baak.<collection>' enters one
 kiva> use baak.places
 Using collection 'baak.places' (0 keys).
+kiva> use users
+Using collection 'baak.users' (0 keys).
 kiva> use default
 Using collection 'default' (6 keys).
 ```
 
 * After `use baak`, `collection list` lists the project's collections, and `whoami` says `@ project 'baak', in no collection`.
-* A collection outside a project (`lab`, `default`) is entered by its name. If a collection and a project have the same name, `use` enters the collection.
+* A name without a dot is looked for in this order: a collection outside a project (`lab`, `default`), then a project, then a collection of the current project, the one chosen by `use baak` or the one of the collection in use. So `use users`, in the project `baak`, enters `baak.users`. The current project comes last so that a name keeps the meaning it had: if `lab` exists outside a project and `baak.lab` too, `use lab` enters `lab` and adds `baak.lab also exists: use baak.lab`. A full name (`baak.users`) never looks into the current project, and neither do `collection switch` and `workspace switch`. A short name asks the same grants as the full one.
 * A user may select a project where they can reach a collection, or that they manage. `use` is refused inside a transaction.
 
 **Creating a project with its collections:**

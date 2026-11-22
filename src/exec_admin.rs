@@ -1108,7 +1108,10 @@ impl Session {
 
     /// `use <project>.<collection>` (or `use <collection>`) enters a
     /// collection; `use <project>` selects the project, in no collection.
-    /// A collection outside a project wins over a project of the same name.
+    /// A name without a dot is, in this order: a collection outside a
+    /// project, a project, then a collection of the current project
+    /// (`use baak` then `use places` enters `baak.places`). The last comes
+    /// last so that a name that worked before keeps its meaning.
     fn cmd_use(&mut self, a: &[Token], out: &mut Out) -> R {
         const USAGE: &str = "use <project>.<collection> | <collection> | <project>";
         if a.is_empty() {
@@ -1117,9 +1120,20 @@ impl Session {
         let mut c = Cur::new(a);
         let name = word(c.next(), "a collection or a project")?;
         c.finish(USAGE)?;
+        // The same name inside the current project, when it is a collection.
+        let in_project = match self.current_project() {
+            Some(p) if !name.contains('.') => {
+                let q = format!("{p}.{name}");
+                self.inst.cfg().workspace_dir(&q).is_some().then_some(q)
+            }
+            _ => None,
+        };
         if self.inst.cfg().workspace_dir(&name).is_some() || name.contains('.') {
             self.switch_workspace(&name)?;
             out.say(format!("Using collection '{name}' ({} keys).", self.engine.len()));
+            if let Some(q) = in_project {
+                out.say(format!("{q} also exists: use {q}"));
+            }
         } else if self.inst.project_exists(&name) {
             self.use_project(&name)?;
             let inside =
@@ -1128,9 +1142,19 @@ impl Session {
                 "Using project '{name}' ({inside} collection(s)). Choose one: use {name}.<collection> \
                  ('collection list' shows them)."
             ));
+            if let Some(q) = in_project {
+                out.say(format!("{q} also exists: use {q}"));
+            }
+        } else if let Some(q) = in_project {
+            self.switch_workspace(&q)?;
+            out.say(format!("Using collection '{q}' ({} keys).", self.engine.len()));
         } else {
+            let also = match self.current_project() {
+                Some(p) if !name.contains('.') => format!(", nor a collection '{p}.{name}' in the project '{p}'"),
+                _ => String::new(),
+            };
             return Err(format!(
-                "there is no collection or project named '{name}' ('project list', 'collection list')."
+                "there is no collection or project named '{name}'{also} ('project list', 'collection list')."
             ));
         }
         Ok(())
@@ -1256,7 +1280,7 @@ impl Session {
                     continue;
                 }
                 let list: Vec<&str> = inside.iter().map(|w| &w[p.len() + 1..]).collect();
-                out.say(format!(" {p:<20} {} workspace(s): {}", list.len(), list.join(", ")));
+                out.say(format!(" {p:<20} {} collection(s): {}", list.len(), list.join(", ")));
             }
             Ok(())
         } else if c.eat("create") {
