@@ -213,6 +213,16 @@ fn a_crash_during_recovery_leaves_it_to_the_next_start() {
     crash_at(dir.path(), "open.before_truncate", 1, &["get account:alpha"]);
     crash_at(dir.path(), "open.after_truncate", 1, &["get account:alpha"]);
     assert_eq!(recovered(dir.path()), BEFORE);
+    // Each attempt kept the bytes it was about to cut, in a copy of its own:
+    // the same bytes each time.
+    let kept: Vec<Vec<u8>> = std::fs::read_dir(dir.path().join("data"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("store.kiva.cut-"))
+        .map(|p| std::fs::read(p).unwrap())
+        .collect();
+    assert_eq!(kept.len(), 2, "one copy per attempt that reached the cut");
+    assert!(!kept[0].is_empty() && kept[0] == kept[1]);
     // And the accounts take a new transfer as usual.
     let o = kivadb(dir.path(), None, &TRANSFER);
     assert!(text(&o).contains("Transaction committed"), "{}", text(&o));
@@ -237,4 +247,128 @@ fn no_crash_point_fires_unless_armed() {
         .unwrap();
     assert!(o.status.success() && text(&o).contains("Transaction committed"), "{}", text(&o));
     assert_eq!(recovered(dir.path()), AFTER);
+}
+
+/// F13. A server, four clients making transfers at the same time, and the
+/// server stopped at the `hit`-th batch reaching `point`. After the restart:
+/// the total is whole, and every transfer a client was told committed is
+/// there; only those whose answer never came may or may not be.
+fn concurrent_case(tag: &str, point: &str, hit: u64, made_expected: u64, extra: &[&str]) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = accounts(tag, extra);
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_kivadb"));
+    server
+        .arg("serve")
+        .arg("--home")
+        .arg(dir.path())
+        .args(["--port", &port.to_string(), "--no-http"])
+        .env("KIVADB_NO_UPDATE_CHECK", "1")
+        .env_remove("KIVADB_ENCRYPTION_KEY")
+        .env("KIVADB_CRASH_ARMED", "1")
+        .env("KIVADB_CRASH_POINT", point)
+        .env("KIVADB_CRASH_HIT", hit.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = server.spawn().unwrap();
+    let start = Instant::now();
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(child.try_wait().unwrap().is_none(), "the server stopped before listening");
+        assert!(start.elapsed() < Duration::from_secs(30), "the server does not listen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let clients: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // (answered commits, commits sent and never answered)
+                let (mut acked, mut unknown) = (0u64, 0u64);
+                let Ok(conn) = TcpStream::connect(("127.0.0.1", port)) else { return (acked, unknown) };
+                conn.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                let mut out = conn.try_clone().unwrap();
+                let mut lines = BufReader::new(conn);
+                let mut ask = |cmd: &str| -> Option<String> {
+                    out.write_all(format!("{cmd}\n").as_bytes()).ok()?;
+                    let mut line = String::new();
+                    match lines.read_line(&mut line) {
+                        Ok(n) if n > 0 => Some(line.trim_end().to_string()),
+                        _ => None,
+                    }
+                };
+                while !stop.load(Ordering::SeqCst) {
+                    let Some(_) = ask("begin") else { break };
+                    let (Some(a), Some(b)) = (ask("get account:alpha"), ask("get account:beta")) else { break };
+                    let (a, b) = (value(&a, "account:alpha"), value(&b, "account:beta"));
+                    let (Some(_), Some(_)) = (
+                        ask(&format!("update account:alpha {}", a - 1)),
+                        ask(&format!("update account:beta {}", b + 1)),
+                    ) else {
+                        break;
+                    };
+                    match ask("commit") {
+                        Some(t) if t.contains("Transaction committed") => acked += 1,
+                        Some(t) => assert!(t.contains("modified by another session"), "{t}"),
+                        None => {
+                            unknown += 1;
+                            break;
+                        }
+                    }
+                }
+                (acked, unknown)
+            })
+        })
+        .collect();
+
+    // The server must stop at the point, by itself.
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if start.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("{point}: the server was not stopped within 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop.store(true, Ordering::SeqCst);
+    let o = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{point}: the server was not stopped:\n{}", text(&o));
+    let marks: Vec<&str> = stderr.lines().filter(|l| l.starts_with("KIVADB-CRASH-POINT ")).collect();
+    assert_eq!(marks, [format!("KIVADB-CRASH-POINT {point}")], "{point}: stopped elsewhere:\n{}", text(&o));
+    let (acked, unknown) = clients.into_iter().map(|c| c.join().unwrap()).fold((0, 0), |(a, u), (x, y)| (a + x, u + y));
+
+    let (alpha, beta) = recovered(dir.path());
+    let made = (100_000 - alpha) as u64;
+    assert_eq!(beta, 100_000 + made as i64);
+    eprintln!("{point}: {made} transfers found, {acked} answered, {unknown} without an answer");
+    assert!(acked >= 1, "{point}: no transfer was answered before the crash");
+    assert!(
+        acked <= made && made <= acked + unknown,
+        "{point}: {made} transfers found, {acked} answered, {unknown} without an answer"
+    );
+    // Every batch here is a transfer: the one stopped is there or not, as
+    // its point says, and every one before it.
+    assert_eq!(made, made_expected, "{point}");
+}
+
+#[test]
+fn concurrent_commits_stopped_after_the_write() {
+    concurrent_case("crash_concurrent_append", "batch.after_append", 40, 40, &[]);
+}
+
+#[test]
+fn concurrent_commits_with_sync_writes_stopped_before_the_fsync() {
+    // Group commit: other sessions may wait on the same fsync.
+    concurrent_case("crash_concurrent_sync", "batch.before_sync", 40, 40, &["config set sync_writes true"]);
+}
+
+#[test]
+fn concurrent_commits_stopped_halfway_through_a_write() {
+    concurrent_case("crash_concurrent_torn", "batch.torn_append", 40, 39, &[]);
 }

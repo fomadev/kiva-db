@@ -2599,7 +2599,7 @@ When that happens, start again: `begin`, read the fresh values, redo the changes
 
 ### 13.7 Guarantees
 
-* **Atomic on disk.** A committed transaction is written as one batch whose last record marks the commit. If the machine stops in the middle, the incomplete batch is ignored at the next start. If one record of a batch is damaged on the disk, the whole batch is left out at the next start, never a part of it, and the log of the start says so (`1 transaction(s) left out whole`); `kivadb doctor` names the damaged record, and a backup brings the transaction back.
+* **Atomic on disk.** A committed transaction is written as one batch whose last record marks the commit. If the machine stops in the middle, the incomplete batch is ignored at the next start, and its bytes are kept in a copy. If a record written after the last clean stop is damaged on the disk, the workspace is not opened at all, and nothing in its file is changed ([17.2](#172-what-survives-what)): no part of a transaction is applied, and none is left out without a word.
 * **Durable when answered.** A crash or kill of the process loses no committed transaction: its records reached the operating system before `commit` answers. Against a power cut, only with `sync_writes = true`, which waits for the disk ([17.2](#172-what-survives-what)). A client whose connection drops before the answer to `commit` cannot know whether it was made: read again before trying once more.
 * **Conflicts on the keys written.** A commit is refused only when a key it writes changed since `begin` ([13.6](#136-conflicts-between-users)). A key that a transaction only reads is not checked: write the keys a decision depends on, as a transfer writes both accounts.
 * **Leaving cancels.** Closing the shell or losing the connection with a transaction open is a rollback.
@@ -3273,7 +3273,7 @@ The key id (`5d1e07a2`) identifies the key without revealing it.
 * each record of the data file: its key and its value, together. The record's header (sizes, type, dates of writing and expiry) stays readable, so that KivaDB can find its way through the file, but it is authenticated with the record: changing any byte of a record, even with its checksum fixed, makes it rejected instead of read;
 * the index snapshot (`.hint`), which lists every key;
 * the HNSW graphs (`.graphs`), which hold keys and vectors;
-* copies made by KivaDB (`.bak`, the temporary file of a compaction), which are copies of encrypted records.
+* copies made by KivaDB (`.bak-<time>`, `.cut-<time>`, the temporary file of a compaction), which are copies of encrypted records.
 
 Every encryption uses a fresh random number (nonce): the same value written twice never gives the same bytes.
 
@@ -3344,7 +3344,8 @@ kiva> stats
 | Event | Result |
 | :--- | :--- |
 | The shell or server is closed normally | Nothing is lost |
-| The process crashes or is killed | Nothing is lost. A write that was cut in half is discarded at the next start |
+| The process crashes or is killed | Nothing is lost. A write that was cut in half is discarded at the next start; its bytes are kept in a copy |
+| A record written before the crash is damaged on the disk | The workspace is not opened, and nothing in its file is changed: see below |
 | Power failure or operating system crash | By default, up to the last second of writes can be lost. With `sync_writes = true`, nothing is |
 | A transaction was open | It is as if it never started |
 | A compaction was running | The original file is intact; the unfinished copy is thrown away |
@@ -3377,8 +3378,26 @@ Other clients can read a write a few milliseconds before its fsync ends; only it
 After an unclean stop, the shell tells you what it did:
 
 ```text
-[INFO] Recovered after an unclean shutdown: 37 bytes of incomplete log discarded.
+[INFO] Recovered after an unclean shutdown: 37 bytes of incomplete log discarded (kept in C:\Users\you\AppData\Roaming\KivaDB\data\store.kiva.cut-1763820000000).
 ```
+
+**What a start reads again, and what it refuses.** A clean stop writes the index snapshot (`store.kiva.hint`); after a crash, the start reads again the part of the log written since, record by record. Only one thing is mended without asking: the end of the file cut short by the crash, a record missing bytes with nothing valid after it, or an end the system allotted but never wrote (zeros, after a power cut). A crash cuts a write short; it does not change the bytes of a record. So a start that finds anything else does not open the workspace:
+
+* a whole record whose checksum does not match, the last one of the file included;
+* an encrypted record that fails its authentication;
+* a record header that no record could have, or whose size runs past the end of the file although a valid record follows it.
+
+```text
+Error: ERR_DATA_CORRUPTED: C:\Users\you\AppData\Roaming\KivaDB\data\store.kiva is damaged at byte 109:
+a whole record whose checksum does not match. KivaDB did not open it and changed nothing in it. Restore this
+workspace from a backup (kivadb restore), keeping a copy of the file; 'kivadb doctor' describes the damage
+```
+
+Applying what follows a damaged record could apply part of a transaction; leaving it out would lose what it holds without a word. KivaDB does neither: it changes nothing, and says where the damage is. The other workspaces open as usual; a damaged `default` workspace or system database stops the start. `kivadb doctor` names the damage without opening anything ([30.1](#301-starting)). Restore the workspace from a backup ([17.7](#177-backups)), and keep the damaged file: what it holds after the damage is still there.
+
+The format has no marker that tells a write cut short from damage for sure. The one case it cannot tell: the size in the header of the **very last** record changed so that it runs past the end of the file, with nothing valid after it. That is taken for a write cut short, as after a crash: the transaction it ends is left out, and its bytes are kept in the `store.kiva.cut-<time>` copy, named at the start.
+
+Bytes are never cut away without that copy: it is written and synced to the disk first, under a name no other file has, and a start that cannot write it does not cut anything.
 
 ### 17.3 Compaction
 
@@ -3424,7 +3443,7 @@ Checking 11 entries...
 Done.
 ```
 
-If some records are damaged (failing disk, file modified by another program), `check repair` saves a copy of the data file next to it (`store.kiva.bak`) and removes the unreadable entries:
+If some records are damaged (failing disk, file modified by another program), `check repair` saves a copy of the data file next to it (`store.kiva.bak-<time>`, never over an earlier copy) and removes the unreadable entries:
 
 ```text
 kiva> check repair
@@ -3432,12 +3451,14 @@ Checking 3 entries...
   OK: 2
   CORRUPTED: 1
     - victim
-  Backup saved to C:\Users\you\AppData\Roaming\KivaDB\data\store.kiva.bak
+  Backup saved to C:\Users\you\AppData\Roaming\KivaDB\data\store.kiva.bak-1763820000000
   Repairing... 1 entries removed.
 Done.
 ```
 
 A removed entry cannot be recovered by KivaDB; restore it from your own backup or from a replica.
+
+`check` reads the records the workspace holds now; it runs on a workspace that opens. A record damaged after the last clean stop keeps the workspace from opening ([17.2](#172-what-survives-what)). A compaction that meets a damaged record does not carry it over, and keeps a copy of the whole file first (`store.kiva.bak-<time>`).
 
 ### 17.5 Compression
 
@@ -3755,7 +3776,8 @@ KivaDB/
 | `store.kiva.hint` | Index snapshot for fast start | Rebuilt; the next start is slower |
 | `store.kiva.meta` | Definitions of the secondary indexes, vector indexes and schemas, and the settings of the change journal | Indexes and schemas must be created again. A damaged file stops the opening of the workspace rather than open it without them ([30.1](#301-starting)) |
 | `store.kiva.lock` | Prevents two processes from opening the files | Recreated |
-| `store.kiva.bak` | Copy made before a repair | - |
+| `store.kiva.bak-<time>` | Copy of the whole file, made before a repair, or by a compaction that leaves damaged records out; never replaced | - |
+| `store.kiva.cut-<time>` | The bytes a start cut away after a crash (a write cut short); never replaced | - |
 
 ### 19.3 The principle: an append-only log
 
@@ -6280,7 +6302,7 @@ These homes are kept in the repository and opened by every test run of 2.0 (`tes
    ```
 
    It is the only way back once a workspace holds a date ([33.7](#337-going-back-to-1x)).
-3. **Check the home** with `kivadb doctor` after the upgrade ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)); 1.7.1 has no `doctor`, but `check` verifies every record ([17.4](#174-integrity-check)). Fix what it reports first: an upgrade is not the moment to discover a full disk.
+3. **Check the home** with `kivadb doctor` after the upgrade ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)); 1.7.1 has no `doctor`, but `check` verifies every record ([17.4](#174-integrity-check)). Fix what it reports first: an upgrade is not the moment to discover a full disk. Stop 1.7.1 cleanly before the upgrade (`kivadb stop`): 2.0 refuses to open a workspace with a record damaged after its last clean stop, where 1.x skipped it in silence ([17.2](#172-what-survives-what)). Run `check` in each workspace with 1.7.1 first: a record it reports is restored from a backup before the upgrade.
 
 ### 33.3 Upgrading one server
 

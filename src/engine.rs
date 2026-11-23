@@ -188,6 +188,8 @@ pub struct EngineStats {
     pub load_mode: &'static str,
     pub load_ms: f64,
     pub recovered_bytes: u64,
+    /// The copy of the bytes cut away at start (`store.kiva.cut-<ms>`).
+    pub recovered_copy: Option<PathBuf>,
     pub recovered_compaction: bool,
     pub corrupted_detected: u64,
     /// (timestamp, ok, corrupted) of the last `check`.
@@ -980,6 +982,8 @@ struct LoadInfo {
     mode: &'static str,
     ms: f64,
     recovered_bytes: u64,
+    /// Where the bytes cut away at start were kept.
+    recovered_copy: Option<PathBuf>,
     recovered_compaction: bool,
 }
 
@@ -1245,7 +1249,9 @@ pub fn unique_conflicts(path: &Path, keys: Option<&Keys>) -> Result<Vec<String>>
     parse_file_header(&head).map_err(KivaError::Corrupted)?;
     let mut index = BTreeMap::new();
     let mut seq = 0;
-    scan_log(&file, FILE_HEADER_LEN, len, &mut index, &mut seq, keys, false)?;
+    if let Some(d) = scan_log(&file, FILE_HEADER_LEN, len, &mut index, &mut seq, keys, false)?.damage {
+        return Err(damaged_file(path, &d));
+    }
     let now = now_ms();
     for (key, e) in &index {
         if !e.ty.is_doc() || e.is_expired(now) || !indexes.iter().any(|s| crate::util::glob_match(&s.pattern, key)) {
@@ -1285,16 +1291,185 @@ fn validate_key(key: &str) -> Result<()> {
 }
 
 struct ScanOutcome {
-    /// Length of the valid prefix of the log.
+    /// Length of the valid prefix of the log: less than the file only when
+    /// it ends in a write cut short, whose bytes `Engine::open` cuts away.
     end: u64,
-    corrupted: u64,
-    /// Batches left out whole because one of their records was damaged.
-    dropped_txns: u64,
+    /// Where the log is damaged, and how. The scan stops there and nothing
+    /// after it is applied: the file is not opened.
+    damage: Option<Damage>,
+}
+
+struct Damage {
+    at: u64,
+    what: String,
+}
+
+/// The message of a data file that is not opened because it is damaged.
+fn damaged_file(path: &Path, d: &Damage) -> KivaError {
+    KivaError::Corrupted(format!(
+        "{} is damaged at byte {}: {}. KivaDB did not open it and changed nothing in it. Restore this workspace \
+         from a backup (kivadb restore), keeping a copy of the file; 'kivadb doctor' describes the damage",
+        path.display(),
+        d.at,
+        d.what
+    ))
+}
+
+/// A record header that a record written by KivaDB could have: a key of 1
+/// to `MAX_KEY_LEN` bytes, a value no larger than a stored value can be, a
+/// known type.
+fn plausible_header(h: &RecHeader) -> bool {
+    h.k_size >= 1
+        && h.k_size as usize <= MAX_KEY_LEN
+        && h.v_size as u64 <= STORED_VALUE_MAX
+        && (h.flags & FLAG_TOMBSTONE != 0 || Type::from_u8(h.ty).is_some())
+}
+
+/// The largest stored value: `MAX_VALUE_LEN`, with room for what
+/// compression and encryption add.
+const STORED_VALUE_MAX: u64 = MAX_VALUE_LEN as u64 + (1 << 20);
+
+/// Whether the CRC of the record of `total` bytes at `at` matches `crc`,
+/// read in pieces.
+fn record_crc_matches(file: &File, at: u64, total: u64, crc: u32) -> std::io::Result<bool> {
+    let mut f = file;
+    f.seek(SeekFrom::Start(at + 4))?;
+    let mut left = total - 4;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = vec![0u8; (left.min(1 << 20)) as usize];
+    while left > 0 {
+        let n = left.min(buf.len() as u64) as usize;
+        f.read_exact(&mut buf[..n])?;
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(hasher.finalize() == crc)
+}
+
+/// The first byte after `from` where a whole record with a matching CRC
+/// starts, if any.
+fn valid_record_after(file: &File, from: u64, file_len: u64) -> std::io::Result<Option<u64>> {
+    const CHUNK: u64 = 1 << 20;
+    let mut f = file;
+    let mut base = from;
+    let mut buf = Vec::new();
+    while base + REC_HEADER_LEN as u64 <= file_len {
+        let want = (CHUNK + REC_HEADER_LEN as u64).min(file_len - base) as usize;
+        buf.resize(want, 0);
+        f.seek(SeekFrom::Start(base))?;
+        f.read_exact(&mut buf)?;
+        let offsets = (want - REC_HEADER_LEN + 1).min(CHUNK as usize);
+        for i in 0..offsets {
+            let h = parse_header(&buf[i..]);
+            let at = base + i as u64;
+            if plausible_header(&h)
+                && at + h.total_len() <= file_len
+                && record_crc_matches(file, at, h.total_len(), h.crc)?
+            {
+                return Ok(Some(at));
+            }
+        }
+        base += CHUNK;
+    }
+    Ok(None)
+}
+
+/// What the bytes from `at` to the end of the file are, when no whole
+/// record starts there: `None` for the end of a write cut short (a crash),
+/// or what makes them damage instead.
+///
+/// The format has no marker that tells the two apart for sure. A crash of
+/// the process cuts a write short: the last record is missing bytes, and
+/// nothing valid comes after it. So is a power cut that left the end of the
+/// file unwritten (zeros). Anything else is taken for damage: a header no
+/// record could have, or a header that does not frame its record although a
+/// valid record follows it. A damaged header of the very last record that
+/// still looks possible cannot be told from a cut write: it is cut away as
+/// one, its bytes kept (`keep_copy`).
+pub(crate) fn tail_verdict(file: &File, at: u64, file_len: u64) -> std::io::Result<Option<String>> {
+    let mut f = file;
+    // Space the system gave the file and never filled, as at a power cut.
+    let mut zeros = true;
+    let mut pos = at;
+    let mut buf = vec![0u8; ((file_len - at).min(1 << 20)) as usize];
+    f.seek(SeekFrom::Start(at))?;
+    while pos < file_len {
+        let n = (file_len - pos).min(buf.len() as u64) as usize;
+        f.read_exact(&mut buf[..n])?;
+        if buf[..n].iter().any(|b| *b != 0) {
+            zeros = false;
+            break;
+        }
+        pos += n as u64;
+    }
+    if zeros {
+        return Ok(None);
+    }
+    if file_len - at >= REC_HEADER_LEN as u64 {
+        let mut hdr = [0u8; REC_HEADER_LEN];
+        f.seek(SeekFrom::Start(at))?;
+        f.read_exact(&mut hdr)?;
+        let h = parse_header(&hdr);
+        if !plausible_header(&h) {
+            return Ok(Some(format!(
+                "a record header no record could have (key of {} bytes, value of {} bytes, type {})",
+                h.k_size, h.v_size, h.ty
+            )));
+        }
+    }
+    Ok(valid_record_after(file, at + 1, file_len)?.map(|next| {
+        format!("a record header that does not frame its record, although a valid record follows at byte {next}")
+    }))
+}
+
+/// Copies bytes `from..to` of `file` into a new file next to `path`
+/// (`store.kiva.<kind>-<milliseconds>`), never one that exists, and writes
+/// it to the disk before returning. A copy that fails is removed and the
+/// error returned: nothing is cut or replaced without its copy.
+pub(crate) fn keep_copy(file: &File, path: &Path, kind: &str, from: u64, to: u64) -> Result<PathBuf> {
+    let ms = now_ms();
+    let mut attempt = 0;
+    let (mut out, kept) = loop {
+        let ext = if attempt == 0 { format!("{kind}-{ms}") } else { format!("{kind}-{ms}-{attempt}") };
+        let p = sidecar(path, &ext);
+        match OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(f) => break (f, p),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 1000 => attempt += 1,
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let copied = (|| -> std::io::Result<()> {
+        let mut src = file;
+        src.seek(SeekFrom::Start(from))?;
+        let n = std::io::copy(&mut src.take(to - from), &mut out)?;
+        if n != to - from {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("{} bytes copied out of {}", n, to - from),
+            ));
+        }
+        out.sync_all()?;
+        crate::backup::sync_folder(&kept)
+    })();
+    if let Err(e) = copied {
+        drop(out);
+        let _ = fs::remove_file(&kept);
+        return Err(KivaError::Io(std::io::Error::new(
+            e.kind(),
+            format!("could not keep a copy in {}: {e}", kept.display()),
+        )));
+    }
+    Ok(kept)
 }
 
 /// Replays the log from `start`, applying records to `index`. Encrypted
 /// records are decrypted with `keys`; one that needs a key this engine does
 /// not have stops the scan with an error.
+///
+/// A damaged record stops the scan ([`ScanOutcome::damage`]): applying what
+/// follows it could apply part of a transaction, and leaving it out would
+/// lose what it holds without a word. Only a write cut short at the end of
+/// the file ([`tail_verdict`]) is left out.
 fn scan_log(
     file: &File,
     start: u64,
@@ -1307,17 +1482,14 @@ fn scan_log(
     let mut r = BufReader::with_capacity(1 << 20, file);
     r.seek(SeekFrom::Start(start))?;
     let mut pos = start;
-    let mut corrupted = 0u64;
     let mut hdr = [0u8; REC_HEADER_LEN];
     let mut body: Vec<u8> = Vec::new();
     // Records of an atomic batch wait here until its commit record shows up.
     let mut pending: Vec<(String, Option<Entry>)> = Vec::new();
     let mut pending_start = 0u64;
-    // A batch one of whose records is damaged: the rest of it, up to its
-    // commit record, is left out too, so that it applies whole or not at
-    // all. From the byte where that batch starts.
-    let mut poisoned: Option<u64> = None;
-    let mut dropped_txns = 0u64;
+    // Where the records stop being whole: a write cut short, or damage.
+    let mut stopped = false;
+    let mut damage = None;
 
     let mut apply = |index: &mut BTreeMap<String, Entry>, key: String, entry: Option<Entry>| {
         *seq += 1;
@@ -1334,13 +1506,15 @@ fn scan_log(
 
     while pos < file_len {
         if file_len - pos < REC_HEADER_LEN as u64 {
-            break; // torn header
+            stopped = true; // a header cut short
+            break;
         }
         r.read_exact(&mut hdr)?;
         let h = parse_header(&hdr);
         let total = h.total_len();
         if h.k_size == 0 || pos + total > file_len {
-            break; // torn or unframed record
+            stopped = true; // a record cut short, or a damaged header
+            break;
         }
         body.resize(h.k_size as usize + h.v_size as usize, 0);
         r.read_exact(&mut body)?;
@@ -1358,7 +1532,13 @@ fn scan_log(
                 rec.extend_from_slice(&body);
                 match crypt::open_record(keys, &rec) {
                     Ok(kv) => opened = Some(kv),
-                    Err(crypt::OpenError::Tampered) => {}
+                    Err(crypt::OpenError::Tampered) => {
+                        damage = Some(Damage {
+                            at: pos,
+                            what: "an encrypted record that fails its authentication (altered, or damaged)".into(),
+                        });
+                        break;
+                    }
                     Err(e) => return Err(e.into_error("this workspace")),
                 }
             } else if require_encryption {
@@ -1375,26 +1555,18 @@ fn scan_log(
         let ty = Type::from_u8(h.ty);
         let valid = crc_ok && key.is_some() && (tombstone || ty.is_some());
         if !valid {
-            if pos + total == file_len {
-                break; // last record: a torn write
-            }
-            corrupted += 1;
-            // Its flags may be damaged too: a batch is taken as broken when
-            // records of it came before, or when this one says it is in a
-            // batch that it does not close.
-            let in_batch = !pending.is_empty() || h.flags & FLAG_TXN != 0;
-            let closes = h.flags & FLAG_TXN_COMMIT != 0;
-            if in_batch && poisoned.is_none() {
-                dropped_txns += 1;
-                if !closes {
-                    poisoned = Some(if pending.is_empty() { pos } else { pending_start });
-                }
-            } else if closes {
-                poisoned = None;
-            }
-            pending.clear();
-            pos += total;
-            continue;
+            // A whole record: a crash cuts a write short, it does not change
+            // the bytes of a record. Damage, wherever it is, the last record
+            // included.
+            let what = if !crc_ok {
+                "a whole record whose checksum does not match".to_string()
+            } else if key.is_none() {
+                "a record whose key cannot be read".to_string()
+            } else {
+                format!("a record of an unknown type ({})", h.ty)
+            };
+            damage = Some(Damage { at: pos, what });
+            break;
         }
         let key = key.unwrap().to_string();
         let entry = if tombstone {
@@ -1419,12 +1591,7 @@ fn scan_log(
                 version: 0,
             })
         };
-        if h.flags & FLAG_TXN != 0 && poisoned.is_some() {
-            // The rest of a broken batch: left out, up to its commit.
-            if h.flags & FLAG_TXN_COMMIT != 0 {
-                poisoned = None;
-            }
-        } else if h.flags & FLAG_TXN != 0 {
+        if h.flags & FLAG_TXN != 0 {
             if pending.is_empty() {
                 pending_start = pos;
             }
@@ -1436,20 +1603,18 @@ fn scan_log(
             }
         } else {
             pending.clear();
-            poisoned = None;
             apply(index, key, entry);
         }
         pos += total;
     }
-    // A batch without its commit record never happened; nor does a broken
-    // one that the file ends in, whose bytes go with it, so that a batch
-    // written after them later is not taken for its end.
-    let end = match poisoned {
-        Some(start) => start,
-        None if pending.is_empty() => pos,
-        None => pending_start,
-    };
-    Ok(ScanOutcome { end, corrupted, dropped_txns })
+    drop(r);
+    if damage.is_none() && stopped {
+        damage = tail_verdict(file, pos, file_len)?.map(|what| Damage { at: pos, what });
+    }
+    // A batch without its commit record never happened: the file is cut
+    // where it starts.
+    let end = if pending.is_empty() { pos } else { pending_start };
+    Ok(ScanOutcome { end, damage })
 }
 
 impl Inner {
@@ -2243,8 +2408,8 @@ impl Engine {
         let mut file_len = file.metadata()?.len();
         let mut index = BTreeMap::new();
         let mut seq = 0u64;
-        let mut corrupted = 0u64;
         let mut recovered_bytes = 0u64;
+        let mut recovered_copy = None;
         let file_id;
         let format;
         let mode;
@@ -2289,34 +2454,21 @@ impl Engine {
                 opts.keys.as_deref(),
                 opts.require_encryption,
             )?;
-            corrupted = outcome.corrupted;
+            if let Some(d) = outcome.damage {
+                return Err(damaged_file(&path, &d));
+            }
             if outcome.end < file_len {
+                // A write cut short by a crash: never part of an answered
+                // commit, but its bytes are kept before the file is cut, as
+                // the format cannot tell it for sure from damage at the very
+                // end (`tail_verdict`).
                 recovered_bytes = file_len - outcome.end;
-                // Losing a few bytes is a torn final write. Losing a lot means
-                // the framing broke mid-file: keep a copy before cutting.
-                if recovered_bytes > 4 * 1024 * 1024 {
-                    let _ = fs::copy(&path, sidecar(&path, "bak"));
-                }
+                recovered_copy = Some(keep_copy(&file, &path, "cut", outcome.end, file_len)?);
                 crate::crash_point!("open.before_truncate");
                 file.set_len(outcome.end)?;
                 file.sync_data()?;
                 file_len = outcome.end;
                 crate::crash_point!("open.after_truncate");
-            }
-            if outcome.corrupted > 0 {
-                eprintln!(
-                    "[WARN] {}: {} damaged record(s) skipped{}; 'kivadb doctor' names them, a backup brings them back",
-                    path.display(),
-                    outcome.corrupted,
-                    if outcome.dropped_txns > 0 {
-                        format!(
-                            ", and {} transaction(s) left out whole, since one of their records was",
-                            outcome.dropped_txns
-                        )
-                    } else {
-                        String::new()
-                    }
-                );
             }
         }
 
@@ -2372,8 +2524,8 @@ impl Engine {
             last_hint: Instant::now(),
             last_graph_save: Instant::now(),
             ticks: 0,
-            load: LoadInfo { mode, ms: 0.0, recovered_bytes, recovered_compaction },
-            corrupted_detected: corrupted,
+            load: LoadInfo { mode, ms: 0.0, recovered_bytes, recovered_copy, recovered_compaction },
+            corrupted_detected: 0,
             last_check: None,
             compactions: 0,
             expired_keys: expired_at_open.len() as u64,
@@ -3420,6 +3572,11 @@ impl Engine {
         if inner.file_id != old_id || inner.closed {
             return Ok(CompactReport { before_bytes, after_bytes: before_bytes, aborted: true, ..Default::default() });
         }
+        // Damaged records are not carried over: the old file is kept whole
+        // first, so that what they hold is not lost with it.
+        if dropped > 0 {
+            keep_copy(&inner.file, &self.path, "bak", 0, inner.file_len)?;
+        }
         let tail_start = pos;
         if inner.file_len > snap_len {
             let tail_len = (inner.file_len - snap_len) as usize;
@@ -3513,9 +3670,8 @@ impl Engine {
         // `read_value` already counted these; count each bad record once.
         inner.corrupted_detected = before + report.corrupted.len() as u64;
         if repair && !report.corrupted.is_empty() {
-            let _ = inner.file.sync_data();
-            let bak = sidecar(&self.path, "bak");
-            fs::copy(&self.path, &bak)?;
+            // A copy of the whole file first, under a name no other copy has.
+            let bak = keep_copy(&inner.file, &self.path, "bak", 0, inner.file_len)?;
             report.backup = Some(bak);
             for k in &report.corrupted {
                 let rec = inner.encode(k, &[], 0, FLAG_TOMBSTONE, now_secs(), 0)?;
@@ -3597,6 +3753,7 @@ impl Engine {
             load_mode: inner.load.mode,
             load_ms: inner.load.ms,
             recovered_bytes: inner.load.recovered_bytes,
+            recovered_copy: inner.load.recovered_copy.clone(),
             recovered_compaction: inner.load.recovered_compaction,
             corrupted_detected: inner.corrupted_detected,
             last_check: inner.last_check,

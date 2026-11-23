@@ -2841,8 +2841,9 @@ impl Session {
         out.say(format!(" > Startup              : {:.2} ms ({mode})", s.load_ms));
         if s.recovered_bytes > 0 || s.recovered_compaction {
             out.say(format!(
-                " > Crash Recovery       : {} bytes of torn log discarded{}",
+                " > Crash Recovery       : {} bytes of torn log discarded{}{}",
                 s.recovered_bytes,
+                s.recovered_copy.as_ref().map(|p| format!(", kept in {}", p.display())).unwrap_or_default(),
                 if s.recovered_compaction { ", interrupted compaction cleaned up" } else { "" }
             ));
         }
