@@ -11,8 +11,8 @@ would take is said). A PASS covers what its test covers, and nothing more.
 
 ## Decision
 
-**READY for 2.0.0, on one condition: the continuous integration of this
-pull request passing on Windows, Linux and macOS.** Every blocking criterion
+**READY for 2.0.0.** The condition set by this audit, the continuous
+integration passing on Windows, Linux and macOS, is met (criterion 19). Every blocking criterion
 below is PASS on Windows; the defects this audit found (section 1) are fixed,
 each with a test that fails on 2.0.0-rc.10. What stays NOT TESTED is a
 limit of what a test can prove here (power cut, crash of the operating
@@ -84,7 +84,7 @@ byte for it.
 | 16 | Authentication, grants, TLS, errors | PASS | `tests/network.rs` (logins), `collections.rs` (grants, refusals that hide data), `tls.rs`. Not audited again line by line for this release |
 | 17 | No crash point in the production executables | PASS | rc.10 release: 0 occurrence in the 3 archives, SHA-256 checked; the CI now checks the release executable of each system before archiving it |
 | 18 | Full suite on Windows | PASS | 441 passed, 0 failed, 6 ignored; with the feature, `crash` 14 and `txn_recovery` 11 passed; `cargo fmt --check`, `cargo clippy -D warnings` with and without the feature |
-| 19 | Full suite on Linux and macOS | __CI__ | CI of the pull request |
+| 19 | Full suite on Linux and macOS | PASS | CI of [#154](https://github.com/fomadev/kiva-db/pull/154): 30 checks passed (build and tests on Windows x64, Linux x64, macOS arm64, crash points with the feature, release executables checked, drivers), 4 skipped (release-only steps) |
 | 20 | No performance regression | PASS | [stable.md](../v2/benchmarks/stable.md): 20 000 documents, 3 rounds, medians within 3 % but one (+5 %) |
 | 21 | Durability against a power cut or a crash of the operating system | NOT TESTED | Section 4: a limit of what these tests prove, documented |
 | 22 | Recovery of the verifiable records of a refused file | NOT TESTED | Not built; a backup restores; the refused file keeps every byte |
