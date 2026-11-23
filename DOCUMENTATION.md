@@ -2673,7 +2673,7 @@ When one server holds several applications, their workspaces pile up: `places_tr
 
 ```text
 kiva> project create travel
-Project 'travel' created. Its workspaces are named travel.<name>: workspace create travel.places
+Project 'travel' created. Its collections are named travel.<name>: use travel, then collection create places
 kiva> workspace create travel.places
 Workspace 'travel.places' created at C:\Users\you\AppData\Roaming\KivaDB\projects\travel\places.
 kiva> workspace create travel.cache
@@ -2691,7 +2691,7 @@ kiva> workspace list travel
 * A workspace is used like any other: `workspace switch travel.places`, `kivadb -w travel.places`, `?workspace=travel.places` over HTTP, `SELECT travel.places` or the login `app@travel.places` for Redis clients ([23.4](#234-logins-databases-roles)).
 * Projects are optional: `default` and the workspaces created without a project stay as they are.
 * A grant can name a whole project: `grant write on travel.* to "app"` covers `travel.places`, `travel.cache` and the workspaces created in `travel` later ([16.4](#164-workspaces-and-grants)).
-* `project create` and `project remove <name>` need the admin role. A project is removed only once it holds no workspace: move or remove them first. `project list` shows a user the projects where they can reach something.
+* `project create` and `project drop <name>` (or `project remove`) need the admin role. A project is dropped only once it holds no workspace, unless `cascade` is added ([14.8](#148-collections)). `project list` shows a user the projects where they can reach something.
 * Project names may contain letters, digits, `_` and `-`. Projects are kept in the system database, so replicas know them too.
 
 ### 14.7 Renaming or moving a workspace
@@ -2719,15 +2719,19 @@ Since 2.0.0-rc.5, a workspace is called a **collection**. It is the same thing, 
 
 | Collection | Workspace (still accepted) |
 | :--- | :--- |
-| `collection create travel.places [path]` | `workspace create travel.places [path]` |
+| `collection create travel.places ["<folder>"]`, or `collection create places` in the current project | `workspace create travel.places [path]` |
+| `collection create users products orders` in the current project | none |
 | `collection list [travel]`, or `collection` alone | `workspace list [travel]` |
 | `use travel.places`, `collection switch travel.places` | `workspace switch travel.places` |
 | `collection rename travel.cache to travel.sessions` | `workspace move travel.cache to travel.sessions` |
 | `collection move travel.sessions to school.sessions` | the same |
-| `collection remove travel.sessions` | `workspace remove travel.sessions` |
-| `collection current` | `workspace current` |
+| `collection drop travel.sessions` (or `remove`), or `collection drop sessions` in the current project | `workspace remove travel.sessions` |
+| `collection current`: `Current collection: travel.places` | `workspace current`: `travel.places (<file>)`, as in 1.x |
+| `project current`: `Current project: travel` | none |
 
 `rename` and `move` are one command under two names, with the guarantees of [14.7](#147-renaming-or-moving-a-workspace). The answers of `collection ...` say `Collection`; those of `workspace ...` say `Workspace`, as before.
+
+**A short name is a collection of the current project** for `collection create` and `collection drop`: `collection create users` after `use fordima` makes `fordima.users`, never a collection `users` outside the project. Without a current project, `collection create users` is refused (`no current project: use <project> first, ...`); `workspace create users` still makes a collection outside a project, as in 1.x, and `workspace` commands always take a name as written. A full name (`fordima.users`) works from anywhere, and never creates its project.
 
 **`use`** enters a collection by its name, or selects a project:
 
@@ -2769,6 +2773,39 @@ Project 'dzoket' created with 2 collection(s):
 * Every name is checked before anything is made: a project that exists, a collection named twice (capitals do not count, since Windows and macOS do not tell `Orders` from `orders`), or a name with other than letters, digits, `_` and `-` refuses the whole command.
 * If KivaDB stops in the middle, the next start finishes the creation, everything being new and empty, and writes `[WARN] the creation of project 'dzoket', stopped in the middle, was finished.`
 * It needs the admin role, like `project create`.
+
+**Working inside a project:**
+
+```text
+kiva> project current
+Current project: none
+kiva> project create fordima
+Project 'fordima' created. Its collections are named fordima.<name>: use fordima, then collection create places
+kiva> use fordima
+Using project 'fordima' (0 collection(s)). Choose one: use fordima.<collection> ('collection list' shows them).
+kiva> project current
+Current project: fordima
+kiva> collection current
+Current collection: none
+kiva> collection create users products orders
+Collection 'fordima.users' created at C:\Users\you\AppData\Roaming\KivaDB\projects\fordima\users.
+Collection 'fordima.products' created at C:\Users\you\AppData\Roaming\KivaDB\projects\fordima\products.
+Collection 'fordima.orders' created at C:\Users\you\AppData\Roaming\KivaDB\projects\fordima\orders.
+kiva> use fordima.users
+Using collection 'fordima.users' (0 keys).
+kiva> collection current
+Current collection: fordima.users
+kiva> use fordima
+kiva> collection drop orders
+Collection 'fordima.orders' unregistered. Its data files were left on disk.
+kiva> project drop fordima
+Error: project 'fordima' still holds fordima.products, fordima.users: drop them first, or drop the project with them (project drop fordima cascade), which unregisters them and keeps their files.
+```
+
+* **Several collections at once.** Every name is checked first (its form, its project, named twice, already there, the grants of the caller); one wrong name and none is made. If KivaDB stops in the middle, or a write fails (a full disk), the collections made stay and the next start makes the rest, writing `[WARN] the creation of collections ..., stopped in the middle, was finished.`
+* **A folder** goes with one collection, quoted: `collection create logs "D:\kivadb\logs"` (administrators only). Bare words are names: `collection create logs archive` makes two collections. Within `kivadb -e`, quote the folder inside the command: `kivadb -e "collection create logs 'D:\kivadb\logs'"`.
+* **`drop` deletes no file.** `collection drop` (or `remove`) unregisters the collection; its files stay on disk, and `collection create <name> "<folder>"` brings it back. The collection in use is not dropped. `project drop <name>` refuses a project that holds collections; `project drop <name> cascade` unregisters them too, files kept, and is refused from inside one of them. It unregisters them one after the other: if KivaDB stops in the middle, some are unregistered and the project is still there; run it again. Dropping the current project leaves the session in no project. Both need the admin role.
+* **The context is the session's.** `use` changes the project and the collection of one shell, one connection, one `kivadb` run (its `-e` commands follow each other in it), never another client's. A new connection starts in `default`, in no project.
 
 **Where the files go.** A new collection gets the folder `projects/<project>/<collection>` of the home, or `collections/<name>` outside a project; `default` stays in `data`. The folder is written in `kiva.conf`, as before, so it is the name that matters to KivaDB, not the folder:
 
@@ -6185,7 +6222,11 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 | `workspace move <name> to <new name>` | Rename, or move into or out of a project (admin) |
 | `workspace remove <name>` | Unregister (admin) |
 | `project list` | Show the projects and their workspaces |
-| `project create <name>` / `project remove <name>` | Create / remove an empty project (admin) |
+| `project create <name> [collections (<c>, ...)]` | Create a project, with its collections (admin) |
+| `project current` | The current project |
+| `project drop <name> [cascade]` / `project remove` | Remove a project; `cascade` unregisters its collections, files kept (admin) |
+| `collection create <c> [<c> ...]` | Create in the current project, or by full name (admin; in a project, also its managers) |
+| `collection drop <c>` / `collection current` | Unregister (admin), files kept / the current collection |
 | `config list` | All settings (admin) |
 | `config get <key>` / `config set <key> <value>` | Read / change a setting (admin) |
 

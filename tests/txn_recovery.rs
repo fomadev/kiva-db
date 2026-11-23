@@ -354,7 +354,7 @@ fn a_damaged_collection_does_not_stop_the_others() {
         let inst = instance(&dir);
         let mut s = Session::new(inst.clone(), true, None);
         ok(&mut s, "set here 1");
-        ok(&mut s, "collection create bank");
+        ok(&mut s, "workspace create bank");
         ok(&mut s, "use bank");
         ok(&mut s, "set account:alpha 100000");
         ok(&mut s, "set account:beta 100000");

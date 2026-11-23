@@ -1370,7 +1370,10 @@ const HELP: &str = r#"
   use <project>.<collection>        : Enter a collection by its full name.
   use <project> | use project <p>   : Select a project; then 'use collection <c>' enters one of its collections.
   use <name>                        : A collection outside a project, else a project, else a collection of the current project.
-  collection (or workspace) list|current|switch <n>|create <n> [path]|rename <n> to <m>|remove <n>
+  project list | current | create <p> [collections (<c>, ...)] | drop <p> [cascade]
+  collection list|current|switch <n>|rename <n> to <m>|drop <n>
+  collection create <c> [<c> ...]   : In the current project (or <project>.<c>); one with "<folder>".
+  workspace list|current|switch|create <n> [path]|rename|remove : The names of 1.x; outside a project.
   config list | config get <key> | config set <key> <value>
 
   USERS (admin):
@@ -1458,10 +1461,11 @@ impl Session {
         let audited = AUDITED.contains(&cmd.as_str())
             || (cmd == "config" && tokens.get(1).is_some_and(|t| t.is_kw("set")))
             || (matches!(cmd.as_str(), "workspace" | "collection" | "collections")
-                && tokens
-                    .get(1)
-                    .is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("move") || t.is_kw("rename")))
-            || (cmd == "project" && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove")))
+                && tokens.get(1).is_some_and(|t| {
+                    t.is_kw("create") || t.is_kw("remove") || t.is_kw("drop") || t.is_kw("move") || t.is_kw("rename")
+                }))
+            || (cmd == "project"
+                && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("drop")))
             || (cmd == "check" && tokens.get(1).is_some_and(|t| t.is_kw("repair")))
             || cmd == "export"
             || cmd == "import"
@@ -2932,10 +2936,11 @@ fn required(cmd: &str, t: &[Token]) -> Need {
         "compact" => Need::Owner,
         // Changing one's own password needs no workspace; the rest is checked inside.
         "whoami" | "modify" | "timezone" | "format" => Need::Login,
-        "project" if sub("create") || sub("remove") => Need::Admin,
+        "project" if sub("create") || sub("remove") || sub("drop") => Need::Admin,
         "project" => Need::Login,
         // Creating is checked against the project: its managers may.
         "workspace" | "collection" | "collections" if sub("remove") || sub("move") || sub("rename") => Need::Admin,
+        "collection" | "collections" if sub("drop") => Need::Admin,
         "workspace" | "collection" | "collections"
             if sub("create") || sub("list") || sub("current") || sub("switch") || sub("use") =>
         {

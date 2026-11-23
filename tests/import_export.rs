@@ -78,7 +78,7 @@ fn a_collection_goes_out_and_back_with_its_types() {
     assert!(line("name")["expires_at"].is_null());
 
     // Into another collection: the same values, with their types and TTL.
-    ok(&mut s, "collection create copy");
+    ok(&mut s, "workspace create copy");
     ok(&mut s, "use copy");
     let imported = ok(&mut s, &format!("import from \"{}\"", file.display()));
     assert_eq!(imported, "Imported into 'copy': 14 key(s) written (14 new, 0 replaced).");

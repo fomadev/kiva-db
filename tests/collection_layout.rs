@@ -73,7 +73,7 @@ fn folders_holding_files_and_names_differing_by_capitals_are_refused() {
 
     // An empty folder of the layout is fine (a creation cut by a crash).
     std::fs::create_dir_all(home.join("collections").join("empty")).unwrap();
-    ok(&mut s, "collection create empty");
+    ok(&mut s, "workspace create empty");
 }
 
 #[test]
