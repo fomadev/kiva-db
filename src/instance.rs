@@ -718,8 +718,82 @@ impl Instance {
         Ok(dirs)
     }
 
-    /// Finishes the `project create ... collections` that a stop cut short.
+    /// `collection create a b c`: several collections, given by their full
+    /// names, all new. Every name is checked first (its form, its project,
+    /// twice in the list, already there); nothing is created if one is
+    /// wrong. Then a record `pending:collections:<id>` is written, so that a
+    /// start after a stop in the middle creates the rest
+    /// (`recover_pending_projects`): finishing loses nothing, since each one
+    /// is new and empty.
+    pub fn create_collections(&self, names: &[String]) -> Result<Vec<PathBuf>> {
+        let mut seen: Vec<&String> = Vec::new();
+        for name in names {
+            check_workspace_name(name)?;
+            if let Some(p) = auth::project_of(name) {
+                if !self.project_exists(p) {
+                    return Err(KivaError::NotFound(format!(
+                        "project '{p}' does not exist (create it with: project create {p})"
+                    )));
+                }
+            }
+            // Windows and macOS do not tell `Places` from `places`.
+            if seen.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+                return Err(KivaError::Invalid(format!("collection '{name}' is named twice (capitals do not count)")));
+            }
+            seen.push(name);
+            if self.cfg().workspace_dir(name).is_some() {
+                return Err(KivaError::Exists(format!("collection '{name}' already exists")));
+            }
+        }
+        if let [one] = names {
+            return Ok(vec![self.create_workspace(one, None)?]);
+        }
+        let record = format!("pending:collections:{:016x}", crate::util::random_u64()?);
+        self.system.put(&record, &Value::Doc(serde_json::json!({ "collections": names })), 0, false)?;
+        self.system.sync()?;
+        let dirs = self.finish_collections(names)?;
+        self.system.delete(&record)?;
+        self.system.sync()?;
+        Ok(dirs)
+    }
+
+    /// Creates the collections of `names` that do not exist yet.
+    fn finish_collections(&self, names: &[String]) -> Result<Vec<PathBuf>> {
+        let mut dirs = Vec::new();
+        for name in names {
+            // The read lock of kiva.conf is let go before `create_workspace` writes it.
+            let known = self.cfg().workspace_dir(name);
+            dirs.push(match known {
+                Some(d) => d,
+                None => self.create_workspace(name, None)?,
+            });
+        }
+        Ok(dirs)
+    }
+
+    /// Finishes the `project create ... collections` and the
+    /// `collection create a b c` that a stop cut short.
     fn recover_pending_projects(&self) -> Result<()> {
+        for (key, _) in self.system.keys_matching("pending:collections:*", 0) {
+            let names: Vec<String> = match self.system.get(&key)? {
+                Some((Value::Doc(j), _)) => j["collections"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let projects_there = names.iter().all(|n| auth::project_of(n).is_none_or(|p| self.project_exists(p)));
+            if names.iter().all(|n| auth::valid_workspace_name(n)) && projects_there {
+                self.finish_collections(&names)?;
+                eprintln!(
+                    "[WARN] the creation of collections {}, stopped in the middle, was finished.",
+                    names.join(", ")
+                );
+            }
+            self.system.delete(&key)?;
+        }
         for (key, _) in self.system.keys_matching("pending:project:*", 0) {
             let name = key["pending:project:".len()..].to_string();
             let collections: Vec<String> = match self.system.get(&key)? {

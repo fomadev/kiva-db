@@ -936,10 +936,16 @@ impl Session {
     /// the thing in what they answer. `collection` is the name since rc.5;
     /// `workspace` stays until 3.0, its answers unchanged.
     fn cmd_workspace(&mut self, a: &[Token], out: &mut Out, noun: &str) -> R {
-        let usage = format!(
-            "Usage: {noun} list [<project>] | current | switch <name> | create <name> [path] | \
-             rename|move <name> to <new name> | remove <name>"
-        );
+        let usage = if noun == "collection" {
+            "Usage: collection list [<project>] | current | switch <name> | create <name> [\"<folder>\"] | \
+             create <name> <name> ... | rename|move <name> to <new name> | drop|remove <name>"
+                .to_string()
+        } else {
+            format!(
+                "Usage: {noun} list [<project>] | current | switch <name> | create <name> [path] | \
+                 rename|move <name> to <new name> | remove <name>"
+            )
+        };
         let usage = usage.as_str();
         let title = if noun == "collection" { "Collection" } else { "Workspace" };
         let a_name = format!("a {noun} name");
@@ -968,6 +974,12 @@ impl Session {
             Ok(())
         } else if c.eat("current") {
             c.finish(usage)?;
+            if noun == "collection" {
+                let name = if self.ws_priv.is_some() { self.ws.as_str() } else { "none" };
+                out.say(format!("Current collection: {name}"));
+                return Ok(());
+            }
+            // The answer of 1.x, for the scripts that read it.
             if let (None, Some(p)) = (self.ws_priv, &self.project) {
                 out.say(format!("(project '{p}', no {noun})"));
             } else if self.ws_priv.is_none() {
@@ -981,6 +993,47 @@ impl Session {
             c.finish(usage)?;
             self.switch_workspace(&name)?;
             out.say(format!("Switched to {noun} '{name}' ({} keys).", self.engine.len()));
+            Ok(())
+        } else if noun == "collection" && c.eat("create") {
+            // Bare words are names; a quoted text after a single name is its
+            // folder, as before (`collection create users "D:\db"`).
+            let (mut names, mut folder) = (Vec::new(), None);
+            while let Some(t) = c.next() {
+                match t.kind {
+                    Kind::Bare => names.push(t.text.clone()),
+                    Kind::DQuote | Kind::SQuote if folder.is_none() => folder = Some(t.text.clone()),
+                    _ => return Err(usage.into()),
+                }
+            }
+            if names.is_empty() {
+                // `collection create "places"`: a quoted name, as before.
+                names.extend(folder.take());
+            }
+            if names.is_empty() {
+                return Err(usage.into());
+            }
+            if folder.is_some() && names.len() > 1 {
+                return Err(
+                    "a folder is given for one collection at a time: collection create <name> \"<folder>\"".into()
+                );
+            }
+            let full = names.iter().map(|n| self.collection_named(n, true)).collect::<Result<Vec<_>, _>>()?;
+            if let Some(bad) = full.iter().find(|n| !auth::valid_workspace_name(n)) {
+                return Err(format!(
+                    "collection name '{bad}': only letters, digits, '_' and '-', with one '.' after a project name                      (travel.places)"
+                ));
+            }
+            let me = self.caller()?;
+            for name in &full {
+                self.may_create(&me, name, folder.as_deref(), noun)?;
+            }
+            let dirs = match &folder {
+                Some(f) => vec![self.inst.create_workspace(&full[0], Some(f))?],
+                None => self.inst.create_collections(&full)?,
+            };
+            for (name, dir) in full.iter().zip(&dirs) {
+                out.say(format!("Collection '{name}' created at {}.", dir.display()));
+            }
             Ok(())
         } else if c.eat("create") {
             let name = word(c.next(), &a_name)?;
@@ -1010,9 +1063,12 @@ impl Session {
             self.inst.rename_workspace(&from, &to)?;
             out.say(format!("{title} '{from}' is now '{to}'. Its files did not move, and its grants followed it."));
             Ok(())
-        } else if c.eat("remove") {
+        } else if c.eat("remove") || (noun == "collection" && c.eat("drop")) {
             let name = word(c.next(), &a_name)?;
             c.finish(usage)?;
+            // In a project, a short name is a collection of it: never one of
+            // the same name elsewhere.
+            let name = if noun == "collection" { self.collection_named(&name, false)? } else { name };
             if name == "default" {
                 return Err(format!("the default {noun} cannot be removed."));
             }
@@ -1033,10 +1089,41 @@ impl Session {
     /// project, and who may (an administrator, or the project's managers,
     /// who do not choose the folder).
     fn create_collection(&mut self, name: &str, path: Option<&str>, noun: &str) -> Result<std::path::PathBuf, String> {
-        let me = match &self.user {
+        let me = self.caller()?;
+        self.may_create(&me, name, path, noun)?;
+        Ok(self.inst.create_workspace(name, path)?)
+    }
+
+    /// The account of a caller who is not an administrator.
+    fn caller(&self) -> Result<Option<auth::User>, String> {
+        Ok(match &self.user {
             Some(u) if u.role != Role::Admin => auth::get_user(&self.inst.system, &u.name)?,
             _ => None,
-        };
+        })
+    }
+
+    /// The full name of the collection `name` names in `collection create`
+    /// (`create`) or `collection drop`: a name with a dot is full; a short
+    /// one is a collection of the current project. Without a project, a
+    /// short name is created nowhere, and dropped outside a project.
+    fn collection_named(&self, name: &str, create: bool) -> Result<String, String> {
+        if name.contains('.') {
+            return Ok(name.to_string());
+        }
+        match self.current_project() {
+            Some(p) => Ok(format!("{p}.{name}")),
+            None if create => Err(format!(
+                "no current project: use <project> first, or give the full name (collection create \
+                 <project>.{name}). A collection outside a project is made with: workspace create {name}"
+            )),
+            None => Ok(name.to_string()),
+        }
+    }
+
+    /// Whether the caller may create the collection `name` (an
+    /// administrator, or the project's managers, who do not choose the
+    /// folder).
+    fn may_create(&self, me: &Option<auth::User>, name: &str, path: Option<&str>, noun: &str) -> Result<(), String> {
         crate::instance::check_workspace_name(name)?;
         if let Some(p) = auth::project_of(name) {
             if !self.inst.project_exists(p) {
@@ -1057,7 +1144,7 @@ impl Session {
                 return Err(format!("only an administrator chooses the folder of a {noun}"));
             }
         }
-        Ok(self.inst.create_workspace(name, path)?)
+        Ok(())
     }
 
     /// `export to "<file>" [keys <pattern>]`: the keys of the collection in
@@ -1325,7 +1412,8 @@ impl Session {
     /// `project list | create <name> | remove <name>`: projects group
     /// workspaces (`travel.places`, `travel.cache`) under one name.
     fn cmd_project(&mut self, a: &[Token], out: &mut Out) -> R {
-        const USAGE: &str = "Usage: project list | create <name> [collections (<name>, ...)] | remove <name>";
+        const USAGE: &str =
+            "Usage: project list | current | create <name> [collections (<name>, ...)] | drop|remove <name> [cascade]";
         let mut c = Cur::new(a);
         if c.eat("list") || c.peek().is_none() {
             c.finish(USAGE)?;
@@ -1363,16 +1451,56 @@ impl Session {
             c.finish(USAGE)?;
             self.inst.create_project(&name)?;
             out.say(format!(
-                "Project '{name}' created. Its workspaces are named {name}.<name>: workspace create {name}.places"
+                "Project '{name}' created. Its collections are named {name}.<name>: use {name}, then collection \
+                 create places"
             ));
             Ok(())
-        } else if c.eat("remove") {
-            let name = word(c.next(), "a project name")?;
+        } else if c.eat("current") {
             c.finish(USAGE)?;
+            out.say(format!("Current project: {}", self.current_project().unwrap_or("none")));
+            Ok(())
+        } else if c.eat("remove") || c.eat("drop") {
+            let name = word(c.next(), "a project name")?;
+            let cascade = c.eat("cascade");
+            c.finish(USAGE)?;
+            if !self.inst.project_exists(&name) {
+                return Err(format!("project '{name}' does not exist."));
+            }
+            let inside: Vec<String> = self
+                .inst
+                .workspace_names()
+                .into_iter()
+                .filter(|w| auth::project_of(w) == Some(name.as_str()))
+                .collect();
+            if !inside.is_empty() && !cascade {
+                return Err(format!(
+                    "project '{name}' still holds {}: drop them first, or drop the project with them \
+                     (project drop {name} cascade), which unregisters them and keeps their files.",
+                    inside.join(", ")
+                ));
+            }
+            if self.ws_priv.is_some() && inside.contains(&self.ws) {
+                return Err(format!("you are in {}: enter another collection first (use default).", self.ws));
+            }
+            for w in &inside {
+                self.inst.remove_workspace(w)?;
+            }
             if !self.inst.remove_project(&name)? {
                 return Err(format!("project '{name}' does not exist."));
             }
-            out.say(format!("Project '{name}' removed."));
+            if self.project.as_deref() == Some(name.as_str()) {
+                self.project = None;
+            }
+            if inside.is_empty() {
+                out.say(format!("Project '{name}' removed."));
+            } else {
+                out.say(format!(
+                    "Project '{name}' removed, and {} collection(s) unregistered: {}. Their data files were left \
+                     on disk.",
+                    inside.len(),
+                    inside.join(", ")
+                ));
+            }
             Ok(())
         } else {
             Err(USAGE.into())

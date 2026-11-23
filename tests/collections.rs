@@ -68,7 +68,7 @@ fn use_enters_a_collection_or_selects_a_project() {
     ok(&mut s, "project create baak");
     ok(&mut s, "collection create baak.places");
     ok(&mut s, "collection create baak.users");
-    ok(&mut s, "collection create lab");
+    ok(&mut s, "workspace create lab");
 
     // A project: no collection in use, data commands ask for one.
     let used = ok(&mut s, "use baak");
@@ -83,7 +83,8 @@ fn use_enters_a_collection_or_selects_a_project() {
     );
     assert!(fails(&mut s, "set k 1").contains("in no collection"));
     assert_eq!(ok(&mut s, "whoami"), "kiva (admin) @ project 'baak', in no collection");
-    assert_eq!(ok(&mut s, "collection current"), "(project 'baak', no collection)");
+    assert_eq!(ok(&mut s, "collection current"), "Current collection: none");
+    assert_eq!(ok(&mut s, "workspace current"), "(project 'baak', no workspace)");
     // The list is the project's.
     let list = ok(&mut s, "collection list");
     assert!(list.contains("baak.places") && list.contains("baak.users") && !list.contains("lab"), "{list}");
@@ -187,7 +188,7 @@ fn use_finds_a_collection_of_the_current_project_last() {
     let inst = instance(&dir);
     let mut s = Session::new(inst.clone(), true, None);
     ok(&mut s, "project create baak collections (cache, places, users, lab, other)");
-    ok(&mut s, "collection create lab");
+    ok(&mut s, "workspace create lab");
     ok(&mut s, "project create other");
     ok(&mut s, "use baak.places");
     ok(&mut s, r#"set city:1 "Kinshasa""#);
@@ -261,7 +262,7 @@ fn a_refused_short_name_points_to_the_project_and_hides_the_rest() {
     // A project and a collection outside a project, named like collections of baak.
     ok(&mut admin, "project create places collections (demo)");
     ok(&mut admin, "project create cache collections (demo)");
-    ok(&mut admin, "collection create users");
+    ok(&mut admin, "workspace create users");
     ok(&mut admin, r#"create user "analyst" identified by "pw" grant read on baak.places"#);
     ok(&mut admin, r#"create user "u3" identified by "pw" grant read on users"#);
     ok(&mut admin, "grant read on baak.places to u3");
@@ -346,7 +347,7 @@ fn use_collection_looks_only_in_the_current_project() {
     ok(&mut s, "project create dzoket collections (clients)");
     // A project and a collection outside a project, named like collections of baak.
     ok(&mut s, "project create places collections (demo)");
-    ok(&mut s, "collection create lab");
+    ok(&mut s, "workspace create lab");
     ok(&mut s, "use baak.lab");
     ok(&mut s, r#"set k "baak""#);
     ok(&mut s, "use lab");
@@ -385,8 +386,8 @@ fn use_collection_looks_only_in_the_current_project() {
     assert!(ok(&mut s, "use places").starts_with("Using project 'places'"));
     assert!(ok(&mut s, "collection switch baak.users").contains("Switched to collection 'baak.users'"));
     assert!(fails(&mut s, "collection switch users").contains("does not exist"));
-    // A collection named `collection` is still entered by `use collection`.
-    ok(&mut s, "collection create collection");
+    // A collection named `collection`, outside a project, is still entered by `use collection`.
+    ok(&mut s, "workspace create collection");
     assert!(ok(&mut s, "use collection").starts_with("Using collection 'collection'"));
     assert!(fails(&mut s, "use collection a b").contains("Usage: use"));
 
@@ -417,7 +418,7 @@ fn use_project_selects_the_project_even_behind_a_collection_of_its_name() {
     let inst = instance(&dir);
     let mut s = Session::new(inst.clone(), true, None);
     ok(&mut s, "project create baak collections (places)");
-    ok(&mut s, "collection create baak");
+    ok(&mut s, "workspace create baak");
     // `use baak` keeps entering the collection outside a project.
     assert!(ok(&mut s, "use baak").starts_with("Using collection 'baak'"));
     assert!(ok(&mut s, "use project baak").starts_with("Using project 'baak' (1 collection(s))"));
