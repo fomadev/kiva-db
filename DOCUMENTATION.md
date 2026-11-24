@@ -594,7 +594,7 @@ In a terminal the shell behaves like a modern command line:
 
 The history is kept between sessions in `history.txt` in the home directory. Commands that contain a password (`create user ... identified by`, `modify user ... password`, `auth`) are never written to it.
 
-**The prompt shows where you are** (since 2.0.0-rc.5): `kiva>` in the `default` collection, `kiva[travel.places]>` in another one, and `kiva[travel]>` after `use travel`, a project with no collection chosen yet ([14.8](#148-collections)). It is the same when the shell is connected to a running server. Scripts and `-e` print no prompt.
+**The prompt shows where you are** (since 2.0): `kiva>` in the `default` collection, `kiva[travel.places]>` in another one, and `kiva[travel]>` after `use travel`, a project with no collection chosen yet ([14.8](#148-collections)). It is the same when the shell is connected to a running server. Scripts and `-e` print no prompt.
 
 **Errors** start with `Error:` and say what went wrong. When the command itself was not understood, a second line gives its form:
 
@@ -2736,7 +2736,7 @@ Workspace 'places_travel' is now 'travel.places'. Its files did not move, and it
 
 ### 14.8 Collections
 
-Since 2.0.0-rc.5, a workspace is called a **collection**. It is the same thing, with the same name, files and grants: `collection` is only the word the commands, the manual and the APIs now use. Every `workspace` command keeps working, with the same answers, until 3.0.
+In 2.0, a workspace is called a **collection**. It is the same thing, with the same name, files and grants: `collection` is only the word the commands, the manual and the APIs now use. Every `workspace` command keeps working, with the same answers, until 3.0.
 
 | Collection | Workspace (still accepted) |
 | :--- | :--- |
@@ -2830,7 +2830,7 @@ Error: project 'fordima' still holds fordima.products, fordima.users: drop them 
 
 **Where the files go.** A new collection gets the folder `projects/<project>/<collection>` of the home, or `collections/<name>` outside a project; `default` stays in `data`. The folder is written in `kiva.conf`, as before, so it is the name that matters to KivaDB, not the folder:
 
-* Collections made before 2.0.0-rc.5 keep their folders (`workspaces/<name>`): nothing moves on upgrade, and a home of rc.5 is still read by rc.4. A command to move them into the new layout will come in a later version.
+* Collections made by KivaDB 1.x, or by a 2.0 candidate before rc.5, keep their folders (`workspaces/<name>`): nothing moves on upgrade. A command to move them into the new layout will come in a later version.
 * A rename (`collection rename`, `move`) changes the name, not the folder.
 * KivaDB does not take over a folder of the layout that already holds files, such as the ones a `collection remove` leaves on disk: `collection create` refuses it and says how to use them, by giving the folder (`collection create travel.places "<folder>"`). A folder given that way is used as it is.
 * A name that differs from another only by capitals (`travel.Places` next to `travel.places`) is refused, since Windows and macOS do not tell their folders apart.
@@ -3652,7 +3652,7 @@ kivadb doctor --json > doctor.json || echo "KivaDB needs attention"
 
 ### 17.10 Export and import (NDJSON)
 
-Since 2.0.0-rc.5, `export` writes the keys of a collection to a text file, one JSON object per line (NDJSON), and `import` reads such a file back into a collection:
+Since 2.0, `export` writes the keys of a collection to a text file, one JSON object per line (NDJSON), and `import` reads such a file back into a collection:
 
 ```bash
 kivadb export travel.places -o places.ndjson [--keys city:*]
@@ -4390,7 +4390,7 @@ curl "http://localhost:8080/v1/changes?cursor=54a087b71d59813c0000000000000004&w
 
 #### Expiries
 
-Since 2.0.0-rc.5, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys-ttl)) gives a change `expire`, so that a program mirroring the data learns it is gone:
+Since 2.0, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys-ttl)) gives a change `expire`, so that a program mirroring the data learns it is gone:
 
 ```json
 {"seq": 9, "op": "expire", "key": "session:1", "type": null, "value": null, "created": null,
@@ -4402,7 +4402,7 @@ Since 2.0.0-rc.5, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys
 * **After a stop.** An expiry KivaDB had not seen yet, or had not written to the journal, is written when the workspace opens again. One already in the journal is not written again.
 * It belongs to **no transaction** (`txn` is `null`), even when a command of a transaction is what saw it.
 * Each node keeps its own journal: a replica writes the expiries it sees itself.
-* On disk it is a deletion carrying a flag: a KivaDB older than 2.0.0-rc.5 reading the same journal sees a `delete`.
+* On disk it is a deletion carrying a flag: a KivaDB older than 2.0 reading the same journal sees a `delete`.
 
 #### Retention, slow readers, consumers and at-least-once delivery
 
@@ -4417,7 +4417,7 @@ Reading the journal needs read access to the workspace, checked at every read (a
 #### Limits
 
 * **Per node.** Each node keeps its own journal and numbers its own changes. A replica with `changes enable` journals what its master sends; a cursor of the master means nothing there (`CURSOR_INVALID`). After a failover, readers resynchronise from the new master.
-* **Expirations** are changes since 2.0.0-rc.5 (`expire`, above), but they are journaled when seen, about a second after the deadline at most. A reader that must hide a key at its exact deadline also applies the `expires_at` of its `set`. Before 2.0.0-rc.5 they were not journaled.
+* **Expirations** are changes since 2.0 (`expire`, above), but they are journaled when seen, about a second after the deadline at most. A reader that must hide a key at its exact deadline also applies the `expires_at` of its `set`. Before 2.0 they were not journaled.
 * **Backups** hold the data, not the journal: a restored workspace starts a new journal (its cursors are new), as does a reset cut short by a crash.
 * Writes cost a little more with a journal (the record is written twice, the value once more unless `keys only`); a workspace without one pays nothing.
 * KivaDB 1.x ignores the journal (`store.kiva.changes`), which does not change the data file.
@@ -5146,7 +5146,7 @@ The identifiers keep their format, so the applications that read them do not cha
 
 ### 24.10 What each client can do
 
-The same operations, from each way in (2.0.0-rc.5). Each structured request (`op`, [20.4](#204-structured-requests-for-tools)) has a row; a test (`tests/driver_parity.rs`) fails when the server gains one that this table does not list. Over REST, `POST /v1/api` takes any structured request, and `POST /v1/exec` any shell command. The drivers send any structured request with `api()` and any command with `exec()`. A `-` means "through those".
+The same operations, from each way in (2.0). Each structured request (`op`, [20.4](#204-structured-requests-for-tools)) has a row; a test (`tests/driver_parity.rs`) fails when the server gains one that this table does not list. Over REST, `POST /v1/api` takes any structured request, and `POST /v1/exec` any shell command. The drivers send any structured request with `api()` and any command with `exec()`. A `-` means "through those".
 
 <!-- parity -->
 | Operation | Shell | Structured `op` | REST | Node.js | Python |
@@ -5171,7 +5171,7 @@ The same operations, from each way in (2.0.0-rc.5). Each structured request (`op
 | Notifications | `subscribe` | - | `/ws`, `/v1/stream` | `subscribe()` | `subscribe()` |
 <!-- /parity -->
 
-In both drivers, `collection` names the collection to work in, and `workspace` is the same option under its former name. Giving both, with different names, is refused. The driver switches with `workspace switch`, which every server understands, KivaDB 1.x included. `collections()` asks a server older than 2.0.0-rc.5 under the former name.
+In both drivers, `collection` names the collection to work in, and `workspace` is the same option under its former name. Giving both, with different names, is refused. The driver switches with `workspace switch`, which every server understands, KivaDB 1.x included. `collections()` asks a server older than 2.0 under the former name.
 
 ---
 
@@ -5638,7 +5638,7 @@ histogram_quantile(0.95, rate(kiva_request_duration_seconds_bucket[5m]))
 histogram_quantile(0.95, sum by (command, le) (rate(kiva_command_duration_seconds_bucket[5m])))
 ```
 
-The kinds of command (since 2.0.0-rc.5) are a fixed list, so that the number of series stays small; no key and no user name ever becomes a label:
+The kinds of command (since 2.0) are a fixed list, so that the number of series stays small; no key and no user name ever becomes a label:
 
 | `command` | Commands |
 | :--- | :--- |
