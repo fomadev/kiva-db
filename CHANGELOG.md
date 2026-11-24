@@ -2,7 +2,7 @@
 
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
-## Unreleased (2.0.0)
+## 2.0.0 - 2026-11-23
 
 Accounts reach only what they are granted, and projects group the workspaces of one application under its name (`travel.places`, `school.places`). Dates, times and datetimes are types of their own, with time zones.
 
@@ -102,6 +102,9 @@ Accounts reach only what they are granted, and projects group the workspaces of 
 
 ### Known limits
 
+* A workspace whose data file holds a record damaged after its last clean stop is not opened, and its file is left as it is: it comes back from a backup. KivaDB has no tool yet that copies the readable records of such a file into a new home. The one damage the format cannot tell from a write cut short by a crash, the size of the very last record made larger, is cut away as one, its bytes kept in `store.kiva.cut-<time>` ([17.2](DOCUMENTATION.md#172-what-survives-what)).
+* What survives a crash of the process is tested, concurrent commits included; what survives a power cut or a crash of the operating system follows from the disk syncs (`sync_writes`) and is not tested on a machine stopped at random ([docs/testing/production-readiness-2.0.0.md](docs/testing/production-readiness-2.0.0.md)).
+* `project drop ... cascade` unregisters the collections one after the other: a stop in the middle leaves some unregistered, and running it again finishes ([14.8](DOCUMENTATION.md#148-collections)).
 * In documents holding native values, dates, times and datetimes are queried, indexed and sorted as their ISO texts, as in JSON documents: a native date and the text `"2026-10-31"` are one value for a unique index, and sort among texts. The rows of `get where` show a typed document as plain JSON; `get <key>` shows its types. Programs receive plain JSON, decimals and moments as texts, unless they ask for extended JSON; Redis clients always do ([docs/architecture/NATIVE_DOCUMENTS.md](docs/architecture/NATIVE_DOCUMENTS.md), 22).
 * Replication does not cross major versions: a 2.0 replica refuses a 1.x master, and the other way round. Upgrade the master first ([Chapter 33](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20)).
 * Going back to 1.x: 1.7.1 refuses a workspace that received a `date`, `datetime` or `time` (storage format 2), which then comes back only from a backup made before the upgrade; it reads the accounts of 2.0 with the rules of 1.x ([33.7](DOCUMENTATION.md#337-going-back-to-1x)).

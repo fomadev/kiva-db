@@ -1,6 +1,6 @@
 # KivaDB Documentation
 
-The complete manual for KivaDB 1.7.1. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
+The complete manual for KivaDB 2.0.0. It starts from zero: if you have never used a database, begin at [Chapter 0](#chapter-0--introduction) and read in order. If you already know what you are looking for, use the table of contents or jump to the [cheat sheet](#chapter-31--command-cheat-sheet).
 
 ## Table of contents
 
@@ -229,7 +229,7 @@ Then go to [1.4](#14-make-it-available-everywhere).
 The image is published on Docker Hub as `fomadev0/kiva-db`:
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.7.1
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:2.0.0
 ```
 
 KivaDB is then running, reachable on the three ports, with `kiva` as administrator and the password you chose. Every part of that line, Compose, backups and upgrades are explained in [29.6](#296-docker). With Docker you can skip the rest of this chapter and [Chapter 2](#chapter-2--starting-and-stopping-kivadb): to open a shell, run `docker exec -it kivadb kivadb -u kiva`.
@@ -278,7 +278,7 @@ kivadb --version
 ```
 
 ```text
-KivaDB 1.7.1
+KivaDB 2.0.0
 ```
 
 `kivadb --help` lists every option.
@@ -310,10 +310,10 @@ kivadb update
 
 ```text
 Checking for a new version of KivaDB...
-New version available: 1.8.0 (current: 1.7.1).
+New version available: 2.1.0 (current: 2.0.0).
 Downloading kivadb_win_x64.zip...
 Checksum verified (SHA-256).
-KivaDB successfully updated to version 1.8.0!
+KivaDB successfully updated to version 2.1.0!
 ```
 
 What it does, in order:
@@ -329,7 +329,7 @@ What it does, in order:
 **Knowing when there is a new version.** When you use `kivadb` in a terminal, it checks GitHub at most once a day, in the background, and mentions a new release when the command ends:
 
 ```text
-A new version of KivaDB is available: 1.8.0 (current: 1.7.1)
+A new version of KivaDB is available: 2.1.0 (current: 2.0.0)
 Run 'kivadb update' to install the latest release.
 ```
 
@@ -432,7 +432,7 @@ kivadb serve
 ```
 
 ```text
-KivaDB 1.7.1 server
+KivaDB 2.0.0 server
   Home         : C:\Users\you\AppData\Roaming\KivaDB
   TCP protocol : 127.0.0.1:2911 (binary and plain text)
   TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
@@ -491,12 +491,12 @@ kivadb
 ```
 
 ```text
-KivaDB Shell v1.7.1
+KivaDB Shell v2.0.0
 Type 'help' or 'h' for command list
 kiva>
 ```
 
-`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 1.7.1 at 127.0.0.1:2911` is shown first.
+`kiva>` is the **prompt**: KivaDB is waiting for a command. If the database was started with `kivadb start`, a line such as `Connected to KivaDB 2.0.0 at 127.0.0.1:2911` is shown first.
 
 ### 3.2 Store and read a value
 
@@ -3956,7 +3956,7 @@ KivaDB decides which language a connection speaks from its very first byte: `0x0
 
 | Command | Code | Payload | Reply payload |
 | :--- | :--- | :--- | :--- |
-| HELLO | 1 | empty | Three lines: `KivaDB 1.7.1`, `auth=required` or `auth=none`, `user=<name>` |
+| HELLO | 1 | empty | Three lines: `KivaDB 2.0.0`, `auth=required` or `auth=none`, `user=<name>` |
 | AUTH | 2 | user, a zero byte, password | A welcome text |
 | EXEC | 3 | A command line, as in the shell | Output lines separated by `\n`; each line starts with `+` (normal) or `-` (error) |
 | PING | 4 | empty | `PONG` |
@@ -4186,7 +4186,7 @@ curl -X POST http://localhost:8080/v1/exec -d '{"command": "count where user:*.a
 | `GET /ws` | WebSocket change notifications ([Chapter 22](#chapter-22--change-notifications)) |
 | `GET /v1/stream` | Server-Sent Events change notifications ([22.4](#224-over-server-sent-events)) |
 | `POST /v1/api` | Structured requests, including `query` and `similar` ([20.4](#204-structured-requests-for-tools)) |
-| `GET /health` | `{"version":"1.7.1","status":"ok","timestamp":...}` - no login needed |
+| `GET /health` | `{"version":"2.0.0","status":"ok","timestamp":...}` - no login needed |
 | `GET /docs` | An interactive page listing the routes, with a "Try it" button for each |
 | `GET /openapi.json` | The same description in OpenAPI format |
 
@@ -5021,7 +5021,7 @@ Add KivaDB as a dependency of your project, in `Cargo.toml`:
 
 ```toml
 [dependencies]
-kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v1.7.1" }
+kivadb = { git = "https://github.com/fomadev/kiva-db", tag = "v2.0.0" }
 ```
 
 Then use its client:
@@ -5774,7 +5774,7 @@ KIVADB_ADMIN_PASSWORD='a-long-secret' KIVADB_BIND=0.0.0.0 kivadb serve
 
 ```text
   Security     : administrator password set, authentication turned on
-KivaDB 1.7.1 server
+KivaDB 2.0.0 server
   Home         : /var/lib/kivadb
   TCP protocol : 0.0.0.0:2911 (binary and plain text)
   TLS          : on every port, certificate SHA-256 77:45:F5:56:D2:33:65:C3:02:1A:0C:F7:92:C5:D9:19:BC:44:B7:7D:6F:AF:9A:35:5F:BC:BE:43:CA:12:1A:E6
@@ -5790,7 +5790,7 @@ Press Ctrl+C to stop.
 This is the usual case at a hosting provider. The steps below download KivaDB, create a dedicated system user, install the executable and let systemd start KivaDB at boot and restart it if it stops.
 
 ```bash
-curl -LO https://github.com/fomadev/kiva-db/releases/download/v1.7.1/kivadb_linux_x64.tar.gz
+curl -LO https://github.com/fomadev/kiva-db/releases/download/v2.0.0/kivadb_linux_x64.tar.gz
 tar -xzf kivadb_linux_x64.tar.gz
 sudo useradd --system --home-dir /var/lib/kivadb --create-home kivadb
 sudo install -m 755 kivadb /usr/local/bin/kivadb
@@ -5924,13 +5924,13 @@ The official image is `fomadev0/kiva-db` on Docker Hub. It holds only the `kivad
 
 | Tag | Meaning |
 | :--- | :--- |
-| `fomadev0/kiva-db:1.7.1` | Exactly version 1.7.1. Use this on servers: it never changes under you |
+| `fomadev0/kiva-db:2.0.0` | Exactly version 2.0.0. Use this on servers: it never changes under you |
 | `fomadev0/kiva-db:latest` | The most recent version |
 
 **Run it:**
 
 ```bash
-docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:1.7.1
+docker run -d --name kivadb -e KIVADB_ADMIN_PASSWORD=a-long-secret -p 2911:2911 -p 8080:8080 -p 6379:6379 -v kivadb-data:/data fomadev0/kiva-db:2.0.0
 ```
 
 | Part | Meaning |
@@ -5994,7 +5994,7 @@ docker rm -f kivadb
 
 then the `docker run` line again with the new tag. With Compose: change the tag in the file, then `docker compose up -d`.
 
-**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:1.7.1` in the commands above:
+**Building the image yourself.** For an ARM server (the published image is for Intel and AMD processors) or a modified KivaDB, build from the source folder, then use `kivadb:local` instead of `fomadev0/kiva-db:2.0.0` in the commands above:
 
 ```bash
 docker build -t kivadb:local .
@@ -6289,15 +6289,17 @@ Start with `kivadb doctor` ([17.9](#179-kivadb-doctor--a-health-check-of-the-hom
 
 ## Chapter 32 — Limits and scope
 
-KivaDB 1.7.1 keeps the whole database on each node, with replicas and automatic failover. Knowing what it does not do is as useful as knowing what it does.
+KivaDB 2.0.0 keeps the whole database on each node, with replicas and automatic failover. Knowing what it does not do is as useful as knowing what it does.
 
-**Not included in 1.7.1**
+**Not included in 2.0.0**
 
 * **Clustering.** No sharding of data across machines, no quorum reads and writes, no distributed queries: every node holds the whole database. A majority of nodes is used for one thing only, to elect a new master ([25.8](#258-automatic-failover)); replication stays asynchronous by default.
 * **SQL and the PostgreSQL protocol.** The query language is the one described in this manual. Tools that require PostgreSQL (Prisma, DBeaver's SQL editor) cannot connect.
 * **Vector indexes on disk, and dedicated vector engine features.** Vector indexes, exact or HNSW, live in memory, bounded by `vector.max_ram_mb`: the vectors must fit in the RAM of one machine. 8-bit quantization only (no product quantization), no graph searched from disk, no hybrid (keyword and vector) search, filters joined by `and` only, embeddings computed by the application ([12.10, 12.11](#1210-memory-bounds)).
 * **The full Redis command set**: sharded publish/subscribe, Redis functions, cluster commands and modules are missing (refused with a clear error); sets, sorted sets, lists and streams are meant for up to tens of thousands of members per key, not millions, since each command rewrites the whole value (bounded by `resp.max_collection_members`); blocked clients are woken together rather than in order ([23.3](#233-supported-commands)).
 * **A system service installer.** See [section 2.6](#26-starting-kivadb-with-the-computer).
+* **Repairing a damaged data file.** A workspace with a record damaged after its last clean stop is not opened, and its file is left as it is: restore it from a backup ([17.2](#172-what-survives-what)). A tool that copies its readable records into a new home is not included.
+* **Proof against a power cut.** What survives a crash of the process is tested; what survives a power cut or a crash of the operating system follows from the disk syncs ([17.2](#172-what-survives-what)) and is not tested by a machine stopped at random ([docs/testing/production-readiness-2.0.0.md](docs/testing/production-readiness-2.0.0.md)).
 * **Ready-made executables for every system.** Releases contain Windows x64, Linux x64 and macOS Apple Silicon executables, and a Docker image for Intel and AMD processors. Other systems (Linux on ARM, Intel Macs) build from the source ([1.3](#13-build-from-the-source-code)).
 
 **Design limits**
