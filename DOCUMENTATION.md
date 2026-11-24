@@ -26,7 +26,7 @@ The complete manual for KivaDB 2.0.0. It starts from zero: if you have never use
 
 **Part III — Administration**
 
-* [Chapter 14 — Workspaces](#chapter-14--workspaces)
+* [Chapter 14 — Collections and projects](#chapter-14--collections-and-projects)
 * [Chapter 15 — Configuration](#chapter-15--configuration)
 * [Chapter 16 — Users, roles and security](#chapter-16--users-roles-and-security)
 * [Chapter 17 — Maintenance and reliability](#chapter-17--maintenance-and-reliability)
@@ -152,11 +152,11 @@ A started KivaDB listens on three ports, all on the local machine by default:
 | :--- | :--- | :--- | :--- |
 | I | 0 – 3 | Getting started | You are new to KivaDB |
 | II | 4 – 13 | The command language, from the simplest command to vectors and transactions | You store and read data |
-| III | 14 – 19 | Administration: workspaces, configuration, users, maintenance, cache, files | You are responsible for a KivaDB |
+| III | 14 – 19 | Administration: collections and projects, configuration, users, maintenance, cache, files | You are responsible for a KivaDB |
 | IV | 20 – 24 | Connecting applications: binary protocol, REST, notifications, Redis, drivers | You write a program that uses KivaDB |
 | V | 25 – 28 | Replication, Lua scripts, monitoring, embedding in Rust | You need more |
 | VI | 29 | Deploying on Linux, Windows, macOS and Docker | KivaDB goes on a server |
-| VII | 30 – 32 | Troubleshooting, cheat sheet, limits, glossary | You look something up |
+| VII | 30 – 33 | Troubleshooting, cheat sheet, limits, upgrading from 1.x, glossary | You look something up |
 
 ### Conventions
 
@@ -2626,9 +2626,11 @@ When that happens, start again: `begin`, read the fresh values, redo the changes
 
 ---
 
-## Chapter 14 — Workspaces
+## Chapter 14 — Collections and projects
 
-A **workspace** is an independent database: its own keys, its own files, its own indexes. Use one per project, or one for tests and one for real data.
+A **collection** is an independent database: its own keys, its own files, its own indexes. A **project** groups the collections of one application under its name: `shop.orders`, `shop.users`. Use one collection per kind of data, one project per application, or one collection for tests and one for real data.
+
+Before 2.0, a collection was called a **workspace**. It is the same thing under its former name, and every `workspace` command still works, with the answers of 1.x ([14.8](#148-collections)). The sections below show the commands of both names; [14.8](#148-collections) gives the commands of 2.0 inside a project.
 
 ### 14.1 The default workspace
 
