@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot B of docs/architecture/RC5_ARCHITECTURE.md (sections 2 and 3): a
+//! Lot B of docs/architecture/PROJECTS_AND_COLLECTIONS.md (sections 2 and 3): a
 //! collection is what a workspace is, `collection ...` its commands next to
 //! `workspace ...`, `use` enters a collection or selects a project, and
 //! `project create <p> collections (...)` makes them together, finished after

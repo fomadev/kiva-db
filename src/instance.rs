@@ -1022,7 +1022,7 @@ pub(crate) fn recover_moves(system: &Engine, cfg: &Config) -> Result<Vec<String>
 }
 
 /// The folder a new collection gets when no path is given (rc.5, section 5.1
-/// of docs/architecture/RC5_ARCHITECTURE.md): `<home>/projects/<project>/<collection>`
+/// of docs/architecture/PROJECTS_AND_COLLECTIONS.md): `<home>/projects/<project>/<collection>`
 /// in a project, `<home>/collections/<name>` outside one. The name has been
 /// checked (`check_workspace_name`): its parts hold no `.`, `/` or `\`.
 /// Collections made before rc.5 keep their folders, written in kiva.conf.

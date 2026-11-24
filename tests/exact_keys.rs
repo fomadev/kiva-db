@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot P0 of docs/architecture/RC5_ARCHITECTURE.md (1.6 and 4.1): a pattern
+//! Lot P0 of docs/architecture/PROJECTS_AND_COLLECTIONS.md (1.6 and 4.1): a pattern
 //! without a wildcard names one key, which a query reads alone (`KEY
 //! LOOKUP`), and the shell says how to reach the keys of a family when that
 //! key holds nothing. And every usage text is written with one `Usage:`.

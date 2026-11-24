@@ -3,7 +3,7 @@
 // See the LICENSE file in the project root for full license information.
 
 //! Export and import of a collection's keys as NDJSON (lot G of
-//! docs/architecture/RC5_ARCHITECTURE.md, decision D10): one line per key,
+//! docs/architecture/PROJECTS_AND_COLLECTIONS.md, decision D10): one line per key,
 //! `{"key": ..., "type": ..., "value": ..., "expires_at": ...}`, the value in
 //! extended JSON so that decimals, dates and typed documents keep their
 //! types. It is a logical copy, readable by other tools and filtered by a

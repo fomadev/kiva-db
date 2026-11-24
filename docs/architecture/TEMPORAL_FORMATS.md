@@ -1,5 +1,7 @@
 # Date formats and typed documents: a design for KivaDB 2.0.0
 
+**Status: implemented in KivaDB 2.0.0**: dates, times and datetimes, formats of each country, typed literals in documents. The manual is the reference for users ([5.8](../../DOCUMENTATION.md#58-date-datetime-time), [10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents)); this page keeps the design, written before the code, as its "Nothing here is implemented" says.
+
 A design, written before any code, for features planned for **KivaDB 2.0.0**, before the stable release, through further release candidates:
 
 1. let each person write and read dates in the form of their country (`DD-MM-YYYY`, `MM/DD/YYYY`...) instead of ISO 8601 only;

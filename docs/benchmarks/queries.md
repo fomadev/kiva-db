@@ -1,10 +1,10 @@
 # Query planner microbenchmarks
 
-What the query work of 2.0 changed in the time of a query, measured before and after in the same conditions. These are microbenchmarks of single queries on one engine, not the comparison of KivaDB 1.7.1 and 2.0.0 as a whole (which comes with the benchmark suite of item 34 of the [implementation matrix](../IMPLEMENTATION_MATRIX.md)).
+What the query work of 2.0 changed in the time of a query, measured before and after in the same conditions. These are microbenchmarks of single queries on one engine, not the comparison of KivaDB 1.7.1 and 2.0.0 as a whole (which is in [versions.md](versions.md)).
 
 ## Method
 
-* **Code:** [`benches/queries.rs`](../../../benches/queries.rs), run with `cargo bench --bench queries` (release build, `rustc 1.99.0`).
+* **Code:** [`benches/queries.rs`](../../benches/queries.rs), run with `cargo bench --bench queries` (release build, `rustc 1.99.0`).
 * **Before:** `main` at `baff8b5`, the same file. That version has no `order by`, so the one function that sorts, `first_in_order`, reads every match with `query_expr` and sorts them in the program, by the instant of the datetimes and the value of the numbers, then keeps the first 20. That is what a program had to do. Every other case calls the same functions in both versions.
 * **After:** the branch of this work.
 * **Data:** 50 000 documents `k:000000` to `k:049999`, `{"num": i, "grp": i % 100, "x": i % 3, "t": "<datetime>"}`. The datetimes `t` spread over the 12 months of 2026, with four offsets (`Z`, `+01:00`, `-05:00`, `+05:30`). Indexes: B-trees on `num` and `t`, a hash index on `grp`, and a unique index on `(grp, num)`.
@@ -35,14 +35,14 @@ The raw tables of every round are below.
 * **`and`** used to list the keys of every indexed comparison, then intersect the lists: here the 25 000 keys of `num < 25000`. Now only the smallest list is built (the 500 keys of `grp = 7`), and each of its keys is checked against the value that the index of `num` holds for it.
 * **A unique index on several fields** used to serve only to refuse duplicates. It now answers an `and` of equalities on all its fields, in one lookup.
 * **`order by` with a limit** reads the B-tree index of the order field from its first or last value. Each key is checked against the indexes of the filter, and a document is read only when its row is kept: about the 20 rows asked for, instead of the 50 000 documents read and sorted before. Datetimes are read a day around the limit, because their offsets may reorder them.
-* **Order with a selective filter:** reading the index of the order field costs about the same as reading the 500 documents of `grp = 7`. That is because in this data the documents of `grp = 7` fall in 3 months out of 12, so the walk crosses 13 000 entries before finding them. When the filter selects fewer documents, they are read and sorted in memory instead ([decision 7](../DECISIONS.md#7-the-order-of-values-and-the-choice-of-a-plan)).
+* **Order with a selective filter:** reading the index of the order field costs about the same as reading the 500 documents of `grp = 7`. That is because in this data the documents of `grp = 7` fall in 3 months out of 12, so the walk crosses 13 000 entries before finding them. When the filter selects fewer documents, they are read and sorted in memory instead ([decision 7](../architecture/DECISIONS.md#7-the-order-of-values-and-the-choice-of-a-plan)).
 
 ## Regressions
 
 * **Every match without an index** (1 to 2.5% slower) and **a range on one index** (0 to 4%) run the same plan as before. Reading the keys 256 at a time looks for its place in the key tree again for each batch, and each document now goes through the counters of `explain analyze`. The two versions overlap from one round to the next, so this is at most a few per cent, not a measured certainty.
 * No case got slower beyond the noise.
 
-None of these figures is a guarantee: they hold for this data, this machine and these queries. `explain analyze` ([DOCUMENTATION.md 11.5](../../../DOCUMENTATION.md#115-explain--see-how-a-query-will-run)) measures a given query on given data.
+None of these figures is a guarantee: they hold for this data, this machine and these queries. `explain analyze` ([DOCUMENTATION.md 11.5](../../DOCUMENTATION.md#115-explain--see-how-a-query-will-run)) measures a given query on given data.
 
 ## Raw tables
 

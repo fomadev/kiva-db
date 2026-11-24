@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot E of docs/architecture/RC5_ARCHITECTURE.md (section 6, decision D6):
+//! Lot E of docs/architecture/PROJECTS_AND_COLLECTIONS.md (section 6, decision D6):
 //! a key whose TTL ran out gives a change `expire` when the engine sees it
 //! gone, with `expires_at`, once per key and expiry, and after a stop that
 //! kept it from the journal, at the next opening.

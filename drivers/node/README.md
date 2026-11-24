@@ -12,9 +12,8 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
-| next (unreleased) | KivaDB 2.0.0-rc.5 | Nothing new: `collection`, `use`, `whoami`, `explain`, `aggregate` work with every 2.0 server (`changes` needs 2.0.0); `collections` asks an older one under the former name |
-| 1.3.0 | KivaDB 2.0.0 | `types: "extended"` (native values without loss), and `orderBy` in `query`: 2.0.0 or later (`"random()"`: 2.0.0-rc.4 or later) |
-| 1.2.0 | KivaDB 2.0.0 | `date`, `datetime` (a `Date`) and `time`: 2.0.0 or later |
+| 1.3.0 | KivaDB 2.0.0 | `types: "extended"` (native values without loss), `orderBy` in `query` (a field, or `"random()"`), `changes`: 2.0.0 or later. `collection`, `use`, `whoami`, `explain` and `aggregate` work with every 2.0 server; `collections` asks an older one under the former name |
+| 1.2.0 | KivaDB 2.0.0 | `date`, `datetime` (a `Date`) and `time`: 2.0.0 or later. Not published on npm: 1.3.0 holds it |
 | 1.1.0 | KivaDB 1.7.0 | `add`, and `in` / `like` / `ilike` in `query`: 1.7.0 or later |
 | 1.0.0 | KivaDB 1.6.0 | `semanticCached`: 1.6.0 or later |
 

@@ -1,5 +1,7 @@
 # Random values, UUIDs, shuffling and sampling
 
+**Status: implemented in KivaDB 2.0.0.** The manual is the reference for users ([5.11](../../DOCUMENTATION.md#511-random-values-and-uuids)); this page keeps the design and its decisions.
+
 A design for KivaDB 2.0.0. It covers random numbers, UUIDs, random texts, shuffled and sampled arrays, and documents returned in random order or as a sample.
 
 **Approved for 2.0.0 on 2026-11-20, with the decisions of [section 12](#12-decisions-for-200-approved-2026-11-20)**, which replace sections 5.2, 10 and 11 where they differ. R0 to R4 are implemented; each code lot is merged after its own review.

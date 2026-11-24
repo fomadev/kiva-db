@@ -26,7 +26,7 @@ The complete manual for KivaDB 2.0.0. It starts from zero: if you have never use
 
 **Part III — Administration**
 
-* [Chapter 14 — Workspaces](#chapter-14--workspaces)
+* [Chapter 14 — Collections and projects](#chapter-14--collections-and-projects)
 * [Chapter 15 — Configuration](#chapter-15--configuration)
 * [Chapter 16 — Users, roles and security](#chapter-16--users-roles-and-security)
 * [Chapter 17 — Maintenance and reliability](#chapter-17--maintenance-and-reliability)
@@ -111,6 +111,25 @@ You talk to KivaDB with short commands: `set` to store, `get` to read, `del` to 
 
 KivaDB is **not** a relational database: there are no tables, no joins and no SQL. Applications built around relations between many tables and complex reports are better served by PostgreSQL or MySQL, possibly next to KivaDB. [Chapter 32](#chapter-32--limits-and-scope) lists the limits honestly.
 
+### What is new in 2.0
+
+KivaDB 2.0.0 is the first major version since 1.0. What it adds, with where to read about it:
+
+* **Projects and collections.** A collection (the former workspace) is an independent database; a project groups the collections of one application under its name (`shop.orders`, `shop.users`). `use shop` selects a project, `collection create orders products` makes collections in it, `project current` and `collection current` say where you are ([14.8](#148-collections)).
+* **Accounts reach only what they are granted**, on a collection or a whole project (`grant write on shop.*`), and a new account gets no personal workspace any more ([16.4](#164-workspaces-and-grants)).
+* **Exact numbers**: `int`, `float` and `decimal` instead of one `number`; integers compared to the last digit, decimals added without rounding ([5.2](#52-number)).
+* **Dates and times** as types of their own, with time zones and the formats of each country ([5.8](#58-date-datetime-time)), also inside documents, which keep every value's type ([10.10](#1010-typed-values-in-documents)).
+* **Random values and UUIDs**, and `order by random() limit N` to draw documents ([5.11](#511-random-values-and-uuids)).
+* **Queries**: `order by` read from an index, pages with `after`, a planner that combines indexes, and `explain analyze` to see what a query read ([11.2](#112-get-where--find-documents), [11.5](#115-explain--see-how-a-query-will-run)).
+* **The change journal**: every change kept and read again from a cursor, expirations included ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)).
+* **Export and import** of a collection as NDJSON, checked line by line before anything is written ([17.10](#1710-export-and-import-ndjson)).
+* **`kivadb doctor`**, a health check of the home that changes nothing ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)).
+* **Safer recovery**: transactions tested against crashes at every step of a commit, and a data file damaged after its last clean stop refused rather than opened in part ([13.7](#137-guarantees), [17.2](#172-what-survives-what)).
+* **Monitoring**: a readiness probe and metrics by kind of command ([27.1](#271-quick-looks), [27.2](#272-prometheus)).
+* **Drivers**: an official Python driver next to the Node.js one, both able to keep every type of 2.0 ([24.4](#244-python), [24.10](#2410-what-each-client-can-do)).
+
+Coming from 1.x: what changes for your applications, and how to upgrade and go back, is in [Chapter 33](#chapter-33--upgrading-from-kivadb-1x-to-20). Every change, one by one: [CHANGELOG.md](CHANGELOG.md).
+
 ### The pieces
 
 | Piece | What it is |
@@ -133,11 +152,11 @@ A started KivaDB listens on three ports, all on the local machine by default:
 | :--- | :--- | :--- | :--- |
 | I | 0 – 3 | Getting started | You are new to KivaDB |
 | II | 4 – 13 | The command language, from the simplest command to vectors and transactions | You store and read data |
-| III | 14 – 19 | Administration: workspaces, configuration, users, maintenance, cache, files | You are responsible for a KivaDB |
+| III | 14 – 19 | Administration: collections and projects, configuration, users, maintenance, cache, files | You are responsible for a KivaDB |
 | IV | 20 – 24 | Connecting applications: binary protocol, REST, notifications, Redis, drivers | You write a program that uses KivaDB |
 | V | 25 – 28 | Replication, Lua scripts, monitoring, embedding in Rust | You need more |
 | VI | 29 | Deploying on Linux, Windows, macOS and Docker | KivaDB goes on a server |
-| VII | 30 – 32 | Troubleshooting, cheat sheet, limits, glossary | You look something up |
+| VII | 30 – 33 | Troubleshooting, cheat sheet, limits, upgrading from 1.x, glossary | You look something up |
 
 ### Conventions
 
@@ -575,7 +594,7 @@ In a terminal the shell behaves like a modern command line:
 
 The history is kept between sessions in `history.txt` in the home directory. Commands that contain a password (`create user ... identified by`, `modify user ... password`, `auth`) are never written to it.
 
-**The prompt shows where you are** (since 2.0.0-rc.5): `kiva>` in the `default` collection, `kiva[travel.places]>` in another one, and `kiva[travel]>` after `use travel`, a project with no collection chosen yet ([14.8](#148-collections)). It is the same when the shell is connected to a running server. Scripts and `-e` print no prompt.
+**The prompt shows where you are** (since 2.0): `kiva>` in the `default` collection, `kiva[travel.places]>` in another one, and `kiva[travel]>` after `use travel`, a project with no collection chosen yet ([14.8](#148-collections)). It is the same when the shell is connected to a running server. Scripts and `-e` print no prompt.
 
 **Errors** start with `Error:` and say what went wrong. When the command itself was not understood, a second line gives its form:
 
@@ -2607,9 +2626,11 @@ When that happens, start again: `begin`, read the fresh values, redo the changes
 
 ---
 
-## Chapter 14 — Workspaces
+## Chapter 14 — Collections and projects
 
-A **workspace** is an independent database: its own keys, its own files, its own indexes. Use one per project, or one for tests and one for real data.
+A **collection** is an independent database: its own keys, its own files, its own indexes. A **project** groups the collections of one application under its name: `shop.orders`, `shop.users`. Use one collection per kind of data, one project per application, or one collection for tests and one for real data.
+
+Before 2.0, a collection was called a **workspace**. It is the same thing under its former name, and every `workspace` command still works, with the answers of 1.x ([14.8](#148-collections)). The sections below show the commands of both names; [14.8](#148-collections) gives the commands of 2.0 inside a project.
 
 ### 14.1 The default workspace
 
@@ -2715,7 +2736,7 @@ Workspace 'places_travel' is now 'travel.places'. Its files did not move, and it
 
 ### 14.8 Collections
 
-Since 2.0.0-rc.5, a workspace is called a **collection**. It is the same thing, with the same name, files and grants: `collection` is only the word the commands, the manual and the APIs now use. Every `workspace` command keeps working, with the same answers, until 3.0.
+In 2.0, a workspace is called a **collection**. It is the same thing, with the same name, files and grants: `collection` is only the word the commands, the manual and the APIs now use. Every `workspace` command keeps working, with the same answers, until 3.0.
 
 | Collection | Workspace (still accepted) |
 | :--- | :--- |
@@ -2809,7 +2830,7 @@ Error: project 'fordima' still holds fordima.products, fordima.users: drop them 
 
 **Where the files go.** A new collection gets the folder `projects/<project>/<collection>` of the home, or `collections/<name>` outside a project; `default` stays in `data`. The folder is written in `kiva.conf`, as before, so it is the name that matters to KivaDB, not the folder:
 
-* Collections made before 2.0.0-rc.5 keep their folders (`workspaces/<name>`): nothing moves on upgrade, and a home of rc.5 is still read by rc.4. A command to move them into the new layout will come in a later version.
+* Collections made by KivaDB 1.x, or by a 2.0 candidate before rc.5, keep their folders (`workspaces/<name>`): nothing moves on upgrade. A command to move them into the new layout will come in a later version.
 * A rename (`collection rename`, `move`) changes the name, not the folder.
 * KivaDB does not take over a folder of the layout that already holds files, such as the ones a `collection remove` leaves on disk: `collection create` refuses it and says how to use them, by giving the folder (`collection create travel.places "<folder>"`). A folder given that way is used as it is.
 * A name that differs from another only by capitals (`travel.Places` next to `travel.places`) is refused, since Windows and macOS do not tell their folders apart.
@@ -3631,7 +3652,7 @@ kivadb doctor --json > doctor.json || echo "KivaDB needs attention"
 
 ### 17.10 Export and import (NDJSON)
 
-Since 2.0.0-rc.5, `export` writes the keys of a collection to a text file, one JSON object per line (NDJSON), and `import` reads such a file back into a collection:
+Since 2.0, `export` writes the keys of a collection to a text file, one JSON object per line (NDJSON), and `import` reads such a file back into a collection:
 
 ```bash
 kivadb export travel.places -o places.ndjson [--keys city:*]
@@ -4369,7 +4390,7 @@ curl "http://localhost:8080/v1/changes?cursor=54a087b71d59813c0000000000000004&w
 
 #### Expiries
 
-Since 2.0.0-rc.5, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys-ttl)) gives a change `expire`, so that a program mirroring the data learns it is gone:
+Since 2.0, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys-ttl)) gives a change `expire`, so that a program mirroring the data learns it is gone:
 
 ```json
 {"seq": 9, "op": "expire", "key": "session:1", "type": null, "value": null, "created": null,
@@ -4381,7 +4402,7 @@ Since 2.0.0-rc.5, a key whose TTL ran out ([Chapter 7](#chapter-7--expiring-keys
 * **After a stop.** An expiry KivaDB had not seen yet, or had not written to the journal, is written when the workspace opens again. One already in the journal is not written again.
 * It belongs to **no transaction** (`txn` is `null`), even when a command of a transaction is what saw it.
 * Each node keeps its own journal: a replica writes the expiries it sees itself.
-* On disk it is a deletion carrying a flag: a KivaDB older than 2.0.0-rc.5 reading the same journal sees a `delete`.
+* On disk it is a deletion carrying a flag: a KivaDB older than 2.0 reading the same journal sees a `delete`.
 
 #### Retention, slow readers, consumers and at-least-once delivery
 
@@ -4396,7 +4417,7 @@ Reading the journal needs read access to the workspace, checked at every read (a
 #### Limits
 
 * **Per node.** Each node keeps its own journal and numbers its own changes. A replica with `changes enable` journals what its master sends; a cursor of the master means nothing there (`CURSOR_INVALID`). After a failover, readers resynchronise from the new master.
-* **Expirations** are changes since 2.0.0-rc.5 (`expire`, above), but they are journaled when seen, about a second after the deadline at most. A reader that must hide a key at its exact deadline also applies the `expires_at` of its `set`. Before 2.0.0-rc.5 they were not journaled.
+* **Expirations** are changes since 2.0 (`expire`, above), but they are journaled when seen, about a second after the deadline at most. A reader that must hide a key at its exact deadline also applies the `expires_at` of its `set`. Before 2.0 they were not journaled.
 * **Backups** hold the data, not the journal: a restored workspace starts a new journal (its cursors are new), as does a reset cut short by a crash.
 * Writes cost a little more with a journal (the record is written twice, the value once more unless `keys only`); a workspace without one pays nothing.
 * KivaDB 1.x ignores the journal (`store.kiva.changes`), which does not change the data file.
@@ -5125,7 +5146,7 @@ The identifiers keep their format, so the applications that read them do not cha
 
 ### 24.10 What each client can do
 
-The same operations, from each way in (2.0.0-rc.5). Each structured request (`op`, [20.4](#204-structured-requests-for-tools)) has a row; a test (`tests/driver_parity.rs`) fails when the server gains one that this table does not list. Over REST, `POST /v1/api` takes any structured request, and `POST /v1/exec` any shell command. The drivers send any structured request with `api()` and any command with `exec()`. A `-` means "through those".
+The same operations, from each way in (2.0). Each structured request (`op`, [20.4](#204-structured-requests-for-tools)) has a row; a test (`tests/driver_parity.rs`) fails when the server gains one that this table does not list. Over REST, `POST /v1/api` takes any structured request, and `POST /v1/exec` any shell command. The drivers send any structured request with `api()` and any command with `exec()`. A `-` means "through those".
 
 <!-- parity -->
 | Operation | Shell | Structured `op` | REST | Node.js | Python |
@@ -5150,7 +5171,7 @@ The same operations, from each way in (2.0.0-rc.5). Each structured request (`op
 | Notifications | `subscribe` | - | `/ws`, `/v1/stream` | `subscribe()` | `subscribe()` |
 <!-- /parity -->
 
-In both drivers, `collection` names the collection to work in, and `workspace` is the same option under its former name. Giving both, with different names, is refused. The driver switches with `workspace switch`, which every server understands, KivaDB 1.x included. `collections()` asks a server older than 2.0.0-rc.5 under the former name.
+In both drivers, `collection` names the collection to work in, and `workspace` is the same option under its former name. Giving both, with different names, is refused. The driver switches with `workspace switch`, which every server understands, KivaDB 1.x included. `collections()` asks a server older than 2.0 under the former name.
 
 ---
 
@@ -5617,7 +5638,7 @@ histogram_quantile(0.95, rate(kiva_request_duration_seconds_bucket[5m]))
 histogram_quantile(0.95, sum by (command, le) (rate(kiva_command_duration_seconds_bucket[5m])))
 ```
 
-The kinds of command (since 2.0.0-rc.5) are a fixed list, so that the number of series stays small; no key and no user name ever becomes a label:
+The kinds of command (since 2.0) are a fixed list, so that the number of series stays small; no key and no user name ever becomes a label:
 
 | `command` | Commands |
 | :--- | :--- |
@@ -6437,8 +6458,10 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Audit log** | The journal of sensitive actions: logins, account changes, deletions |
 | **Authentication** | Proving who you are with a user name and a password |
 | **Binary protocol** | KivaDB's own network language on port 2911, made of frames ([20.2](#202-the-binary-protocol)) |
+| **Change journal** | The changes of a collection kept on disk, in order, so that a program reads them again from a cursor ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)) |
 | **Checksum (CRC32)** | A number computed from data, stored with it, and recomputed at read time to detect damage |
 | **Client** | Any program that connects to a running KivaDB: the shell, Kiva Studio, your application |
+| **Collection** | An independent database inside one KivaDB, with its own keys, files and indexes; called a workspace before 2.0 ([Chapter 14](#chapter-14--collections-and-projects)) |
 | **Commit** | Apply the changes of a transaction |
 | **Compaction** | Rewriting the data file without obsolete records |
 | **Cosine similarity** | A score between -1 and 1 telling how close two vectors point; 1 means the same direction |
@@ -6447,9 +6470,10 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Embedding** | A vector produced by an AI model to represent the meaning of a text, an image or a sound |
 | **Encryption at rest** | Data stored encrypted on disk, readable only with the key ([16.12](#1612-encryption-at-rest)) |
 | **Epoch** | The number of the current master's term in a replication group; it grows at each failover ([25.8](#258-automatic-failover)) |
+| **Extended JSON** | JSON in which decimals, dates, times and datetimes keep their types (`{"$decimal": "10.50"}`), for programs ([20.4](#204-structured-requests-for-tools)) |
 | **Failover** | Handing the master role to a replica, by command or automatically ([25.7](#257-failover)) |
 | **Fragmentation** | The share of the data file occupied by obsolete records |
-| **Grant** | Permission given to a user on a workspace |
+| **Grant** | Permission given to a user on a collection, or on every collection of a project ([16.4](#164-workspaces-and-grants)) |
 | **Heartbeat** | A short message the master sends regularly so that replicas know it is alive |
 | **Hint file** | A saved copy of the index, for fast start |
 | **HNSW** | A graph of vectors that finds the nearest ones while comparing only a few ([12.5](#125-approximate-index-hnsw-for-large-collections)) |
@@ -6463,6 +6487,7 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Path** | The address of a field inside a document: `.address.city` |
 | **Pattern** | A key template with `*` and `?` |
 | **Port** | The number that tells which program of a machine a network connection is for: 2911, 8080, 6379 |
+| **Project** | A name that groups the collections of one application: `shop.orders`, `shop.users` ([14.8](#148-collections)) |
 | **Projection** | Keeping only some fields of the documents returned |
 | **Quorum** | The number of nodes that must agree before a new master is elected; by default a majority |
 | **REST API** | Access to KivaDB over plain HTTP, on port 8080 ([Chapter 21](#chapter-21--the-rest-api)) |
@@ -6475,6 +6500,7 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Server-Sent Events (SSE)** | An HTTP connection that stays open to receive notifications ([22.4](#224-over-server-sent-events)) |
 | **Shell** | The interactive command line opened by `kivadb`, with the `kiva>` prompt |
 | **Sorted set** | A Redis set whose members carry a score and stay ordered by it ([23.8](#238-sets-and-sorted-sets)) |
+| **Storage format** | The version of the layout of a data file, written in its header: 1 for 1.x, 2 and 3 for the types of 2.0 ([19.4](#194-the-data-file-byte-by-byte)) |
 | **Tombstone** | The record that marks a key as deleted |
 | **Transaction** | A group of changes applied together |
 | **Trigger** | A script run automatically when keys change |
@@ -6483,4 +6509,4 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Vector** | A list of numbers, such as an embedding; KivaDB finds the closest ones ([Chapter 12](#chapter-12--vector-search-for-ai)) |
 | **Vector index** | The vectors of a field kept in memory to make similarity search fast |
 | **WebSocket** | A two-way connection opened from a web page, used for notifications ([22.3](#223-over-websocket)) |
-| **Workspace** | An independent database inside one KivaDB |
+| **Workspace** | The name of a collection before 2.0; the `workspace` commands still work |

@@ -1,5 +1,7 @@
 # KivaDB 2.0 — decisions
 
+**Status: in force in KivaDB 2.0.0.** The choices made while building 2.0 that the manual applies without explaining why; each says what was considered instead.
+
 The choices of 2.0 that are hard to change later (the on-disk format, the wire formats, compatibility), each with what was considered and why this one was kept.
 
 ## 1. Moments are stored as canonical text under new type codes
@@ -66,6 +68,6 @@ Like secondary indexes, schemas and change journals are set on each node. A repl
 
 **Reading an index in order.** The B-tree of a field keeps the texts of datetimes in text order, which is their date order to within a day (an offset moves an instant by less than a day). A walk of that index in order can therefore stop once the date of the values it reaches is past the last row it keeps, give or take a day. Every row is still placed by its exact key, which the unit test `the_bounds_hold_for_every_text_after_or_before` checks for every pair of texts. The value the index holds is the value of the field, so a row is placed before its document is read, and a row that cannot be kept is never read.
 
-**Choosing.** With a limit and a B-tree on the order field, KivaDB compares two costs. Reading that index takes about limit × n / c of its n keys, when c documents pass the filter, each checked against the indexes of the filter: such a check costs about 1/32 of reading a document. Reading the c candidates means reading all of them. c is counted from the indexes, without copying a key, and the counting stops as soon as it is large enough to decide. The rule assumes that the filter and the order are independent. When they are not, the walk reads more entries than expected (the [measurements](benchmarks/queries.md) show such a case, as fast as reading the candidates). `explain analyze` shows what was read.
+**Choosing.** With a limit and a B-tree on the order field, KivaDB compares two costs. Reading that index takes about limit × n / c of its n keys, when c documents pass the filter, each checked against the indexes of the filter: such a check costs about 1/32 of reading a document. Reading the c candidates means reading all of them. c is counted from the indexes, without copying a key, and the counting stops as soon as it is large enough to decide. The rule assumes that the filter and the order are independent. When they are not, the walk reads more entries than expected (the [measurements](../benchmarks/queries.md) show such a case, as fast as reading the candidates). `explain analyze` shows what was read.
 
 **Statistics.** The plans use what the indexes already know: the keys of each value, the number of values and of documents indexed (`indexes` shows them). They are exact, up to date at every write, rebuilt with the indexes, and cost nothing more to the writes. KivaDB keeps no histogram and no persistent statistics, so they have no format, no version and nothing to invalidate. A histogram would serve ranges without counting their keys. The counting is already bounded, so that is left until a measurement asks for it.

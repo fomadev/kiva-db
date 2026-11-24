@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot H of docs/architecture/RC5_ARCHITECTURE.md (sections 9 and 10):
+//! Lot H of docs/architecture/PROJECTS_AND_COLLECTIONS.md (sections 9 and 10):
 //! Prometheus counts commands by kind with their durations, expiries,
 //! transaction conflicts, query strategies, the semantic cache and failed
 //! backups; `stats` shows the same counts; and every error of the shell

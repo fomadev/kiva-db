@@ -1,6 +1,6 @@
 # KivaDB 2.0.0-rc.10 and 2.0.0, measured side by side
 
-The audit of 2.0.0 ([production-readiness-2.0.0.md](../../testing/production-readiness-2.0.0.md))
+The audit of 2.0.0 ([production-readiness-2.0.0.md](../testing/production-readiness-2.0.0.md))
 changes the start after a crash (the log read again, damage refused, the
 bytes cut kept in a copy), `check repair` and compaction only when they meet
 damage. These runs check that nothing else got slower.
@@ -13,10 +13,11 @@ measurement is in [`runs/rc10-stable`](runs/rc10-stable).
 * **No slowdown.** At 20 000 documents, 3 rounds, every median is within
   3 % of rc.10 except `8 clients, 80% reads` (+5 %, 181 µs against 173 µs,
   its p99 lower), within the spread of this machine
-  ([rc5.md](rc5.md) saw up to 18 % between two runs of the same versions).
+  (two runs of the same versions there differed by up to 18 % during the
+  release candidates).
 * **The start after a crash**, which reads the log again with the new rule,
   takes the time of rc.10 (1 024 ms against 1 028 ms), most of it the wait
-  for the port, as in [rc4.md](rc4.md).
+  for the port.
 * Memory, disk and CPU time are the same; compaction came out faster
   (504 ms against 687 ms), with no change to its path when nothing is
   damaged: not explained, given as measured.

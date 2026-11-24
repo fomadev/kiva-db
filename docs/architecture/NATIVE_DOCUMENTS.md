@@ -1,8 +1,9 @@
 # Native typed values in documents and storage format 3
 
+**Status: implemented in KivaDB 2.0.0** (storage format 3, the `KDOC` encoding, typed values in documents, extended JSON, the drivers in extended mode). The manual is the reference for users ([10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents), [19.4](../../DOCUMENTATION.md#194-the-data-file-byte-by-byte)); this page keeps the design, the decisions and the work plan that led there, written before the code. The working pages its plan names (`docs/v2/IMPLEMENTATION_MATRIX.md`, `docs/v2/RELEASE.md`) were removed after 2.0.0; the steps of a release are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
+
 The design of option C for KivaDB 2.0.0: documents and arrays that keep `int`, `float`, `decimal`, `date`, `time` and `datetime` values as such, after a write and a read, without a schema. It completes [NUMERIC_TYPES.md](NUMERIC_TYPES.md) (the numeric types and their keys) and [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) (formats and the typed literal grammar), which left this choice open; the maintainer chose C.
 
-Nothing here is implemented. No code of N2, of format 3 or of native values starts before the maintainer approves this design.
 
 Statements about the current engine refer to main at `bc43a47` plus the open PRs #93 (exact numbers) and #94 (date formats); the last section lists what was checked and what was not.
 
@@ -437,7 +438,8 @@ Section 13 has documents become `Value::Doc(Doc)`. C2 keeps `Value::Doc(Json)` f
 - a document is `Typed` exactly when it is stored in `KDOC`: `Value::typed` makes one, and gives back `Doc` in plain JSON when JSON can hold it (15.4, the `u64` rule included);
 - JSON and MessagePack documents go through the code of 2.0 unchanged, so H-read and H-format hold by construction, and they pay no conversion;
 - the modules that read documents (indexes, vectors, queries, unique checks, schemas, projections, Lua, changes) read a typed one in plain JSON, through `Value::json_doc`;
-- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works. C3 lifts these refusals (section 18).
+- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works.
+ C3 lifts these refusals (section 18).
 
 C3 can then move the readers to `Doc` one by one, and lift the refusals as each command learns native values.
 
@@ -466,7 +468,7 @@ With `KIVADB_RC2_BIN` and `KIVADB_V1_BIN` (the CI downloads both, checked agains
 - Encrypted `KDOC` payloads are checked by their checksum only in `restore --check`, which has no key.
 - The change journal keeps its version 1: a journal holding `KDOC` changes sits next to a data file of format 3, which an older KivaDB refuses first.
 - A Lua script that reads a typed document and writes it back writes texts: Lua gets plain JSON until C5 (`kiva.decimal`, `kiva.date`...).
-- Measurements on one Windows laptop ([docs/v2/benchmarks/documents.md](../v2/benchmarks/documents.md)): KDOC about 15 % smaller than JSON for orders with decimals and dates, decoded faster than JSON; the comparison of JSON workloads before and after C2 is within the noise of that machine and is to run again on a quiet Linux machine (lot S).
+- Measurements on one Windows laptop ([docs/benchmarks/documents.md](../benchmarks/documents.md)): KDOC about 15 % smaller than JSON for orders with decimals and dates, decoded faster than JSON; the comparison of JSON workloads before and after C2 is within the noise of that machine and is to run again on a quiet Linux machine (lot S).
 
 ## 18. C3 as built
 
@@ -1203,7 +1205,7 @@ S follows section 27 and the decisions G1 to G6, in the pull requests listed in 
 ### 28.3 Benchmarks and the pages of a release (G3, G5)
 
 - **`benches/versions.rs`** gains the orders of 27.4. On a server of their own, after the other cases, N/4 orders are written as JSON (a float and a text) and as typed documents (`decimal`, `datetime`), then read, then counted by a condition on the total. Both counts must agree. A version without typed values, 1.7.1, shows none; the table gives it `—`.
-- **Run again** on the laptop of the earlier runs: `main` at `7c62009` against the tag `v1.7.1`, both built by `rustc 1.99.0`, at 2 000, 20 000 and 100 000 documents, 3 rounds each. `docs/v2/benchmarks/versions.md` is rewritten from these runs. The earlier runs are kept in `runs/a15abdb`, together with a first run of 100 000 documents in 2 rounds, which one disturbed round made unclear.
+- **Run again** on the laptop of the earlier runs: `main` at `7c62009` against the tag `v1.7.1`, both built by `rustc 1.99.0`, at 2 000, 20 000 and 100 000 documents, 3 rounds each. `docs/benchmarks/versions.md` is rewritten from these runs. The earlier runs are kept in `runs/a15abdb`, together with a first run of 100 000 documents in 2 rounds, which one disturbed round made unclear.
 - **What it says:**
   - On 2 000 and 20 000 documents, 2.0 runs at the speed of 1.7.1, within the noise of the machine.
   - On 100 000 documents, 2.0 is 8 to 9 % slower to write and read simple values and 5 % slower on transactions, with 7 % more CPU time. That is within the spread of the machine, but in every round but one, so it is written in `versions.md` and in the "Known limits" of `CHANGELOG.md`.

@@ -2,8 +2,9 @@
 
 What a transaction does on its way to the disk, where a crash can stop it,
 and what a restart must find. The cases that check it are listed in
-[transaction-crash-matrix.md](transaction-crash-matrix.md), their results in
-[transaction-crash-report.md](transaction-crash-report.md).
+[transaction-crash-matrix.md](transaction-crash-matrix.md), with their
+results; what 2.0.0 adds is in
+[production-readiness-2.0.0.md](production-readiness-2.0.0.md).
 
 ## 1. What is promised
 

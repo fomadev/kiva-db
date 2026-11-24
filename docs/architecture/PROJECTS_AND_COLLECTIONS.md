@@ -1,4 +1,6 @@
-# KivaDB 2.0.0-rc.5: projects and collections, and the work around them
+# Projects and collections, and the work around them
+
+**Status: implemented in KivaDB 2.0.0**, first published in the candidate `2.0.0-rc.5`. The manual is the reference for users ([14.8](../../DOCUMENTATION.md#148-collections)); this page keeps the audit and the design that led there, and what was left for 2.1.
 
 This is an audit, and a design for the fifth release candidate. It covers:
 
@@ -8,7 +10,7 @@ This is an audit, and a design for the fifth release candidate. It covers:
 - metrics, the shell, the drivers;
 - full-text and hybrid search, as a study only.
 
-**Approved on 2026-11-21:** decisions D1 to D11 of section 12, as recommended. **Implemented:** lots P0, B, C, E, G, H and I, each merged after its own review, green CI and the maintainer's approval (#135 to #141), then the candidate `2.0.0-rc.5` (a home of the published rc.4 in `tests/fixtures/v2.0.0-rc.4`, `tests/compat_rc4.rs`, benchmarks in [rc5.md](../v2/benchmarks/rc5.md)). Lots F, D and J go to 2.1. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
+**Approved on 2026-11-21:** decisions D1 to D11 of section 12, as recommended. **Implemented:** lots P0, B, C, E, G, H and I, each merged after its own review, green CI and the maintainer's approval (#135 to #141), then the candidate `2.0.0-rc.5` (a home of the published rc.4 in `tests/fixtures/v2.0.0-rc.4`, `tests/compat_rc4.rs`). Lots F, D and J go to 2.1. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
 
 Statements about the code refer to `main` at `d173b56`.
 
