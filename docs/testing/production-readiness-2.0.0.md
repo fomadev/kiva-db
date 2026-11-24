@@ -85,7 +85,7 @@ byte for it.
 | 17 | No crash point in the production executables | PASS | rc.10 release: 0 occurrence in the 3 archives, SHA-256 checked; the CI now checks the release executable of each system before archiving it |
 | 18 | Full suite on Windows | PASS | 441 passed, 0 failed, 6 ignored; with the feature, `crash` 14 and `txn_recovery` 11 passed; `cargo fmt --check`, `cargo clippy -D warnings` with and without the feature |
 | 19 | Full suite on Linux and macOS | PASS | CI of [#154](https://github.com/fomadev/kiva-db/pull/154): 30 checks passed (build and tests on Windows x64, Linux x64, macOS arm64, crash points with the feature, release executables checked, drivers), 4 skipped (release-only steps) |
-| 20 | No performance regression | PASS | [stable.md](../v2/benchmarks/stable.md): 20 000 documents, 3 rounds, medians within 3 % but one (+5 %) |
+| 20 | No performance regression | PASS | [stable.md](../benchmarks/stable.md): 20 000 documents, 3 rounds, medians within 3 % but one (+5 %) |
 | 21 | Durability against a power cut or a crash of the operating system | NOT TESTED | Section 4: a limit of what these tests prove, documented |
 | 22 | Recovery of the verifiable records of a refused file | NOT TESTED | Not built; a backup restores; the refused file keeps every byte |
 | 23 | Manual tests on Windows (backup, restore, transactions, a kill) of the build of this branch | NOT TESTED | Left to the owner of the release |

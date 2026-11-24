@@ -8,7 +8,7 @@ This is an audit, and a design for the fifth release candidate. It covers:
 - metrics, the shell, the drivers;
 - full-text and hybrid search, as a study only.
 
-**Approved on 2026-11-21:** decisions D1 to D11 of section 12, as recommended. **Implemented:** lots P0, B, C, E, G, H and I, each merged after its own review, green CI and the maintainer's approval (#135 to #141), then the candidate `2.0.0-rc.5` (a home of the published rc.4 in `tests/fixtures/v2.0.0-rc.4`, `tests/compat_rc4.rs`, benchmarks in [rc5.md](../v2/benchmarks/rc5.md)). Lots F, D and J go to 2.1. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
+**Approved on 2026-11-21:** decisions D1 to D11 of section 12, as recommended. **Implemented:** lots P0, B, C, E, G, H and I, each merged after its own review, green CI and the maintainer's approval (#135 to #141), then the candidate `2.0.0-rc.5` (a home of the published rc.4 in `tests/fixtures/v2.0.0-rc.4`, `tests/compat_rc4.rs`). Lots F, D and J go to 2.1. `v2.0.0-rc.4` (tag `d173b56`, published 2026-11-20) is the reference for comparisons and compatibility.
 
 Statements about the code refer to `main` at `d173b56`.
 

@@ -6,7 +6,7 @@ The query work of 2.0 (`order by`, `explain analyze`, the planner) is measured o
 
 ## What it says
 
-The candidate `2.0.0-rc.4` is measured against `2.0.0-rc.3`, with the cost of `order by random()`, in [rc4.md](rc4.md): no slowdown. The candidate `2.0.0-rc.5` is measured against `2.0.0-rc.4` in [rc5.md](rc5.md): no slowdown that holds from one run to the next.
+The release `2.0.0` is measured against the last candidate, `2.0.0-rc.10`, in [stable.md](stable.md): no slowdown.
 
 These runs measure 2.0 as it is before the candidate `2.0.0-rc.3`, with the native values (`main` at `7c62009`). The earlier runs, made before the native values (`main` at `a15abdb`, 28 October 2026), are kept in [`runs/a15abdb`](runs/a15abdb) and gave the same picture.
 
@@ -24,7 +24,7 @@ These runs measure 2.0 as it is before the candidate `2.0.0-rc.3`, with the nati
 
 ## Method
 
-* **Program:** [`benches/versions.rs`](../../../benches/versions.rs), `cargo bench --bench versions`. It starts each server in a fresh home (`kivadb serve --home ... --no-http --no-resp`), in its default settings, and drives it with the Rust client of the crate (`kivadb::client`), the same for both versions. Every answer is checked: same rows, same counts, the last write found after a crash, the same count from the JSON and the typed orders.
+* **Program:** [`benches/versions.rs`](../../benches/versions.rs), `cargo bench --bench versions`. It starts each server in a fresh home (`kivadb serve --home ... --no-http --no-resp`), in its default settings, and drives it with the Rust client of the crate (`kivadb::client`), the same for both versions. Every answer is checked: same rows, same counts, the last write found after a crash, the same count from the JSON and the typed orders.
 * **Versions:** 1.7.1 is the tag `v1.7.1`, and 2.0 is `main` at `7c62009` with the case of orders added to the benchmark. Both were built in release mode by the same compiler (`rustc 1.99.0`), so that the compiler makes no difference.
 * **Rounds:** in each round, each version runs every case once. The versions take turns, and the one that starts alternates from round to round. The tables give the median over the rounds of each statistic; [`runs/`](runs) holds every round.
 * **Cases,** for N documents:
