@@ -6458,8 +6458,10 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Audit log** | The journal of sensitive actions: logins, account changes, deletions |
 | **Authentication** | Proving who you are with a user name and a password |
 | **Binary protocol** | KivaDB's own network language on port 2911, made of frames ([20.2](#202-the-binary-protocol)) |
+| **Change journal** | The changes of a collection kept on disk, in order, so that a program reads them again from a cursor ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)) |
 | **Checksum (CRC32)** | A number computed from data, stored with it, and recomputed at read time to detect damage |
 | **Client** | Any program that connects to a running KivaDB: the shell, Kiva Studio, your application |
+| **Collection** | An independent database inside one KivaDB, with its own keys, files and indexes; called a workspace before 2.0 ([Chapter 14](#chapter-14--collections-and-projects)) |
 | **Commit** | Apply the changes of a transaction |
 | **Compaction** | Rewriting the data file without obsolete records |
 | **Cosine similarity** | A score between -1 and 1 telling how close two vectors point; 1 means the same direction |
@@ -6468,9 +6470,10 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Embedding** | A vector produced by an AI model to represent the meaning of a text, an image or a sound |
 | **Encryption at rest** | Data stored encrypted on disk, readable only with the key ([16.12](#1612-encryption-at-rest)) |
 | **Epoch** | The number of the current master's term in a replication group; it grows at each failover ([25.8](#258-automatic-failover)) |
+| **Extended JSON** | JSON in which decimals, dates, times and datetimes keep their types (`{"$decimal": "10.50"}`), for programs ([20.4](#204-structured-requests-for-tools)) |
 | **Failover** | Handing the master role to a replica, by command or automatically ([25.7](#257-failover)) |
 | **Fragmentation** | The share of the data file occupied by obsolete records |
-| **Grant** | Permission given to a user on a workspace |
+| **Grant** | Permission given to a user on a collection, or on every collection of a project ([16.4](#164-workspaces-and-grants)) |
 | **Heartbeat** | A short message the master sends regularly so that replicas know it is alive |
 | **Hint file** | A saved copy of the index, for fast start |
 | **HNSW** | A graph of vectors that finds the nearest ones while comparing only a few ([12.5](#125-approximate-index-hnsw-for-large-collections)) |
@@ -6484,6 +6487,7 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Path** | The address of a field inside a document: `.address.city` |
 | **Pattern** | A key template with `*` and `?` |
 | **Port** | The number that tells which program of a machine a network connection is for: 2911, 8080, 6379 |
+| **Project** | A name that groups the collections of one application: `shop.orders`, `shop.users` ([14.8](#148-collections)) |
 | **Projection** | Keeping only some fields of the documents returned |
 | **Quorum** | The number of nodes that must agree before a new master is elected; by default a majority |
 | **REST API** | Access to KivaDB over plain HTTP, on port 8080 ([Chapter 21](#chapter-21--the-rest-api)) |
@@ -6496,6 +6500,7 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Server-Sent Events (SSE)** | An HTTP connection that stays open to receive notifications ([22.4](#224-over-server-sent-events)) |
 | **Shell** | The interactive command line opened by `kivadb`, with the `kiva>` prompt |
 | **Sorted set** | A Redis set whose members carry a score and stay ordered by it ([23.8](#238-sets-and-sorted-sets)) |
+| **Storage format** | The version of the layout of a data file, written in its header: 1 for 1.x, 2 and 3 for the types of 2.0 ([19.4](#194-the-data-file-byte-by-byte)) |
 | **Tombstone** | The record that marks a key as deleted |
 | **Transaction** | A group of changes applied together |
 | **Trigger** | A script run automatically when keys change |
@@ -6504,4 +6509,4 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Vector** | A list of numbers, such as an embedding; KivaDB finds the closest ones ([Chapter 12](#chapter-12--vector-search-for-ai)) |
 | **Vector index** | The vectors of a field kept in memory to make similarity search fast |
 | **WebSocket** | A two-way connection opened from a web page, used for notifications ([22.3](#223-over-websocket)) |
-| **Workspace** | An independent database inside one KivaDB |
+| **Workspace** | The name of a collection before 2.0; the `workspace` commands still work |
