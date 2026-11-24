@@ -1,6 +1,6 @@
 # Native typed values in documents and storage format 3
 
-**Status: implemented in KivaDB 2.0.0** (storage format 3, the `KDOC` encoding, typed values in documents, extended JSON, the drivers in extended mode). The manual is the reference for users ([10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents), [19.4](../../DOCUMENTATION.md#194-the-data-file-byte-by-byte)); this page keeps the design, the decisions and the work plan that led there, written before the code.
+**Status: implemented in KivaDB 2.0.0** (storage format 3, the `KDOC` encoding, typed values in documents, extended JSON, the drivers in extended mode). The manual is the reference for users ([10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents), [19.4](../../DOCUMENTATION.md#194-the-data-file-byte-by-byte)); this page keeps the design, the decisions and the work plan that led there, written before the code. The working pages its plan names (`docs/v2/IMPLEMENTATION_MATRIX.md`, `docs/v2/RELEASE.md`) were removed after 2.0.0; the steps of a release are in [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 The design of option C for KivaDB 2.0.0: documents and arrays that keep `int`, `float`, `decimal`, `date`, `time` and `datetime` values as such, after a write and a read, without a schema. It completes [NUMERIC_TYPES.md](NUMERIC_TYPES.md) (the numeric types and their keys) and [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) (formats and the typed literal grammar), which left this choice open; the maintainer chose C.
 
