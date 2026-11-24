@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot G of docs/architecture/RC5_ARCHITECTURE.md (section 8, decision
+//! Lot G of docs/architecture/PROJECTS_AND_COLLECTIONS.md (section 8, decision
 //! D10): `export` writes a collection's keys as NDJSON in extended JSON,
 //! `import` reads them back with their types, checks the whole file before
 //! writing, writes nothing with `dry run`, and gives the same keys when run

@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot I of docs/architecture/RC5_ARCHITECTURE.md (section 10): the table
+//! Lot I of docs/architecture/PROJECTS_AND_COLLECTIONS.md (section 10): the table
 //! of what each client can do (DOCUMENTATION.md 24.10) lists every
 //! structured request the server answers, and the driver methods it names
 //! exist in the drivers.

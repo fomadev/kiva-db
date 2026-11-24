@@ -1,4 +1,6 @@
-# KivaDB 2.0.0-rc.5: projects and collections, and the work around them
+# Projects and collections, and the work around them
+
+**Status: implemented in KivaDB 2.0.0**, first published in the candidate `2.0.0-rc.5`. The manual is the reference for users ([14.8](../../DOCUMENTATION.md#148-collections)); this page keeps the audit and the design that led there, and what was left for 2.1.
 
 This is an audit, and a design for the fifth release candidate. It covers:
 

@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Lot C of docs/architecture/RC5_ARCHITECTURE.md (section 5): new
+//! Lot C of docs/architecture/PROJECTS_AND_COLLECTIONS.md (section 5): new
 //! collections go in `<home>/projects/<project>/<collection>` or
 //! `<home>/collections/<name>`, their folders still written in kiva.conf;
 //! folders of the layout holding files are not taken over, names differing
