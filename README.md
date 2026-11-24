@@ -4,25 +4,27 @@
 
 # KivaDB
 
-KivaDB is a multi-model database you can start in one command: typed key-value data, JSON documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
+KivaDB is a multi-model database you can start in one command: typed key-value data, documents with indexes and queries, and vector search for AI, in a single executable written in Rust. You organise it in projects and collections, and talk to it from its shell, from any language (its own protocol, the Redis protocol, or HTTP), or from Kiva Studio, its desktop application.
 
-**Current release: 2.0.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)**
+**Current release: 2.0.0** &nbsp;|&nbsp; **[Read the full documentation → DOCUMENTATION.md](DOCUMENTATION.md)** &nbsp;|&nbsp; **[What is new in 2.0](DOCUMENTATION.md#what-is-new-in-20)** &nbsp;|&nbsp; **[Upgrading from 1.x](DOCUMENTATION.md#chapter-33--upgrading-from-kivadb-1x-to-20)**
 
 ## What it does
 
-* **Stores typed data**: strings, numbers, booleans, null, arrays, objects (JSON documents) and raw bytes.
-* **Keeps it safe**: every record is checksummed, a crash or a killed process loses nothing, and transactions are atomic.
-* **Finds it fast**: keys are kept sorted (range queries, pagination); documents are filtered with `and`, `or`, `not` and parentheses, `in [...]`, `like` and `ilike` (any case), served by sorted or hash indexes that the engine combines, and folded into aggregates (`count`, `sum`, `avg`, `min`, `max`, `group by`).
+* **Stores typed data**: strings, exact numbers (`int`, `float`, `decimal`), dates, times and datetimes with time zones, booleans, null, arrays, documents and raw bytes. Documents keep the type of every value inside them, and random values and UUIDs are drawn by the database.
+* **Organises it**: a collection is an independent database, a project groups the collections of one application (`shop.orders`, `shop.users`), and each account reaches only the collections or projects it is granted.
+* **Keeps it safe**: every record is checksummed, a crash or a killed process loses no answered write, and transactions are atomic, tested by stopping the process at every step of a commit. A data file damaged on disk is refused, never opened in part, and `kivadb doctor` checks a whole home without changing it.
+* **Finds it fast**: keys are kept sorted (range queries, pagination); documents are filtered with `and`, `or`, `not` and parentheses, `in [...]`, `like` and `ilike` (any case), sorted with `order by` (or drawn with `order by random()`), served by sorted or hash indexes that the planner combines (`explain analyze` shows what a query read), and folded into aggregates (`count`, `sum`, `avg`, `min`, `max`, `group by`).
 * **Keeps it consistent**: unique indexes, on one field or a combination of fields and optionally ignoring case, refuse a duplicate whoever writes it, even two clients at the same instant; `add place: {...}` names a new key with an identifier in MongoDB's ObjectId format. Applications [coming from MongoDB](DOCUMENTATION.md#249-coming-from-mongodb) find each operation's counterpart there.
 * **Understands AI embeddings**: `get similar doc:*.embedding to [...]` finds the closest documents (cosine, dot or Euclidean), with in-memory vector indexes: exact, or HNSW for large collections, optionally quantized to one byte per number, filtered on other fields during the search, and tuned on your data (`tune vector index ... auto` keeps it tuned as it grows). A **semantic cache** gives back the answer of a question already asked in other words, so that a language model is not called twice, and drops it as soon as the data it `depends` on changes.
 * **Speaks Redis**: applications and libraries written for Redis connect to port 6379 unchanged (RESP2 and RESP3): strings, counters, expiry to the millisecond, hashes, lists, sets, sorted sets, streams with consumer groups, blocking commands (`BLPOP`, `XREAD BLOCK`...), transactions with `WATCH`, JSON documents (`JSON.*`), vector search (`KIVA.SIMILAR`), Lua scripts (`EVAL`), publish/subscribe and numbered databases. Checked with ioredis, node-redis, rate-limiter-flexible and rate-limit-redis.
+* **Tells what changed**: a change journal per collection, read again from a cursor by the programs that mirror the data, expirations included; live notifications over WebSocket and Server-Sent Events.
 * **Runs as a service**: `kivadb start` puts the database in the background on port **2911**; shells, programs, the REST API (port 8080, with WebSocket and Server-Sent Events) and Redis clients (port 6379) all work on the same live data.
 * **Scripts in files**: commands can span several lines, and `.kva` files hold commands to run with `kivadb run data.kva`, from the shell or from Kiva Studio.
-* **Replicates and fails over**: replicas follow the master live, every workspace included; with `failover.auto`, they elect a new master by majority when it dies, and the old one steps down when it returns.
-* **Backs up in one command**: `kivadb backup -o all.tar.gz` while it runs, `kivadb restore all.tar.gz` after checking every SHA-256.
+* **Replicates and fails over**: replicas follow the master live, every collection included; with `failover.auto`, they elect a new master by majority when it dies, and the old one steps down when it returns.
+* **Backs up in one command**: `kivadb backup -o all.tar.gz` while it runs, `kivadb restore all.tar.gz` after checking every SHA-256; `kivadb export` and `import` move one collection as NDJSON.
 * **Encrypts its data at rest** (AES-256-GCM): records, index snapshots and vector graphs, with a key kept outside the data folder, key rotation, and `kivadb keygen`.
 * **Encrypts its connections**: TLS on every port (shell, Kiva Studio, drivers, HTTPS, `rediss://`), with a certificate it creates itself and checks by fingerprint like SSH, or your own.
-* **Grows with you**: users and roles, isolated workspaces, an optional in-memory value cache, compression, Lua scripts and triggers, change notifications, Prometheus metrics, Docker image, official Node.js driver.
+* **Grows with you**: users and roles, an optional in-memory value cache, compression, Lua scripts and triggers, Prometheus metrics and a readiness probe, a Docker image, and official Node.js and Python drivers.
 
 ## Install
 
@@ -60,6 +62,15 @@ kiva> count where user:*.role = "admin"
 Count: 1
 kiva> print "Next year ${name} will be ${age + 1}"
 Next year Fordi will be 31
+```
+
+An application gets a project, with a collection per kind of data:
+
+```text
+kiva> project create shop collections (orders, users)
+kiva> use shop.orders
+Using collection 'shop.orders' (0 keys).
+kiva[shop.orders]> add order: {"total": decimal "149.90", "day": date "2026-11-24"}
 ```
 
 The same data, from a program or the command line:
@@ -102,10 +113,14 @@ Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOC
 | `src/` | The database: storage engine, command language, servers (KivaDB protocol, REST, Redis), replication, scripting |
 | `tests/` | Automated tests (storage, commands, network, Redis, vectors, encryption, backups, failover, semantic cache) - run them with `cargo test` |
 | `drivers/node/` | The official Node.js driver (npm package `@fomadev/kivadb`) |
+| `drivers/python/` | The official Python driver (package `kivadb`) |
 | `examples/nodejs/` | A dependency-free Node.js client, to read the protocol |
+| `benches/` | The benchmarks: one version against another, and the query planner |
+| `docs/` | How 2.0 was designed, measured and tested ([docs/README.md](docs/README.md)) |
 | `Dockerfile`, `docker-compose.yml` | The Docker image and a ready-to-use Compose file |
 | `.github/workflows/` | Tests on Windows, Linux and macOS; releases and the Docker image on every version tag |
 | `DOCUMENTATION.md` | The complete manual |
+| `CHANGELOG.md` | What each version changed |
 | `ROADMAP.md` | What comes next, and what was set aside and why |
 | `CONTRIBUTING.md` | How to contribute |
 
