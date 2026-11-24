@@ -16,8 +16,7 @@ The driver has its own version numbers, separate from the server's:
 
 | Driver | Tested with | Needs a newer server |
 | :--- | :--- | :--- |
-| next (unreleased) | KivaDB 2.0.0-rc.5 | Nothing new: `collection`, `use()` and `whoami()` work with every server; `collections()` asks an older one under the former name |
-| 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`): 2.0.0 or later; `order_by="random()"` in `query`: 2.0.0-rc.4 or later |
+| 1.1.0 | KivaDB 2.0.0 | `types="extended"` (native values without loss, `Decimal`) and `order_by="random()"` in `query`: 2.0.0 or later. `collection`, `use()` and `whoami()` work with every server; `collections()` asks an older one under the former name |
 | 1.0.0 | KivaDB 2.0.0 | `date`, `time` and `datetime` values, `order_by` and `after` in `query`, `explain(analyze=True)` and `changes`: 2.0.0 or later |
 
 The other methods work with any server from 1.7.0. A minor version adds methods, a patch fixes them; a major version changes how existing ones behave, and says how in the changelog of the repository.
