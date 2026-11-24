@@ -27,12 +27,27 @@ What KivaDB contains is described in [DOCUMENTATION.md](DOCUMENTATION.md), and e
 * **1.6.1** The message that refuses text where a vector is expected no longer contains runs of spaces
 * **1.7.0** Conditions with `in`, `like` and `ilike`; **unique indexes**, on several fields and optionally `ignore case`, with a stable `UNIQUE` error; keys named by KivaDB with `add` (ObjectId format); Node.js driver 1.1.0 (`add`, `query`); a guide for applications coming from MongoDB
 * **1.7.1** `kivadb run`, `source` and `script load` read files saved by Windows PowerShell (UTF-16, or UTF-8 with a byte order mark)
+* **2.0.0** **Projects and collections**, with grants on a collection or a project; exact numbers (`int`, `float`, `decimal`); **dates, times and datetimes** with time zones and local formats; documents that keep the type of every value (storage format 3); random values and UUIDs; `order by`, a query planner and `explain analyze`; the **change journal**; NDJSON export and import; `kivadb doctor`; transactions tested against crashes at every step of a commit, and damaged files refused; the **Python driver**, and both drivers in extended mode ([DOCUMENTATION.md, what is new in 2.0](DOCUMENTATION.md#what-is-new-in-20))
+
+## Left for 2.1
+
+What 2.0.0 was designed to leave out, so that the release came first:
+
+| Item | What it brings | What it takes |
+| :--- | :--- | :--- |
+| **Recovering a damaged data file** | Copy the records that are still readable of a file that KivaDB refuses to open into a new home, without touching the original | 2.0 refuses such a file and keeps every byte of it; a backup restores it. A tool reading the original only, checking every record and leaving out every transaction it cannot prove whole |
+| **`kivadb relocate`** | Move the folders of collections made before 2.0 (`workspaces/<name>`) into the layout of 2.0 (`projects/<p>/<c>`) | A move that survives a stop in the middle, like `collection move` |
+| **Grants on a prefix of keys** | Give an account `user:*` of a collection and nothing else | Every command checked against the keys it touches, queries and scans included |
+| **Indexes on several fields that are not unique** | Serve `a = ... and b = ...` from one index | Composite keys in the B-tree indexes, which today only unique indexes have |
+| **Full-text and hybrid search** | Find documents by words, and mix words with vector similarity | An inverted index per field, a ranking (BM25), and a way to combine its score with similarity |
+| **A `duration` type** | Store "30 days" as a value | `+ 30 days` already shifts moments; a stored duration needs its own text form and arithmetic |
+| **Power-cut tests** | Proof of what survives a power cut, not only a crash of the process | A machine or a file system that drops what was not synced, stopped at random |
 
 ## Next, in order of value
 
 | Item | What it brings | What it takes |
 | :--- | :--- | :--- |
-| **Python driver on PyPI** | `pip install kivadb` | The driver is in `drivers/python` and tested in CI (2.0); publishing needs the package name on PyPI and a token or a trusted publisher |
+| **Python driver on PyPI** | `pip install kivadb` | The driver is in `drivers/python` and tested in CI on the three systems; publishing needs the package name on PyPI and a token or a trusted publisher |
 | **Vector indexes larger than memory** | Collections of vectors that do not fit in RAM even at one byte per number (`quantize sq8`) | Product quantisation (codebooks trained on the data, retrained as it changes) to shrink vectors further, or a disk-based graph (DiskANN, which needs another kind of graph and fast SSDs). The HNSW graph and its codes stay in memory |
 | **Go and Java drivers** | Reach backend teams in those languages | Same protocol work as the Node.js driver, per language |
 | **Very large Redis collections** | Sets, sorted sets, lists and streams of millions of members in one key | Today each one is a single KivaDB object, rewritten by every command (bounded by `resp.max_collection_members`). Millions of members need a structure of their own: one record per member in the log, an in-memory skip list or B-tree of the members, and compaction that understands them |
