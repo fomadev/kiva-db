@@ -1,9 +1,8 @@
 # KivaDB 2.0.0 — production readiness audit
 
 Audit of `main` after 2.0.0-rc.10 (`ed26356`), the fixes of this audit
-included. The crashes inside the commit: [transaction-crash-audit.md](transaction-crash-audit.md),
-[transaction-crash-matrix.md](transaction-crash-matrix.md),
-[transaction-crash-report.md](transaction-crash-report.md).
+included. The crashes inside the commit: [transaction-crash-audit.md](transaction-crash-audit.md)
+and [transaction-crash-matrix.md](transaction-crash-matrix.md).
 
 Each criterion is **PASS** (checked, by the test or the check named),
 **FAIL** (a defect that stays), or **NOT TESTED** (not checked here: what it

@@ -4,6 +4,11 @@ Each case: the state of the files the crash leaves, the states a restart may
 find, and the test that checks it. Why these points, and not others:
 [transaction-crash-audit.md](transaction-crash-audit.md).
 
+**Result:** every case below passes on Windows, Linux and macOS, in the
+continuous integration of each pull request since 2.0.0-rc.10, and run 5
+times in a row on Windows with the same results. Which test proves which
+criterion of 2.0.0: [production-readiness-2.0.0.md](production-readiness-2.0.0.md).
+
 The transaction is the same everywhere: `account:alpha` and `account:beta`
 at 100 000, then `begin`, alpha 99 999, beta 100 001, `commit`.
 
