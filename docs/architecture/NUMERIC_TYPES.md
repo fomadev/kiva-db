@@ -1,5 +1,7 @@
 # Numeric types: from `number` to `int`, `float` and `decimal` in KivaDB 2.0.0
 
+**Status: implemented in KivaDB 2.0.0**: `int`, `float` and `decimal` replace the public type `number`. The manual is the reference for users ([5.2](../../DOCUMENTATION.md#52-number)); this page keeps the audit and the design, written before the code, as its "Nothing here is implemented" says.
+
 An audit of the type `number` as KivaDB 2.0 implements it (main at `bc43a47`), then a design to replace it, as a public type, by `int`, `float` and `decimal` before 2.0.0 is released. Nothing here is implemented. Storage changes wait for the maintainer's decision.
 
 Typed literals in documents and arrays, and date formats, are in [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md); both notes share the grammar of its section 5 and the decision of section 6 below.

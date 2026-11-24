@@ -1,8 +1,9 @@
 # Native typed values in documents and storage format 3
 
+**Status: implemented in KivaDB 2.0.0** (storage format 3, the `KDOC` encoding, typed values in documents, extended JSON, the drivers in extended mode). The manual is the reference for users ([10.10](../../DOCUMENTATION.md#1010-typed-values-in-documents), [19.4](../../DOCUMENTATION.md#194-the-data-file-byte-by-byte)); this page keeps the design, the decisions and the work plan that led there, written before the code.
+
 The design of option C for KivaDB 2.0.0: documents and arrays that keep `int`, `float`, `decimal`, `date`, `time` and `datetime` values as such, after a write and a read, without a schema. It completes [NUMERIC_TYPES.md](NUMERIC_TYPES.md) (the numeric types and their keys) and [TEMPORAL_FORMATS.md](TEMPORAL_FORMATS.md) (formats and the typed literal grammar), which left this choice open; the maintainer chose C.
 
-Nothing here is implemented. No code of N2, of format 3 or of native values starts before the maintainer approves this design.
 
 Statements about the current engine refer to main at `bc43a47` plus the open PRs #93 (exact numbers) and #94 (date formats); the last section lists what was checked and what was not.
 
@@ -437,7 +438,8 @@ Section 13 has documents become `Value::Doc(Doc)`. C2 keeps `Value::Doc(Json)` f
 - a document is `Typed` exactly when it is stored in `KDOC`: `Value::typed` makes one, and gives back `Doc` in plain JSON when JSON can hold it (15.4, the `u64` rule included);
 - JSON and MessagePack documents go through the code of 2.0 unchanged, so H-read and H-format hold by construction, and they pay no conversion;
 - the modules that read documents (indexes, vectors, queries, unique checks, schemas, projections, Lua, changes) read a typed one in plain JSON, through `Value::json_doc`;
-- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works. C3 lifts these refusals (section 18).
+- the modules that change a document in place refuse a typed one (`json set`, `json incr`, `json del`, `json append`, `json insert`, Redis `JSON.SET` on a path, `JSON.DEL`, `JSON.NUMINCRBY`, `JSON.NUMMULTBY`, `JSON.ARRAPPEND`, `JSON.ARRINSERT`, and a schema that would fill in defaults), so that no read-change-write turns its values into texts. Writing the whole document again works.
+ C3 lifts these refusals (section 18).
 
 C3 can then move the readers to `Doc` one by one, and lift the refusals as each command learns native values.
 

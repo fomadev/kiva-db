@@ -1,5 +1,7 @@
 # KivaDB 2.0 — decisions
 
+**Status: in force in KivaDB 2.0.0.** The choices made while building 2.0 that the manual applies without explaining why; each says what was considered instead.
+
 The choices of 2.0 that are hard to change later (the on-disk format, the wire formats, compatibility), each with what was considered and why this one was kept.
 
 ## 1. Moments are stored as canonical text under new type codes
