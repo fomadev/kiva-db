@@ -111,6 +111,25 @@ You talk to KivaDB with short commands: `set` to store, `get` to read, `del` to 
 
 KivaDB is **not** a relational database: there are no tables, no joins and no SQL. Applications built around relations between many tables and complex reports are better served by PostgreSQL or MySQL, possibly next to KivaDB. [Chapter 32](#chapter-32--limits-and-scope) lists the limits honestly.
 
+### What is new in 2.0
+
+KivaDB 2.0.0 is the first major version since 1.0. What it adds, with where to read about it:
+
+* **Projects and collections.** A collection (the former workspace) is an independent database; a project groups the collections of one application under its name (`shop.orders`, `shop.users`). `use shop` selects a project, `collection create orders products` makes collections in it, `project current` and `collection current` say where you are ([14.8](#148-collections)).
+* **Accounts reach only what they are granted**, on a collection or a whole project (`grant write on shop.*`), and a new account gets no personal workspace any more ([16.4](#164-workspaces-and-grants)).
+* **Exact numbers**: `int`, `float` and `decimal` instead of one `number`; integers compared to the last digit, decimals added without rounding ([5.2](#52-number)).
+* **Dates and times** as types of their own, with time zones and the formats of each country ([5.8](#58-date-datetime-time)), also inside documents, which keep every value's type ([10.10](#1010-typed-values-in-documents)).
+* **Random values and UUIDs**, and `order by random() limit N` to draw documents ([5.11](#511-random-values-and-uuids)).
+* **Queries**: `order by` read from an index, pages with `after`, a planner that combines indexes, and `explain analyze` to see what a query read ([11.2](#112-get-where--find-documents), [11.5](#115-explain--see-how-a-query-will-run)).
+* **The change journal**: every change kept and read again from a cursor, expirations included ([22.5](#225-the-change-journal-changes-kept-read-again-from-a-cursor)).
+* **Export and import** of a collection as NDJSON, checked line by line before anything is written ([17.10](#1710-export-and-import-ndjson)).
+* **`kivadb doctor`**, a health check of the home that changes nothing ([17.9](#179-kivadb-doctor--a-health-check-of-the-home)).
+* **Safer recovery**: transactions tested against crashes at every step of a commit, and a data file damaged after its last clean stop refused rather than opened in part ([13.7](#137-guarantees), [17.2](#172-what-survives-what)).
+* **Monitoring**: a readiness probe and metrics by kind of command ([27.1](#271-quick-looks), [27.2](#272-prometheus)).
+* **Drivers**: an official Python driver next to the Node.js one, both able to keep every type of 2.0 ([24.4](#244-python), [24.10](#2410-what-each-client-can-do)).
+
+Coming from 1.x: what changes for your applications, and how to upgrade and go back, is in [Chapter 33](#chapter-33--upgrading-from-kivadb-1x-to-20). Every change, one by one: [CHANGELOG.md](CHANGELOG.md).
+
 ### The pieces
 
 | Piece | What it is |
