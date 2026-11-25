@@ -170,6 +170,43 @@ impl Catalog {
         })
     }
 
+    pub(crate) fn workspace_name(&self, id: WorkspaceId) -> Option<&str> {
+        self.0.workspaces.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn workspace_names(&self) -> impl Iterator<Item = &str> {
+        self.0.workspaces.iter().map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn project_name(&self, id: ProjectId) -> Option<&str> {
+        self.0.projects.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn project_names(&self, parent: WorkspaceId) -> impl Iterator<Item = &str> {
+        self.0.projects.iter().filter(move |entry| entry.parent == parent).map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn collection_name(&self, id: CollectionId) -> Option<&str> {
+        self.0.collections.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn collection_names(&self, parent: ProjectId) -> impl Iterator<Item = &str> {
+        self.0.collections.iter().filter(move |entry| entry.parent == parent).map(|entry| entry.name.as_str())
+    }
+
+    pub(crate) fn drop_project(&mut self, id: ProjectId, cascade: bool) -> Result<()> {
+        if !cascade && self.0.collections.iter().any(|entry| entry.parent == id) {
+            return Err(KivaError::Invalid("project contains collections; use cascade".into()));
+        }
+        self.0.collections.retain(|entry| entry.parent != id);
+        self.0.projects.retain(|entry| entry.id != id);
+        Ok(())
+    }
+
+    pub(crate) fn drop_collection(&mut self, id: CollectionId) {
+        self.0.collections.retain(|entry| entry.id != id);
+    }
+
     pub fn create_workspace(&mut self, name: &str) -> Result<WorkspaceId> {
         register(&mut self.0.workspaces, &mut self.0.next_id, WorkspaceId, (), name)
     }
@@ -300,15 +337,27 @@ const SYSTEM_KEY: &str = "catalog:workspace-hierarchy";
 /// before creating this record. Missing metadata is distinct from corruption.
 pub struct CatalogStore<'a> {
     system: &'a Engine,
+    key: &'static str,
 }
 
 impl<'a> CatalogStore<'a> {
     pub fn new(system: &'a Engine) -> Self {
-        Self { system }
+        Self { system, key: SYSTEM_KEY }
+    }
+
+    pub(crate) fn preview(system: &'a Engine) -> Self {
+        Self { system, key: "catalog:hierarchy-preview" }
+    }
+
+    pub(crate) fn edit_preview(&self, edit: impl FnOnce(&mut Catalog) -> Result<()>) -> Result<()> {
+        let transaction = CatalogTransaction::begin(self.system);
+        let mut catalog = self.load()?.unwrap_or_default();
+        edit(&mut catalog)?;
+        transaction.write(self.key, &catalog)
     }
 
     pub fn load(&self) -> Result<Option<Catalog>> {
-        match self.system.get(SYSTEM_KEY)? {
+        match self.system.get(self.key)? {
             None => Ok(None),
             Some((Value::Doc(document), _)) => Catalog::decode(document).map(Some),
             Some(_) => Err(KivaError::Corrupted("hierarchy catalog is not a document".into())),
@@ -320,7 +369,7 @@ impl<'a> CatalogStore<'a> {
         if self.load()?.is_some() {
             return Err(KivaError::Exists("hierarchy catalog already exists".into()));
         }
-        transaction.write(catalog)
+        transaction.write(self.key, catalog)
     }
 
     /// Publish a catalog-only change. Concurrent writers conflict, so an
@@ -329,7 +378,7 @@ impl<'a> CatalogStore<'a> {
         let transaction = CatalogTransaction::begin(self.system);
         let mut catalog = self.load()?.ok_or_else(|| KivaError::NotFound("hierarchy catalog is absent".into()))?;
         let result = edit(&mut catalog)?;
-        transaction.write(&catalog)?;
+        transaction.write(self.key, &catalog)?;
         Ok(result)
     }
 }
@@ -344,13 +393,9 @@ impl<'a> CatalogTransaction<'a> {
         Self { system, start: system.txn_begin() }
     }
 
-    fn write(&self, catalog: &Catalog) -> Result<()> {
-        let record = BatchOp::Put {
-            key: SYSTEM_KEY.into(),
-            value: Value::Doc(catalog.encode()?),
-            expires_at: 0,
-            msgpack: false,
-        };
+    fn write(&self, key: &str, catalog: &Catalog) -> Result<()> {
+        let record =
+            BatchOp::Put { key: key.into(), value: Value::Doc(catalog.encode()?), expires_at: 0, msgpack: false };
         self.system.apply_batch(vec![record], Some(self.start))?;
         self.system.sync()
     }

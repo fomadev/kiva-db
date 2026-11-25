@@ -236,7 +236,11 @@ impl Prompt {
     /// Shows `place` in the prompt: the collection in use, or the project
     /// chosen by `use <project>`; `None` (and `default`) give `kiva> `.
     pub fn set_place(&mut self, place: Option<&str>) {
-        self.label = match place.filter(|p| !p.is_empty() && *p != "default") {
+        self.set_context(place, false);
+    }
+
+    pub(crate) fn set_context(&mut self, place: Option<&str>, show_default: bool) {
+        self.label = match place.filter(|p| !p.is_empty() && (show_default || *p != "default")) {
             Some(p) => format!("kiva[{p}]> "),
             None => PROMPT.into(),
         };
@@ -292,6 +296,8 @@ mod tests {
         // `default`, or nowhere: the prompt everyone knows.
         p.set_place(Some("default"));
         assert_eq!(p.label, "kiva> ");
+        p.set_context(Some("default"), true);
+        assert_eq!(p.label, "kiva[default]> ");
         p.set_place(None);
         assert_eq!(p.label, "kiva> ");
         assert_eq!(complete("collection ren"), ["rename"]);

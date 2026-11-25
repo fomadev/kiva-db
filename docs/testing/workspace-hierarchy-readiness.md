@@ -64,3 +64,21 @@ The staging manifest is separate from the legacy engine files and does not
 participate in backup or replication for live hierarchical serving. The next
 phase must integrate session and authorization boundaries before changing
 data routing.
+
+## Phase 3 session and administration preview
+
+**NOT READY for hierarchical serving.** The experimental shell mode stores
+per-connection IDs for workspace, project, and collection and exposes
+metadata-only CRUD. A staged migration is read-only. Its legacy registrations
+are frozen through the application while data can still be served via legacy
+routes.
+
+| Verification | Status | Scope |
+| --- | --- | --- |
+| Preview navigation | PASS | Strict names, qualified paths, parent reset, missing parents and homonyms |
+| Administrative metadata | PASS | Atomic creation batches, explicit cascade, default protection, stable identities, restart |
+| Session isolation | PASS | Separate native TCP contexts, restricted login, and binary and structured data access refused |
+| Changes in another session | PASS | Rename follows identity, drop falls back to a surviving parent, and recreated names do not rebind |
+| Staged migration boundary | PASS | Preview reads the staged catalog without editing it, and legacy topology commands are refused |
+| Hierarchical data grants | NON TESTÉ | Authorization and data engine identity routing remain legacy |
+| Live hierarchical storage and driver integration | NON TESTÉ | Requires grant, protocol and maintenance integration before activation |

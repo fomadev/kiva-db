@@ -898,6 +898,9 @@ impl Session {
             let value = word(c.next(), "a value")?;
             c.finish(USAGE)?;
             let (s, k) = self.inst.cfg().resolve(&name)?;
+            if s == "workspaces" || (s == "storage" && k == "default_workspace") {
+                self.inst.guard_legacy_catalog_mutation()?;
+            }
             if s == "storage" && k == "default_workspace" {
                 std::fs::create_dir_all(&value).map_err(|e| format!("cannot use '{value}': {e}"))?;
             }

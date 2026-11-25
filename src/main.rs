@@ -42,6 +42,7 @@ SHELL OPTIONS:
   -e <command>                Run a command and exit (repeatable)
       --connect <host:port>   Connect to a running server instead of opening files
       --tls                   Encrypt that connection (TLS); a new server is shown first
+      --hierarchy-preview     Open the administrative hierarchy preview\n\
       --tls-fingerprint <fp>  Accept only the server certificate with this SHA-256
       --no-listen             Do not accept other local shells on this instance
 
@@ -165,6 +166,7 @@ fn parse_args() -> Args {
             "-e" => args.shell.commands.push(value(&mut it, "-e")),
             "--connect" => args.connect = Some(value(&mut it, "--connect")),
             "--no-listen" => args.no_listen = true,
+            "--hierarchy-preview" => args.shell.hierarchy_preview = true,
             "--skip-auth" => args.opts.skip_auth = true,
             "--lua-debug" => args.opts.lua_debug = true,
             "--port" => args.port = Some(port(value(&mut it, "--port"), "--port")),

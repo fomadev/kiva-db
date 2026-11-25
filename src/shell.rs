@@ -24,6 +24,7 @@ pub struct ShellOpts {
     pub user: Option<String>,
     pub password: Option<String>,
     pub workspace: Option<String>,
+    pub hierarchy_preview: bool,
     /// Commands given with `-e`: run them and exit.
     pub commands: Vec<String>,
     /// Connect with TLS (`--tls`).
@@ -149,13 +150,16 @@ trait Backend {
     fn exec(&mut self, line: &str) -> (Vec<(bool, String)>, Action);
     /// What the prompt shows: the collection in use, or the project chosen
     /// without a collection.
-    fn place(&mut self) -> Option<String>;
+    fn place(&mut self) -> (Option<String>, bool);
 }
 
 /// The commands after which the prompt may have to change.
 fn moves(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-    matches!(first.as_str(), "use" | "collection" | "collections" | "workspace" | "auth" | "login" | "project")
+    matches!(
+        first.as_str(),
+        "use" | "switch" | "hierarchy" | "collection" | "collections" | "workspace" | "auth" | "login" | "project"
+    )
 }
 
 struct Local {
@@ -168,13 +172,17 @@ impl Backend for Local {
         (out.lines, out.action)
     }
 
-    fn place(&mut self) -> Option<String> {
+    fn place(&mut self) -> (Option<String>, bool) {
         let s = &self.sess;
-        if s.ws_priv.is_some() {
-            Some(s.ws.clone())
-        } else {
-            s.project.clone()
+        if s.hierarchy.is_some() {
+            let place = s
+                .hierarchy_location()
+                .ok()
+                .flatten()
+                .map(|names| names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join("."));
+            return (place, true);
         }
+        (if s.ws_priv.is_some() { Some(s.ws.clone()) } else { s.project.clone() }, false)
     }
 }
 
@@ -205,17 +213,22 @@ impl Backend for Remote {
 
     /// Asked with the structured request `whoami`; an older server, or a
     /// session not logged in, leaves the prompt as it is.
-    fn place(&mut self) -> Option<String> {
-        if write_frame(&mut self.stream, CMD_API, br#"{"op":"whoami"}"#).is_err() {
-            return None;
-        }
-        let (code, payload) = self.rx.recv().ok()?;
-        if code != ST_OK {
-            return None;
-        }
-        let j: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-        let place = j["collection"].as_str().or(j["workspace"].as_str()).or(j["project"].as_str());
-        place.map(String::from)
+    fn place(&mut self) -> (Option<String>, bool) {
+        let result = (|| {
+            write_frame(&mut self.stream, CMD_API, br#"{"op":"whoami"}"#).ok()?;
+            let (code, payload) = self.rx.recv().ok()?;
+            if code != ST_OK {
+                return None;
+            }
+            let j: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+            let place = j["hierarchy_path"]
+                .as_str()
+                .or(j["collection"].as_str())
+                .or(j["workspace"].as_str())
+                .or(j["project"].as_str());
+            Some((place.map(String::from), j["hierarchy_preview"].as_bool().unwrap_or(false)))
+        })();
+        result.unwrap_or_default()
     }
 }
 
@@ -258,6 +271,13 @@ fn announce(rx: Receiver<String>, sink: Sink) {
 }
 
 fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32 {
+    if opts.hierarchy_preview {
+        let (lines, _) = backend.exec("hierarchy on");
+        show(&lines);
+        if lines.iter().any(|(error, _)| *error) {
+            return 1;
+        }
+    }
     if let Some((name, statements)) = &opts.script {
         return run_file(backend, name, statements, opts.keep_going);
     }
@@ -285,7 +305,8 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
     }
     let mut code = 0;
     if interactive {
-        prompt.set_place(backend.place().as_deref());
+        let (place, preview) = backend.place();
+        prompt.set_context(place.as_deref(), preview);
     }
     loop {
         // A command goes on over several lines while a { or [ is open.
@@ -324,7 +345,8 @@ fn repl(backend: &mut dyn Backend, opts: &ShellOpts, prompt: &mut Prompt) -> i32
         let (lines, action) = backend.exec(&line);
         let elapsed = start.elapsed();
         if interactive && moves(&line) {
-            prompt.set_place(backend.place().as_deref());
+            let (place, preview) = backend.place();
+            prompt.set_context(place.as_deref(), preview);
         }
         if lines.iter().any(|(e, _)| *e) {
             code = 1;

@@ -71,6 +71,7 @@ pub struct Session {
     /// commands then ask for one (`use <project>.<collection>`).
     pub project: Option<String>,
     pub txn: Option<Txn>,
+    pub(crate) hierarchy: Option<crate::hierarchy::Context>,
     /// True for the local shell; remote sessions cannot log in with an empty password.
     pub local: bool,
     /// Where key-change notifications for this session are delivered.
@@ -100,6 +101,7 @@ impl Session {
             ws_priv: Some(Priv::Read),
             project: None,
             txn: None,
+            hierarchy: None,
             local,
             events,
             subs: Vec::new(),
@@ -207,6 +209,7 @@ impl Session {
         if self.txn.is_some() {
             self.rollback();
         }
+        self.hierarchy = None;
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
         self.take_account_formats(&user);
@@ -281,7 +284,7 @@ impl Session {
     }
 
     // Subscriptions are per workspace: they do not follow the session.
-    fn drop_subscriptions(&mut self) {
+    pub(crate) fn drop_subscriptions(&mut self) {
         if !self.subs.is_empty() {
             self.inst.pubsub.unsubscribe(self.id, None);
             self.subs.clear();
@@ -336,6 +339,11 @@ impl Session {
     }
 
     pub fn check(&self, need: Need) -> Result<()> {
+        if self.hierarchy.is_some() && matches!(need, Need::Read | Need::Write | Need::Owner | Need::Admin) {
+            return Err(KivaError::Denied(
+                "data operations and server administration are disabled in hierarchy preview".into(),
+            ));
+        }
         if need == Need::None {
             return Ok(());
         }

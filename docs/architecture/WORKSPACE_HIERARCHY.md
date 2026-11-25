@@ -142,3 +142,51 @@ parent directory is also synchronized. Windows process-interruption tests
 do not establish persistence across a sudden power loss. Confirmed
 historical records whose authentication already fails still require
 recovery from a known-good backup. The procedure does not rewrite them.
+
+## Administrative hierarchy preview
+
+Start the shell with `kivadb --hierarchy-preview` or enter `hierarchy on`
+from an administrator session. A TCP connection must authenticate as an
+administrator. The preview starts at `kiva[default]>` and tracks workspace,
+project, and collection identities independently for each connection.
+
+```text
+workspace create fordima sandbox
+switch fordima
+project create efoma
+use efoma
+collection create users products orders
+use collection users
+use efoma.products
+use collection fordima.efoma.orders
+hierarchy off
+```
+
+`switch` always selects a workspace. An unqualified `use` selects a project.
+Changing workspace clears the project and collection. Changing project clears
+the collection. Failed navigation keeps the prior valid context. A rename
+follows an existing identity across connections. If another connection drops
+that identity, subsequent lookups fall back to the closest surviving parent.
+Recreating the name does not rebind the selection.
+
+The `workspace`, `project`, and `collection` commands each accept `create`,
+`list`, `current`, `info`, `exists`, `rename <old> <new>`, and `drop`.
+Project administration is relative to the current workspace. Collection
+administration is relative to the current project. Each batch of names passed
+to `create` commits as one system record. Dropping a nonempty workspace or
+project requires `cascade`. The default workspace cannot be renamed or
+dropped.
+
+The preview catalog is a separate system record for metadata experiments.
+It allocates no data stores and never supplies a legacy engine lookup.
+Hierarchical access is not enabled. Data commands, structured data requests,
+and raw binary reads and writes are refused while preview is active.
+`hierarchy off` restores the session's historical selection.
+
+When offline migration is staged, the preview shows that catalog read-only.
+Legacy clients can still read and write existing stores. Legacy registration
+changes, storage path changes, single-store restore into the home, and
+incoming replication are blocked while that stage is active. A rollback
+withdraws the stage and makes the independent preview metadata visible again.
+Activating hierarchical data routing will require the grant adapter,
+protocol and maintenance changes before choosing an authoritative catalog.
