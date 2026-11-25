@@ -182,6 +182,15 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Read an existing configuration without creating or replacing it.
+    pub(crate) fn read_existing(home: &Path) -> Result<Config> {
+        let path = home.join("kiva.conf");
+        let text = fs::read_to_string(&path)?;
+        let mut cfg = Config { path, home: home.to_path_buf(), sections: BTreeMap::new() };
+        cfg.parse(&text);
+        Ok(cfg)
+    }
+
     fn default_of(&self, key: &str, default: &str) -> String {
         if key == "default_workspace" {
             self.home.join("data").display().to_string()

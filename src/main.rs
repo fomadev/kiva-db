@@ -24,6 +24,7 @@ USAGE:
   kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb keygen               Print a new encryption key (for KIVADB_ENCRYPTION_KEY)
+  kivadb migrate <plan|apply|status|verify|rollback>\n\
   kivadb doctor [--json]      Look for what could stop KivaDB or lose data (reads only)
   kivadb backup -o <f.tar.gz> Save the home (or -w <workspace>) to an archive, even while running
   kivadb restore <f.tar.gz>   Restore an archive (--target <dir>, --as <name>, --check: only verify)
@@ -64,6 +65,7 @@ COMMON OPTIONS:
 struct Args {
     serve: bool,
     action: Option<&'static str>,
+    migration: Option<String>,
     home: Option<PathBuf>,
     connect: Option<String>,
     no_listen: bool,
@@ -115,6 +117,11 @@ fn parse_args() -> Args {
             "tls" => args.action = Some("tls"),
             "keygen" => args.action = Some("keygen"),
             "doctor" => args.action = Some("doctor"),
+            "migrate" => {
+                args.action = Some("migrate");
+                let mode = value(&mut it, "migrate");
+                args.migration = Some(mode.strip_prefix("--").unwrap_or(&mode).to_owned());
+            }
             "--json" => args.json = true,
             "backup" => args.action = Some("backup"),
             "restore" => {
@@ -727,6 +734,13 @@ fn main() {
     }
     if matches!(args.action, Some("export" | "import")) {
         exit(transfer(&home, &args));
+    }
+    if args.action == Some("migrate") {
+        match kivadb::migration::run(&home, args.migration.as_deref().unwrap_or_default()) {
+            Ok(message) => println!("{message}"),
+            Err(e) => fail(&e.to_string()),
+        }
+        return;
     }
     if args.action == Some("doctor") {
         let running = running_port(&home).map(|p| (p, running_pid(&home)));

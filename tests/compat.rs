@@ -626,3 +626,45 @@ fn historical_homes_have_a_deterministic_hierarchy_plan() {
         assert_eq!(reopened.workspace_names().len(), aliases.len(), "{version}");
     }
 }
+
+#[test]
+fn offline_migration_keeps_historical_store_bytes_and_accounts() {
+    for version in ["v1.7.1", "v1.7.1-encrypted", "v2.0.0-rc.2", "v2.0.0-rc.3", "v2.0.0-rc.4"] {
+        let dir = TempDir::new("compat_offline_migration");
+        let home = home_from(version, &dir);
+        if version == "v1.7.1-encrypted" {
+            configure_fixture_key(&home, &dir);
+        }
+        if version == "v1.7.1" {
+            // The public fixture does not contain these originally lazy stores.
+            let inst = open(&home);
+            for name in ["u_ana", "u_guest"] {
+                inst.engine(name).unwrap();
+            }
+            inst.shutdown();
+        }
+        let original = snapshot(&home);
+        let applied = kivadb::migration::run(&home, "apply").unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert!(applied.starts_with("STAGED"), "{version}");
+        kivadb::migration::run(&home, "verify").unwrap();
+        for (path, bytes) in &original {
+            assert_eq!(std::fs::read(path).unwrap(), *bytes, "{version}: {}", path.display());
+        }
+        kivadb::migration::run(&home, "rollback").unwrap();
+        for (path, bytes) in &original {
+            assert_eq!(std::fs::read(path).unwrap(), *bytes, "{version}: {}", path.display());
+        }
+
+        let inst = open(&home);
+        assert!(inst.workspace_catalog().unwrap().is_none());
+        let mut session = Session::new(inst, true, None);
+        if version == "v1.7.1" {
+            the_values_of_1_7_1_are_all_there(&mut session);
+            ok(&mut session, "auth ana ana-pw");
+            assert!(ok(&mut session, "whoami").contains("ana (editor)"));
+        }
+        if version == "v1.7.1-encrypted" {
+            assert_eq!(ok(&mut session, "get secret.pin"), "secret.pin: 4321 [string]");
+        }
+    }
+}

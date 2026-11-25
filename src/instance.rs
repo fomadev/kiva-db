@@ -341,7 +341,10 @@ impl Instance {
         )?;
         // Validate staged metadata before account migration and administrative recovery.
         // An absent record keeps a historical home on the existing storage layout.
-        CatalogStore::new(&system).load()?;
+        let embedded = CatalogStore::new(&system).load()?;
+        if crate::migration::staged_catalog(home)?.is_some() && embedded.is_some() {
+            return Err(KivaError::Corrupted("multiple staged workspace catalogs".into()));
+        }
         auth::ensure_admin(&system)?;
         auth::migrate_personal_workspaces(&system, |w| config.workspace_dir(w).is_some())?;
         for done in recover_moves(&system, &config)? {
@@ -655,7 +658,10 @@ impl Instance {
     /// Read validated hierarchy metadata for internal migration tooling.
     /// Serving continues to resolve storage and authorization through the legacy configuration.
     pub fn workspace_catalog(&self) -> Result<Option<Catalog>> {
-        CatalogStore::new(&self.system).load()
+        match crate::migration::staged_catalog(&self.home)? {
+            Some(catalog) => Ok(Some(catalog)),
+            None => CatalogStore::new(&self.system).load(),
+        }
     }
 
     /// Prepare an advisory migration plan from the current registrations.
