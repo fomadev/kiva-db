@@ -40,6 +40,7 @@ pub mod kva;
 pub mod lexer;
 pub mod lineedit;
 pub mod literal;
+mod managed_layout;
 pub mod migration;
 pub mod num;
 pub mod proto;

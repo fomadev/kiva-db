@@ -170,6 +170,30 @@ impl Catalog {
         })
     }
 
+    /// Managed paths keyed by immutable identity, with each direct parent's ID.
+    pub(crate) fn managed_entries(&self) -> Result<std::collections::BTreeMap<u64, crate::managed_layout::Resource>> {
+        use crate::hierarchy_layout as layout;
+        use crate::managed_layout::Resource;
+        use std::path::Path;
+        let root = Path::new("");
+        let mut entries = std::collections::BTreeMap::new();
+        for workspace in &self.0.workspaces {
+            let path = layout::workspace(root, &workspace.name)?;
+            entries.insert(workspace.id.0, Resource { parent: None, path, collection: false });
+        }
+        for project in &self.0.projects {
+            let parent = &entries[&project.parent.0];
+            let path = parent.path.join("projects").join(layout::segment(&project.name)?);
+            entries.insert(project.id.0, Resource { parent: Some(project.parent.0), path, collection: false });
+        }
+        for collection in &self.0.collections {
+            let parent = &entries[&collection.parent.0];
+            let path = parent.path.join("collections").join(layout::segment(&collection.name)?);
+            entries.insert(collection.id.0, Resource { parent: Some(collection.parent.0), path, collection: true });
+        }
+        Ok(entries)
+    }
+
     pub(crate) fn workspace_name(&self, id: WorkspaceId) -> Option<&str> {
         self.0.workspaces.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
     }

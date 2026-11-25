@@ -102,3 +102,24 @@ preview shows planned workspace paths and exposes resource-specific help.
 
 The export does not turn into a runnable database. Protocols and maintenance
 must be integrated before any cutover to the proposed filesystem layout.
+
+## Phase 4B managed storage lifecycle
+
+**NOT READY for hierarchical serving.** The local administrator can
+explicitly enter managed storage mode in an unstaged, standard test home.
+The managed catalog has a durable pending snapshot. Recovery uses directory
+and store identities to finish physical changes before publishing it.
+
+| Verification | Scope |
+| --- | --- |
+| Physical lifecycle | Collection initialization, workspace/project/collection rename, non-destructive retirement, recreation with a fresh identity, and restart |
+| Paths and ownership | Case collisions, traversal rejection, symlink rejection on Unix, and a Windows-only real junction test |
+| Concurrency | Conflicting creations and refusal to move an open store |
+| Recovery | Interrupted directory and store creation, moves, retirement, and catalog publication |
+| Engine compatibility | Encrypted store creation and reopen through the existing engine, and refusal to adopt a substituted store |
+| Remaining work | Live authorization, routing, staged migration cutover, restore/reattachment, managed backup, replication and client integration |
+
+UNC and extended Windows paths, cross-volume relocation and sudden
+power loss have no dedicated coverage. The managed catalog is an
+administration record. The final cutover to a serving catalog remains a
+subsequent integration.

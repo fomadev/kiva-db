@@ -282,6 +282,7 @@ struct TriggerJob {
 pub struct Instance {
     pub home: PathBuf,
     staged_migration: bool,
+    pub(crate) managed_layout_lock: Mutex<()>,
     pub config: RwLock<Config>,
     /// Hidden database holding users, stored scripts and triggers.
     pub system: Arc<Engine>,
@@ -364,6 +365,7 @@ impl Instance {
         let inst = Arc::new_cyclic(|weak| Instance {
             home: home.to_path_buf(),
             staged_migration,
+            managed_layout_lock: Mutex::new(()),
             config: RwLock::new(config),
             system,
             nowhere,
@@ -396,6 +398,10 @@ impl Instance {
                 inst.repl.broadcast(crate::repl::SYSTEM, op);
             }
         });
+        if crate::managed_layout::exists(home)? {
+            inst.check_managed_layout_home()?;
+            crate::managed_layout::open(home, &inst.engine_options())?;
+        }
         inst.recover_pending_projects()?;
         inst.reload_triggers();
         inst.start_trigger_worker();
@@ -710,8 +716,29 @@ impl Instance {
     }
 
     pub(crate) fn guard_legacy_catalog_mutation(&self) -> Result<()> {
+        if crate::managed_layout::exists(&self.home)? {
+            return Err(KivaError::ReadOnly("legacy topology is frozen while the managed layout exists".into()));
+        }
         if self.staged_migration {
             return Err(KivaError::ReadOnly("legacy catalog is frozen while an offline migration is staged".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_managed_layout_home(&self) -> Result<()> {
+        crate::managed_layout::validate_roots(&self.home)?;
+        if self.workspace_catalog()?.is_some() {
+            return Err(KivaError::ReadOnly("managed layout cannot be used with a staged migration".into()));
+        }
+        let config = self.cfg();
+        let default = config.workspace_dir("default").expect("default path");
+        let default_path = default.canonicalize().unwrap_or(default);
+        let expected = self.home.join("data");
+        let expected = expected.canonicalize().unwrap_or(expected);
+        if self.staged_migration || !config.workspaces().is_empty() || default_path != expected {
+            return Err(KivaError::ReadOnly(
+                "managed layout requires an unstaged home with only the standard legacy data store".into(),
+            ));
         }
         Ok(())
     }
