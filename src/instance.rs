@@ -281,6 +281,7 @@ struct TriggerJob {
 
 pub struct Instance {
     pub home: PathBuf,
+    staged_migration: bool,
     pub config: RwLock<Config>,
     /// Hidden database holding users, stored scripts and triggers.
     pub system: Arc<Engine>,
@@ -342,7 +343,8 @@ impl Instance {
         // Validate staged metadata before account migration and administrative recovery.
         // An absent record keeps a historical home on the existing storage layout.
         let embedded = CatalogStore::new(&system).load()?;
-        if crate::migration::staged_catalog(home)?.is_some() && embedded.is_some() {
+        let staged_migration = crate::migration::staged_catalog(home)?.is_some();
+        if staged_migration && embedded.is_some() {
             return Err(KivaError::Corrupted("multiple staged workspace catalogs".into()));
         }
         auth::ensure_admin(&system)?;
@@ -358,6 +360,7 @@ impl Instance {
 
         let inst = Arc::new_cyclic(|weak| Instance {
             home: home.to_path_buf(),
+            staged_migration,
             config: RwLock::new(config),
             system,
             nowhere,
@@ -521,6 +524,7 @@ impl Instance {
     /// `create_workspace`; `reuse` lets a folder of the layout that already
     /// holds files be taken back (a replica, a Redis database number).
     fn create_workspace_in(&self, name: &str, dir: Option<&str>, reuse: bool) -> Result<PathBuf> {
+        self.guard_legacy_catalog_mutation()?;
         check_workspace_name(name)?;
         if self.cfg().workspace_dir(name).is_some() {
             return Err(KivaError::Exists(format!("workspace '{name}' already exists")));
@@ -555,6 +559,7 @@ impl Instance {
 
     /// Unregisters a workspace; its files stay on disk. Returns whether it existed.
     pub fn remove_workspace(&self, name: &str) -> Result<bool> {
+        self.guard_legacy_catalog_mutation()?;
         if name == "default" {
             return Err(KivaError::Invalid("the default workspace cannot be removed".into()));
         }
@@ -590,6 +595,7 @@ impl Instance {
     /// (into a project). Its files stay where they are, and the grants that
     /// named it follow it. Refused while a session or a script is in it.
     pub fn rename_workspace(&self, from: &str, to: &str) -> Result<()> {
+        self.guard_legacy_catalog_mutation()?;
         if from == "default" || to == "default" {
             return Err(KivaError::Invalid("the default workspace keeps its name".into()));
         }
@@ -700,11 +706,19 @@ impl Instance {
         Ok((catalog, plan))
     }
 
+    pub(crate) fn guard_legacy_catalog_mutation(&self) -> Result<()> {
+        if self.staged_migration {
+            return Err(KivaError::ReadOnly("legacy catalog is frozen while an offline migration is staged".into()));
+        }
+        Ok(())
+    }
+
     pub fn project_exists(&self, name: &str) -> bool {
         self.system.get(&format!("project:{name}")).ok().flatten().is_some()
     }
 
     pub fn create_project(&self, name: &str) -> Result<()> {
+        self.guard_legacy_catalog_mutation()?;
         if !auth::valid_name_part(name) {
             return Err(KivaError::Invalid("project names may only contain letters, digits, '_' and '-'".into()));
         }
@@ -722,6 +736,7 @@ impl Instance {
     /// finishes the creation (`recover_pending_projects`): nothing is lost by
     /// finishing, since everything is new and empty.
     pub fn create_project_with(&self, name: &str, collections: &[String]) -> Result<Vec<PathBuf>> {
+        self.guard_legacy_catalog_mutation()?;
         if !auth::valid_name_part(name) {
             return Err(KivaError::Invalid("project names may only contain letters, digits, '_' and '-'".into()));
         }
@@ -778,6 +793,7 @@ impl Instance {
     /// (`recover_pending_projects`): finishing loses nothing, since each one
     /// is new and empty.
     pub fn create_collections(&self, names: &[String]) -> Result<Vec<PathBuf>> {
+        self.guard_legacy_catalog_mutation()?;
         let mut seen: Vec<&String> = Vec::new();
         for name in names {
             check_workspace_name(name)?;
@@ -868,6 +884,7 @@ impl Instance {
 
     /// Removes an empty project. Returns whether it existed.
     pub fn remove_project(&self, name: &str) -> Result<bool> {
+        self.guard_legacy_catalog_mutation()?;
         let inside: Vec<String> =
             self.workspace_names().into_iter().filter(|w| auth::project_of(w) == Some(name)).collect();
         if !inside.is_empty() {

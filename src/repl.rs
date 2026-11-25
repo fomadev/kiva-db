@@ -694,6 +694,7 @@ pub fn connect_node(
 }
 
 fn follow(inst: &Arc<Instance>, addr: &str, active: &dyn Fn() -> bool) -> Result<()> {
+    inst.guard_legacy_catalog_mutation()?;
     let mut stream = connect_node(inst, addr, Duration::from_secs(5), active)?;
     stream.set_read_timeout(Some(Duration::from_millis(200)))?;
     let listen = {

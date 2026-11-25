@@ -1425,9 +1425,15 @@ impl Session {
         let cmd = if tokens[0].is_bare() { tokens[0].text.to_ascii_lowercase() } else { String::new() };
 
         self.wrote = false;
-        let res = match self.check(required(&cmd, &tokens)) {
-            Ok(()) => self.dispatch(&cmd, &tokens, line, &mut out),
-            Err(e) => Err(e.to_string()),
+        let res = if cmd == "hierarchy"
+            || (self.hierarchy.is_some() && !matches!(cmd.as_str(), "quit" | "exit" | "auth" | "login"))
+        {
+            self.execute_hierarchy(&cmd, &tokens[1..], &mut out)
+        } else {
+            match self.check(required(&cmd, &tokens)) {
+                Ok(()) => self.dispatch(&cmd, &tokens, line, &mut out),
+                Err(e) => Err(e.to_string()),
+            }
         };
         if let Err(e) = res {
             out.err(error_line(&cmd, &e));
@@ -1465,7 +1471,9 @@ impl Session {
                     t.is_kw("create") || t.is_kw("remove") || t.is_kw("drop") || t.is_kw("move") || t.is_kw("rename")
                 }))
             || (cmd == "project"
-                && tokens.get(1).is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("drop")))
+                && tokens
+                    .get(1)
+                    .is_some_and(|t| t.is_kw("create") || t.is_kw("remove") || t.is_kw("drop") || t.is_kw("rename")))
             || (cmd == "check" && tokens.get(1).is_some_and(|t| t.is_kw("repair")))
             || cmd == "export"
             || cmd == "import"

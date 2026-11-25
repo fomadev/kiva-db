@@ -631,6 +631,9 @@ pub fn restore(archive: &Path, home: &Path, opts: &RestoreOptions) -> Result<Vec
         let original = names.first().cloned().ok_or_else(|| bad(archive, "it names no workspace"))?;
         let name = opts.rename.clone().unwrap_or_else(|| original.clone());
         let _lock = lock_home(home)?;
+        if crate::migration::staged_catalog(home)?.is_some() {
+            return Err(KivaError::ReadOnly("legacy catalog is frozen while an offline migration is staged".into()));
+        }
         let mut cfg = crate::config::Config::load(home)?;
         if cfg.workspace_dir(&name).is_some() {
             return Err(KivaError::Exists(format!(

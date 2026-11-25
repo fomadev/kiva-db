@@ -29,6 +29,7 @@ mod exec_admin;
 pub mod expr;
 pub mod failover;
 pub mod format;
+mod hierarchy;
 pub mod hint;
 pub mod hnsw;
 pub mod http;

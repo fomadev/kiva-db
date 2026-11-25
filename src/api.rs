@@ -447,6 +447,28 @@ pub fn read_changes(
 pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
     sess.use_zone();
     let op = str_field(req, "op")?;
+    if sess.hierarchy.is_some() {
+        if op != "whoami" {
+            return Err(KivaError::Denied(
+                "only whoami is available through the structured API in hierarchy preview".into(),
+            ));
+        }
+        let [workspace, project, collection] = sess.hierarchy_location()?.expect("preview context");
+        let path = [&workspace, &project, &collection]
+            .into_iter()
+            .filter(|name| !name.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(".");
+        return Ok(json!({
+            "user": sess.user_name(), "role": "admin",
+            "workspace": workspace,
+            "project": (!project.is_empty()).then_some(project),
+            "collection": (!collection.is_empty()).then_some(collection),
+            "hierarchy_path": path, "hierarchy_preview": true,
+            "access": Json::Null, "can_write": false, "can_compact": false,
+        }));
+    }
     let types = Types::of_request(req)?;
     match op {
         "whoami" => {
