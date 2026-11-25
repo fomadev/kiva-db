@@ -3264,12 +3264,28 @@ impl Engine {
             return Ok(());
         }
         inner.check_vector_room(vector_growth)?;
-        // Mark the final record as the commit point (flags byte is covered by
-        // the CRC, so re-stamp it).
+        // The final record carries the commit marker. Encrypted records
+        // authenticate their header, so changing its flags requires resealing.
         let last = recs.last_mut().unwrap();
-        last[11] |= FLAG_TXN_COMMIT;
-        let crc = crc32fast::hash(&last[4..]);
-        last[..4].copy_from_slice(&crc.to_le_bytes());
+        let header = parse_header(last);
+        if header.flags & FLAG_ENCRYPTED != 0 {
+            let (key, value) = crypt::open_record(inner.keys.as_deref(), last)
+                .map_err(|_| KivaError::Corrupted("cannot authenticate staged transaction record".into()))?;
+            let key = std::str::from_utf8(&key)
+                .map_err(|_| KivaError::Corrupted("invalid key in staged transaction record".into()))?;
+            *last = inner.encode(
+                key,
+                &value,
+                header.ty,
+                header.flags | FLAG_TXN_COMMIT,
+                header.timestamp,
+                header.expires_at,
+            )?;
+        } else {
+            last[11] |= FLAG_TXN_COMMIT;
+            let crc = crc32fast::hash(&last[4..]);
+            last[..4].copy_from_slice(&crc.to_le_bytes());
+        }
 
         let mut buf = Vec::with_capacity(recs.iter().map(|r| r.len()).sum());
         let mut offs = Vec::with_capacity(recs.len());
