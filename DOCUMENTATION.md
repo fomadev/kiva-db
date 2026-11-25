@@ -6510,3 +6510,19 @@ The accounts saved by 2.0 carry the new model. 1.7.1 reads them, but gives each 
 | **Vector index** | The vectors of a field kept in memory to make similarity search fast |
 | **WebSocket** | A two-way connection opened from a web page, used for notifications ([22.3](#223-over-websocket)) |
 | **Workspace** | The name of a collection before 2.0; the `workspace` commands still work |
+
+
+### Administrative preview and physical layout snapshots
+
+Use `--hierarchy-preview` to try the hierarchical shell. Each of
+`workspace help`, `project help`, and `collection help` shows the context
+and navigation for that entity. `workspace list --details` shows counts and
+planned paths. A collection list requires a selected project.
+
+After stopping an instance and staging an offline migration, run
+`kivadb migrate layout-plan --home <home>` to inspect the mapping.
+Use `kivadb migrate copy-layout --home <home> --target <new-directory>` for
+a snapshot of the verified backup under the managed paths. The target must
+be outside the source home and not exist. The exported tree is an offline
+artifact and cannot be used as a serving home. See the
+[architecture notes](docs/architecture/WORKSPACE_HIERARCHY.md#physical-layout-export).

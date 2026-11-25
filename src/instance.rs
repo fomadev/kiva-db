@@ -321,6 +321,9 @@ impl Instance {
     /// Opens (creating on first run) the instance rooted at `home`.
     /// Fails with `Locked` if another process already owns it.
     pub fn open(home: &Path, opts: Options) -> Result<Arc<Instance>> {
+        if home.join(crate::hierarchy_layout::EXPORT_MARKER).try_exists()? {
+            return Err(KivaError::Invalid("a hierarchy layout export is not a runnable database home".into()));
+        }
         fs::create_dir_all(home)?;
         let lock = OpenOptions::new().create(true).write(true).truncate(false).open(home.join("instance.lock"))?;
         if !crate::util::lock_exclusive(&lock) {

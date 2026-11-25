@@ -30,6 +30,7 @@ pub mod expr;
 pub mod failover;
 pub mod format;
 mod hierarchy;
+mod hierarchy_layout;
 pub mod hint;
 pub mod hnsw;
 pub mod http;

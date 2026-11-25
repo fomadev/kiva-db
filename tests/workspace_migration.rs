@@ -153,3 +153,82 @@ fn backup_creation_failure_leaves_the_migration_unpublished() {
     assert_eq!(std::fs::read(home.join("workspace-migration-backups")).unwrap(), b"existing file");
     assert_eq!(std::fs::read(home.join("data/store.kiva")).unwrap(), original);
 }
+
+#[test]
+fn physical_layout_export_preserves_sources_and_refuses_existing_destinations() {
+    let dir = TempDir::new("migration_layout_source");
+    let target = TempDir::new("migration_layout_target");
+    let export = target.path().canonicalize().unwrap().join("layout");
+    {
+        let inst = instance(&dir);
+        let mut s = Session::new(inst.clone(), true, None);
+        ok(&mut s, "project create Shop collections (Orders)");
+        ok(&mut s, "project create Empty");
+        ok(&mut s, "use Shop.Orders");
+        ok(&mut s, "set amount 42");
+        drop(s);
+        inst.shutdown();
+    }
+    let home = dir.path();
+    let source = home.join("projects/Shop/Orders/store.kiva");
+    let stored = std::fs::read(&source).unwrap();
+    migration::run(home, "apply").unwrap();
+    let plan = migration::run(home, "layout-plan").unwrap();
+    let managed = Path::new("workspaces/default/projects/Shop/collections/Orders");
+    assert!(plan.contains(&managed.display().to_string().replace('/', std::path::MAIN_SEPARATOR_STR)));
+    assert!(migration::run_with_target(home, "copy-layout", Some(home)).is_err());
+    migration::run_with_target(home, "copy-layout", Some(&export)).unwrap();
+    let copied = export.join(managed).join("store.kiva");
+    assert_eq!(std::fs::read(&copied).unwrap(), stored);
+    assert_eq!(std::fs::read(&source).unwrap(), stored);
+    assert!(!export.join("workspaces/default/store.kiva").exists());
+    assert!(export.join("workspaces/default/projects/Empty").is_dir());
+    assert!(!export.join("workspaces/default/projects/Empty/store.kiva").exists());
+    assert!(migration::run_with_target(home, "copy-layout", Some(&export)).is_err());
+    assert!(kivadb::instance::Instance::open(&export, Default::default()).is_err());
+    migration::run(home, "rollback").unwrap();
+    assert_eq!(std::fs::read(copied).unwrap(), stored);
+}
+
+#[cfg(unix)]
+#[test]
+fn layout_copy_refuses_a_destination_through_a_symlink() {
+    let dir = TempDir::new("migration_layout_symlink_source");
+    let target = TempDir::new("migration_layout_symlink_target");
+    prepare(&dir);
+    migration::run(dir.path(), "apply").unwrap();
+    let link = target.path().canonicalize().unwrap().join("link");
+    std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+    let result = migration::run_with_target(dir.path(), "copy-layout", Some(&link.join("layout")));
+    assert!(result.unwrap_err().to_string().contains("non-directory parent"));
+    assert!(!dir.path().join("layout").exists());
+}
+
+#[cfg(feature = "crash-points")]
+#[test]
+fn interrupted_layout_export_is_not_published_and_can_be_retried() {
+    let dir = TempDir::new("migration_layout_interrupted");
+    let parent = TempDir::new("migration_layout_retry");
+    prepare(&dir);
+    let original = std::fs::read(dir.path().join("data/store.kiva")).unwrap();
+    migration::run(dir.path(), "apply").unwrap();
+    let root = parent.path().canonicalize().unwrap();
+    let export = root.join("layout");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_kivadb"))
+        .args(["migrate", "copy-layout", "--home"])
+        .arg(dir.path())
+        .arg("--target")
+        .arg(&export)
+        .env("KIVADB_CRASH_ARMED", "1")
+        .env("KIVADB_CRASH_POINT", "migration.layout_after_collection")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("KIVADB-CRASH-POINT"), "{out:?}");
+    let marker = std::fs::read_to_string(export.join("workspace-layout-export.json")).unwrap();
+    assert!(marker.contains("COPYING"));
+    assert!(kivadb::instance::Instance::open(&export, Default::default()).is_err());
+    assert!(migration::run_with_target(dir.path(), "copy-layout", Some(&export)).is_err());
+    migration::run_with_target(dir.path(), "copy-layout", Some(&root.join("retry"))).unwrap();
+    assert_eq!(std::fs::read(dir.path().join("data/store.kiva")).unwrap(), original);
+}

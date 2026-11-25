@@ -66,9 +66,9 @@ impl Parent {
         match kind {
             "workspace" => Ok(Self::Root),
             "project" => Ok(Self::Workspace(context.workspace)),
-            "collection" => {
-                context.project.map(Self::Project).ok_or_else(|| KivaError::Invalid("select a project first".into()))
-            }
+            "collection" => context.project.map(Self::Project).ok_or_else(|| {
+                KivaError::Invalid("ERR_NO_PROJECT_SELECTED: select a project first with use <project>".into())
+            }),
             _ => Err(KivaError::Denied("only hierarchy metadata commands are available in preview".into())),
         }
     }
@@ -163,7 +163,9 @@ fn navigate(catalog: &Catalog, mut current: Context, command: &str, args: &[Toke
     let (workspace, project, collection) = match parts.as_slice() {
         [collection] if explicit => (
             current.workspace,
-            current.project.ok_or_else(|| KivaError::Invalid("select a project first".into()))?,
+            current.project.ok_or_else(|| {
+                KivaError::Invalid("ERR_NO_PROJECT_SELECTED: select a project first with use <project>".into())
+            })?,
             *collection,
         ),
         [project, collection] => {
@@ -241,7 +243,7 @@ impl Session {
         }
         if matches!(command, "help" | "h") && args.is_empty() {
             out.say("switch <workspace> | use <project> | use <project>.<collection> | use collection <path>");
-            out.say("workspace|project|collection create|list|current|info|exists|rename|drop");
+            out.say("workspace|project|collection create|list|current|info|exists|rename|drop|help");
             out.say("hierarchy off returns to the legacy session");
             return Ok(());
         }
@@ -256,6 +258,21 @@ impl Session {
         let (operation, args) =
             args.split_first().ok_or_else(|| KivaError::Invalid("missing hierarchy operation".into()))?;
         let op = operation.text.to_ascii_lowercase();
+        if op == "help" && args.is_empty() {
+            out.say(format!("{command} create <name> [...]"));
+            let details = if command == "workspace" { " [--details]" } else { "" };
+            out.say(format!("{command} list{details} | current | info <name> | exists <name>"));
+            out.say(format!("{command} rename <old> to <new>"));
+            let cascade = if command == "collection" { "" } else { " [cascade]" };
+            out.say(format!("{command} drop <name>{cascade}"));
+            let navigation = match command {
+                "workspace" => "switch <workspace>",
+                "project" => "use <project>",
+                _ => "use collection <collection> | use <project>.<collection> | use collection <workspace>.<project>.<collection>",
+            };
+            out.say(navigation);
+            return Ok(());
+        }
         if op == "current" && args.is_empty() {
             let [workspace, project, collection] = context.names(&catalog);
             let name = match command {
@@ -269,6 +286,22 @@ impl Session {
         let parent = Parent::for_kind(command, context)?;
         match (op.as_str(), args) {
             ("list", []) => out.say(parent.names(&catalog).join("\n")),
+            ("list", [flag]) if command == "workspace" && flag.text == "--details" => {
+                out.say("WORKSPACE  PROJECTS  COLLECTIONS  PLANNED PATH");
+                for name in parent.names(&catalog) {
+                    let id = catalog.workspace(name).expect("listed workspace");
+                    let projects: Vec<_> = catalog.project_names(id).collect();
+                    let collections: usize = projects
+                        .iter()
+                        .map(|name| {
+                            let project = catalog.project(id, name).expect("listed project");
+                            catalog.collection_names(project).count()
+                        })
+                        .sum();
+                    let path = crate::hierarchy_layout::workspace(&self.inst.home, name)?;
+                    out.say(format!("{name}  {}  {collections}  {}", projects.len(), path.display()));
+                }
+            }
             ("exists", [name]) => out.say(parent.target(&catalog, &name.text).is_some().to_string()),
             ("info", [name]) => {
                 out.say(lookup(parent.target(&catalog, &name.text), command, &name.text)?.info(&catalog))
@@ -282,7 +315,7 @@ impl Session {
                 })?;
                 out.say(format!("Created {} {command} entries", args.len()));
             }
-            ("rename", [from, to]) => {
+            ("rename", [from, to] | [from, _, to]) if args.len() == 2 || args[1].is_kw("to") => {
                 self.edit_hierarchy(|catalog| {
                     lookup(parent.target(catalog, &from.text), command, &from.text)?.rename(catalog, &to.text)
                 })?;

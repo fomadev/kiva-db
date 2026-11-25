@@ -118,9 +118,13 @@ fn followers(first: &str) -> &'static [&'static str] {
         "changes" => &["enable", "disable", "status", "read", "forget"],
         "compress" => &["lz4", "zlib", "none"],
         "autocompact" => &["on", "off", "status", "threshold"],
-        "workspace" => &["list", "current", "switch", "create", "rename", "move", "remove"],
-        "collection" => &["list", "current", "switch", "create", "rename", "move", "drop", "remove"],
-        "project" => &["list", "current", "create", "drop", "remove"],
+        "workspace" => {
+            &["list", "current", "help", "info", "exists", "switch", "create", "rename", "move", "remove", "drop"]
+        }
+        "collection" => {
+            &["list", "current", "help", "info", "exists", "switch", "create", "rename", "move", "drop", "remove"]
+        }
+        "project" => &["list", "current", "help", "info", "exists", "create", "rename", "drop", "remove"],
         "use" => &["collection", "project"],
         "config" => &["list", "get", "set"],
         "create" => &["user", "index", "vector", "trigger"],

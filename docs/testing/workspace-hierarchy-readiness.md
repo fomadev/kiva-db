@@ -82,3 +82,23 @@ routes.
 | Staged migration boundary | PASS | Preview reads the staged catalog without editing it, and legacy topology commands are refused |
 | Hierarchical data grants | NON TESTÉ | Authorization and data engine identity routing remain legacy |
 | Live hierarchical storage and driver integration | NON TESTÉ | Requires grant, protocol and maintenance integration before activation |
+
+## Phase 4A physical layout preview and export
+
+**NOT READY for hierarchical serving.** A staged backup can be exported
+into the managed collection paths under a separate new directory. Empty
+workspace and project directories contain no user store. The hierarchy
+preview shows planned workspace paths and exposes resource-specific help.
+
+| Verification | Status | Scope |
+| --- | --- | --- |
+| FS03–FS05, FS12–FS13 | PASS for offline export | Collection snapshot with empty parent directories, byte equality, and legacy rollback preserving the export |
+| FS14 | PASS for offline export | Interrupted copy stays unpublished and retries into a new destination |
+| FS15–FS16 | PASS on Linux for traversal and symlink refusal | Windows reparse-point check awaits a dedicated junction test |
+| CLI01–CLI04 | PASS in preview | Scoped lists, explicit missing-project error, and resource help |
+| Active layout lifecycle | NON TESTÉ | Online allocation, engine reopen, rename and retired storage remain outstanding |
+| AUTH01–AUTH04 and DATA01–DATA04 | NON TESTÉ | Authorization and routing still use the legacy implementation |
+| Performance and capacity preflight | NON TESTÉ | No phase-specific benchmarks or free-space estimator |
+
+The export does not turn into a runnable database. Protocols and maintenance
+must be integrated before any cutover to the proposed filesystem layout.
