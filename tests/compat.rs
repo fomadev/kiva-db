@@ -583,8 +583,6 @@ fn a_unique_index_holding_values_now_equal_is_reported_at_opening() {
 
 #[test]
 fn historical_homes_have_a_deterministic_hierarchy_plan() {
-    use kivadb::catalog::plan_legacy_catalog;
-
     for version in ["v1.7.1", "v1.7.1-encrypted", "v2.0.0-rc.2", "v2.0.0-rc.3", "v2.0.0-rc.4"] {
         let dir = TempDir::new("compat_hierarchy_plan");
         let home = home_from(version, &dir);
@@ -594,16 +592,37 @@ fn historical_homes_have_a_deterministic_hierarchy_plan() {
         let inst = open(&home);
         let projects = inst.projects();
         let stores = inst.workspace_names();
-        let (catalog, aliases) = plan_legacy_catalog(projects.clone(), stores.clone()).unwrap();
+        if version == "v1.7.1" {
+            // The fixture registers two personal stores without data files.
+            // Preflight must not silently treat a missing file as an empty store.
+            let error = inst.plan_workspace_migration().unwrap_err().to_string();
+            assert!(error.contains("legacy store 'u_ana'"), "{error}");
+            for name in ["u_ana", "u_guest"] {
+                let path = inst.cfg().workspace_dir(name).unwrap().join("store.kiva");
+                assert!(!path.exists());
+                // Materialize the historical lazy stores only on this test copy.
+                inst.engine(name).unwrap();
+            }
+        }
+        let (catalog, aliases) = inst.plan_workspace_migration().unwrap();
         let default = catalog.workspace("default").unwrap();
         assert!(catalog.project(default, "legacy").is_some());
         assert_eq!(aliases.len(), stores.len(), "{version}");
         for name in stores {
-            let alias = aliases.iter().find(|entry| entry.name == name).unwrap();
+            let (alias, dir) = aliases.iter().find(|(entry, _)| entry.name == name).unwrap();
+            assert_eq!(Some(dir.clone()), inst.cfg().workspace_dir(&name));
             let expected =
                 if name.contains('.') { format!("default.{name}") } else { format!("default.legacy.{name}") };
             assert_eq!(alias.qualified_name, expected, "{version}");
         }
         assert_eq!(inst.projects(), projects, "{version}");
+        kivadb::catalog::CatalogStore::new(&inst.system).initialize(&catalog).unwrap();
+        inst.shutdown();
+        drop(inst);
+
+        let reopened = open(&home);
+        let saved = reopened.workspace_catalog().unwrap().unwrap();
+        assert_eq!(saved.encode().unwrap(), catalog.encode().unwrap(), "{version}");
+        assert_eq!(reopened.workspace_names().len(), aliases.len(), "{version}");
     }
 }

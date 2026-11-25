@@ -157,3 +157,71 @@ fn catalog_updates_are_committed_as_one_record_and_reopen() {
     let engine = Engine::open(&path, Default::default()).unwrap();
     assert_eq!(CatalogStore::new(&engine).load().unwrap().unwrap().workspace("winner"), Some(recorded_id));
 }
+
+#[test]
+fn startup_loads_staged_identities_without_switching_storage() {
+    use common::{instance, ok, TempDir};
+    use kivadb::catalog::{plan_legacy_catalog, CatalogStore};
+    use kivadb::session::Session;
+
+    let dir = TempDir::new("hierarchy_startup");
+    let expected = {
+        let inst = instance(&dir);
+        assert!(inst.workspace_catalog().unwrap().is_none());
+        let mut session = Session::new(inst.clone(), true, None);
+        ok(&mut session, "set greeting 42");
+        let (catalog, aliases) = plan_legacy_catalog(inst.projects(), inst.workspace_names()).unwrap();
+        CatalogStore::new(&inst.system).initialize(&catalog).unwrap();
+        drop(session);
+        inst.shutdown();
+        aliases[0].id
+    };
+
+    let inst = instance(&dir);
+    let catalog = inst.workspace_catalog().unwrap().unwrap();
+    assert_eq!(catalog.resolve_collection("default", "legacy", "default").unwrap(), expected);
+    assert!(catalog.resolve_collection("default", "missing", "default").is_err());
+    let mut session = Session::new(inst.clone(), true, None);
+    assert_eq!(ok(&mut session, "get greeting"), "greeting: 42 [int]");
+    assert_eq!(inst.workspace_names(), vec!["default"]);
+}
+
+#[test]
+fn startup_refuses_invalid_staged_metadata_without_replacing_it() {
+    use common::{instance, TempDir};
+    use kivadb::engine::Engine;
+    use kivadb::instance::{Instance, Options};
+    use kivadb::value::Value;
+
+    let dir = TempDir::new("hierarchy_startup_invalid");
+    let key = "catalog:workspace-hierarchy";
+    let invalid = serde_json::json!({"version":1,"next_id":2,"workspaces":[],"projects":[],"collections":[]});
+    {
+        let inst = instance(&dir);
+        inst.system.put(key, &Value::Doc(invalid.clone()), 0, false).unwrap();
+        inst.system.sync().unwrap();
+        inst.shutdown();
+    }
+    assert!(matches!(Instance::open(dir.path(), Options::default()), Err(KivaError::Corrupted(_))));
+    let system = Engine::open(dir.path().join("system/system.kiva"), Default::default()).unwrap();
+    let Some((Value::Doc(document), _)) = system.get(key).unwrap() else {
+        panic!("invalid record was removed or replaced");
+    };
+    assert_eq!(document, invalid);
+}
+
+#[test]
+fn migration_preview_refuses_missing_and_shared_legacy_storage() {
+    use common::{instance, TempDir};
+
+    let dir = TempDir::new("hierarchy_preview_storage");
+    let inst = instance(&dir);
+    let missing = dir.path().join("missing");
+    inst.cfg_mut().set("workspaces", "other", &missing.display().to_string()).unwrap();
+    assert!(inst.plan_workspace_migration().unwrap_err().to_string().contains("legacy store 'other'"));
+
+    let default = inst.cfg().workspace_dir("default").unwrap();
+    inst.cfg_mut().set("workspaces", "other", &default.display().to_string()).unwrap();
+    assert!(inst.plan_workspace_migration().unwrap_err().to_string().contains("share storage"));
+    assert!(inst.workspace_catalog().unwrap().is_none());
+}
