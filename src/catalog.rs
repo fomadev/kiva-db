@@ -234,7 +234,8 @@ impl Catalog {
 
 /// A proposed translation of one existing storage name. The collection keeps
 /// its historical physical path when the plan is activated.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LegacyCollection {
     pub name: String,
     pub qualified_name: String,

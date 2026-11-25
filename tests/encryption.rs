@@ -249,3 +249,70 @@ fn the_instance_encrypts_every_workspace_and_its_users() {
     let o = kivadb(home, &["-e", "get card"], Some(&"0".repeat(64)), "");
     assert!(String::from_utf8_lossy(&o.stderr).contains("encrypted with key"), "{o:?}");
 }
+
+#[test]
+fn encrypted_final_put_keeps_an_authenticated_commit_header() {
+    use kivadb::engine::BatchOp;
+
+    let dir = TempDir::new("encrypted_commit_put");
+    let path = dir.path().join("store.kiva");
+    let engine = Engine::open(&path, opts(keys(7))).unwrap();
+    engine.put("earlier", &Value::from_json(json!(10)), 0, false).unwrap();
+    engine
+        .apply_batch(
+            vec![
+                BatchOp::Put { key: "first".into(), value: Value::from_json(json!(41)), expires_at: 0, msgpack: false },
+                BatchOp::Put { key: "last".into(), value: Value::from_json(json!(42)), expires_at: 0, msgpack: false },
+            ],
+            None,
+        )
+        .unwrap();
+    assert_eq!(engine.get("last").unwrap().unwrap().0, Value::from_json(json!(42)));
+    engine.sync().unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut offset = kivadb::format::FILE_HEADER_LEN as usize;
+    let mut final_offset = offset;
+    while offset < bytes.len() {
+        final_offset = offset;
+        offset += parse_header(&bytes[offset..]).total_len() as usize;
+    }
+    let record = &bytes[final_offset..];
+    let flags = parse_header(record).flags;
+    assert_ne!(flags & FLAG_ENCRYPTED, 0);
+    assert_ne!(flags & kivadb::format::FLAG_TXN_COMMIT, 0);
+    assert_eq!(kivadb::crypt::open_record(keys(7).as_deref(), record).unwrap().0, b"last");
+    drop(engine);
+    let reopened = Engine::open(&path, opts(keys(7))).unwrap();
+    assert_eq!(reopened.get("last").unwrap().unwrap().0, Value::from_json(json!(42)));
+    assert_eq!(reopened.get("first").unwrap().unwrap().0, Value::from_json(json!(41)));
+    assert_eq!(reopened.get("earlier").unwrap().unwrap().0, Value::from_json(json!(10)));
+}
+
+#[cfg(feature = "crash-points")]
+#[test]
+fn encrypted_transaction_survives_crash_after_commit_append() {
+    let dir = TempDir::new("encrypted_commit_crash");
+    let key = "07".repeat(32);
+    let out = Command::new(env!("CARGO_BIN_EXE_kivadb"))
+        .args([
+            "--home",
+            dir.path().to_str().unwrap(),
+            "--no-listen",
+            "-e",
+            "begin",
+            "-e",
+            "set balance 42",
+            "-e",
+            "commit",
+        ])
+        .env("KIVADB_ENCRYPTION_KEY", &key)
+        .env("KIVADB_CRASH_ARMED", "1")
+        .env("KIVADB_CRASH_POINT", "batch.after_append")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("KIVADB-CRASH-POINT"), "{out:?}");
+    let out = kivadb(dir.path(), &["--no-listen", "-e", "get balance"], Some(&key), "");
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("balance: 42 [int]"), "{out:?}");
+}

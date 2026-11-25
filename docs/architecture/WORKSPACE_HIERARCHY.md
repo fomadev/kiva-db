@@ -89,3 +89,56 @@ absence, unsupported versions and malformed records. Startup validates a staged 
 5. **Activation and validation.** Enable serving only with compatible storage
    and permissions, complete crash and migration checks, and measure the
    hierarchy against the release baseline.
+
+## Offline staging and rollback
+
+Stop the instance and quiesce other writers to any custom store paths.
+Run these commands with the same key configuration used for serving
+encrypted homes:
+
+```sh
+kivadb migrate plan --home /path/to/home
+kivadb migrate apply --home /path/to/home
+kivadb migrate status --home /path/to/home
+kivadb migrate verify --home /path/to/home
+kivadb migrate rollback --home /path/to/home
+```
+
+The commands take the home lock. Planning and applying also take the normal
+engine locks on the registered stores. Planning validates raw logs and opens
+private scratch copies to detect records that cannot be read or need
+recovery. Missing storage, pending administration, overlapping paths,
+directory or file symlinks encountered in the source tree, and duplicate
+physical store identities prevent staging. The preview creates no backup or
+catalog metadata.
+
+Apply copies the configuration, system files, registered store directories
+(including indexes, schema metadata and change logs), and any present TLS
+files and audit log into a unique `workspace-migration-backups/<id>`
+directory. The manifest associates each numbered file with its original
+path and SHA-256 digest. Preserve this directory, plus any external
+encryption keys and runtime configuration. Lock files are transient and
+excluded. The backup protects file contents and paths. It does not preserve
+filesystem ACLs or serve as an input to `kivadb restore`.
+
+After verifying the copied bytes, apply publishes the versioned catalog,
+alias-to-ID mapping and backup reference together in
+`workspace-migration.json`. The original configuration, stores, accounts,
+and grants remain authoritative. Legacy wildcard scopes are untouched. No
+new scope is granted. Startup can validate and read the staged catalog,
+while navigation and data access still use the historical implementation.
+
+An interruption before publication leaves an unpublished staging operation.
+Run apply again to create a fresh backup. Any earlier backup or partial
+copy is retained for inspection. An interruption after publication leaves
+a staged catalog. Verify checks the referenced backup and its manifest.
+Rollback atomically marks the staged catalog withdrawn and retains the
+backup. It never replays copied files over the live home, including if new
+data was written between staging and rollback. A recorded rollback can be
+run again safely.
+
+The marker uses atomic replacement and file synchronization. On Unix the
+parent directory is also synchronized. Windows process-interruption tests
+do not establish persistence across a sudden power loss. Confirmed
+historical records whose authentication already fails still require
+recovery from a known-good backup. The procedure does not rewrite them.

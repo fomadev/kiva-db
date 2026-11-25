@@ -64,6 +64,7 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ring = "0.17"
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+same-file = "1"
 
 [profile.release]
 opt-level = 3

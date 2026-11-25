@@ -377,7 +377,7 @@ fn bad(archive: &Path, why: impl std::fmt::Display) -> KivaError {
     KivaError::Corrupted(format!("{} cannot be restored: {why}", archive.display()))
 }
 
-fn sha256_file(path: &Path) -> Result<String> {
+pub(crate) fn sha256_file(path: &Path) -> Result<String> {
     let mut h = Hashing::new(io::sink());
     io::copy(&mut File::open(path)?, &mut h)?;
     Ok(hex(&h.hash.finalize()))
