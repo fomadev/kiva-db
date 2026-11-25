@@ -3,6 +3,13 @@
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
 ## [Unreleased]
+
+- Adds verified offline export of staged collections into the proposed
+  physical workspace layout. Exports retain their source backup and cannot be
+  opened as serving homes.
+- Adds resource-specific help, workspace details, and `rename <old> to <new>`
+  in the administrative hierarchy preview.
+
 Accounts reach only what they are granted, and projects group the workspaces of one application under its name (`travel.places`, `school.places`). Dates, times and datetimes are types of their own, with time zones.
 
 ### Upgrading

@@ -190,3 +190,50 @@ incoming replication are blocked while that stage is active. A rollback
 withdraws the stage and makes the independent preview metadata visible again.
 Activating hierarchical data routing will require the grant adapter,
 protocol and maintenance changes before choosing an authoritative catalog.
+
+## Physical layout export
+
+The managed path is relative to an operator-selected directory:
+
+```text
+workspaces/<workspace>/projects/<project>/collections/<collection>/store.kiva
+```
+
+Only collections contain store files. The export also creates directories for
+empty workspaces and projects. Relative paths use catalog names, while the
+manifest records the collection IDs. Windows device names and invalid name
+segments are refused on all platforms.
+
+Stop the source instance and stage migration with `migrate apply`. Use
+`migrate layout-plan` to see the mapping and then run:
+
+```sh
+kivadb migrate copy-layout --home /path/to/source --target /path/to/new-export
+```
+
+The target parent must already exist and its path must use real directories.
+Choose a new target outside the source home and all registered source stores.
+The command never writes to an existing destination. It copies the verified
+backup snapshot and checks each target file with SHA-256. The result is a
+point-in-time snapshot, so it excludes source writes made after staging.
+Custom source stores stay registered at their original paths.
+
+The export marker moves from `COPYING` to `COMPLETE` after all copies verify.
+A partial target is retained for inspection. Retry into another new target.
+Both marker states prevent ordinary startup in that directory. No source file
+is renamed or deleted. Rolling back the offline migration withdraws its
+catalog and leaves the backup and any exports available.
+
+This export contains collection files and relative layout metadata. Serving
+configuration, account migration, active path authority, online allocation,
+physical rename and retirement require subsequent integration. The preview
+catalog remains independent from these files. A completed export cannot
+activate hierarchical routing.
+
+
+For activation, the planned authority is a single versioned catalog record
+in the system engine. The migration and export manifests are inputs to a
+verified cutover and recovery procedure. The experimental preview record
+stays separate and is never merged into an active catalog. A future change
+must define the atomic transition and bind each active collection ID to its
+verified managed path before allowing writes.

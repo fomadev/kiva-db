@@ -24,7 +24,8 @@ USAGE:
   kivadb run <file.kva>       Run the commands of a file (--keep-going: do not stop at an error)
   kivadb tls [renew]          Show the server's TLS certificate (renew: create a new one)
   kivadb keygen               Print a new encryption key (for KIVADB_ENCRYPTION_KEY)
-  kivadb migrate <plan|apply|status|verify|rollback>\n\
+  kivadb migrate <plan|apply|status|verify|rollback|layout-plan>\n\
+  kivadb migrate copy-layout --target <new-directory>\n\
   kivadb doctor [--json]      Look for what could stop KivaDB or lose data (reads only)
   kivadb backup -o <f.tar.gz> Save the home (or -w <workspace>) to an archive, even while running
   kivadb restore <f.tar.gz>   Restore an archive (--target <dir>, --as <name>, --check: only verify)
@@ -738,7 +739,11 @@ fn main() {
         exit(transfer(&home, &args));
     }
     if args.action == Some("migrate") {
-        match kivadb::migration::run(&home, args.migration.as_deref().unwrap_or_default()) {
+        match kivadb::migration::run_with_target(
+            &home,
+            args.migration.as_deref().unwrap_or_default(),
+            args.target.as_deref(),
+        ) {
             Ok(message) => println!("{message}"),
             Err(e) => fail(&e.to_string()),
         }

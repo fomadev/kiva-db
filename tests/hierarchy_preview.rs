@@ -203,3 +203,24 @@ fn concurrent_rename_and_drop_do_not_both_commit_against_the_same_name() {
     assert_eq!(ok(&mut observer, "workspace exists conflicting"), "false");
     assert_eq!(ok(&mut observer, "workspace exists renamed"), rename.to_string());
 }
+
+#[test]
+fn scoped_help_documents_navigation_and_rename_to() {
+    let dir = TempDir::new("preview_family_help");
+    let inst = instance(&dir);
+    let mut s = Session::new(inst, true, None);
+    ok(&mut s, "hierarchy on");
+    let workspace = ok(&mut s, "workspace help");
+    assert!(workspace.contains("switch <workspace>"));
+    assert!(!workspace.contains("workspace switch"));
+    assert!(ok(&mut s, "project help").contains("use <project>"));
+    assert!(ok(&mut s, "collection help").contains("use collection <collection>"));
+    assert!(fails(&mut s, "collection list").contains("ERR_NO_PROJECT_SELECTED"));
+    assert!(fails(&mut s, "workspace create NUL").contains("invalid managed hierarchy name"));
+    ok(&mut s, "workspace create Trading");
+    ok(&mut s, "workspace rename Trading to Finance");
+    assert_eq!(ok(&mut s, "workspace list"), "Finance\ndefault");
+    let details = ok(&mut s, "workspace list --details");
+    assert!(details.contains("PLANNED PATH"));
+    assert!(details.contains("Finance  0  0"));
+}

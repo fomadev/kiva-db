@@ -92,6 +92,14 @@ Type `help` inside the shell for the list of commands.
 
 Prefer a window? **[Kiva Studio](https://fomadev.github.io/projects/kiva-studio/)** is the desktop client for Windows, Linux and macOS: data browser, query builder, similarity search, users and server health.
 
+## Hierarchy preview and layout export
+
+Use `kivadb --hierarchy-preview` for the administrative hierarchy preview.
+`workspace help`, `project help`, and `collection help` document its commands.
+For an offline staged migration, `kivadb migrate layout-plan` shows where its
+collections would fit in the managed layout. See the
+[offline export procedure](docs/architecture/WORKSPACE_HIERARCHY.md#physical-layout-export).
+
 ## Documentation
 
 Everything is explained step by step, with examples, in **[DOCUMENTATION.md](DOCUMENTATION.md)**, written so that someone who has never used a database can start at Chapter 0.
