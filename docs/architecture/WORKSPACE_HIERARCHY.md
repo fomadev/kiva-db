@@ -237,3 +237,57 @@ verified cutover and recovery procedure. The experimental preview record
 stays separate and is never merged into an active catalog. A future change
 must define the atomic transition and bind each active collection ID to its
 verified managed path before allowing writes.
+
+## Managed storage administration
+
+On an unstaged test home with the standard legacy default store and no
+other legacy registrations, start `kivadb --no-listen --home <home>`.
+Enter `hierarchy storage` to use the managed storage catalog. The command
+is restricted to the local administrator session with no TCP listener.
+`hierarchy on` still opens the separate metadata-only preview.
+
+```text
+hierarchy storage
+workspace create Trading
+switch Trading
+project create MaplaTrade
+use MaplaTrade
+collection create agents positions transactions
+collection rename agents to workers
+collection drop workers
+```
+
+Managed workspace and project directories contain no user store. Each
+collection is initialized with the home engine options and carries a
+marker containing its catalog ID and its store header ID. Starting the
+instance validates both identities and prevents two resources from
+sharing a primary file. Managed data remains inaccessible through shell
+data commands or clients. Layout administration does not import a
+staged migration or merge the preview catalog.
+
+The managed catalog and its optional pending snapshot are a single atomically
+replaced record in `system/managed-layout.json`. Edits to that record are
+serialized in the instance. The record holds the intent before any move.
+On restart, recovery recognizes each move endpoint by its immutable marker.
+It completes outstanding moves, validates the resulting tree, and publishes
+the next catalog. An existing directory is never adopted as a newly managed
+resource. Case-only renames are refused for consistent cross-platform behavior.
+A conflicting open store prevents moving its directory. External filesystem
+edits during administration are unsupported.
+
+A drop moves the top-level affected resource to `retired/<hex-id>`. A
+cascade keeps the subtree intact, including its identity markers and stores.
+A later creation assigns a new ID and initializes a fresh store. To recover
+retired data, retain the directory and its markers and work from a copy with
+the original key configuration. Reattachment to a live catalog is a separate
+operation and is not supported yet. Interrupted initialization can leave an
+unused scratch directory under `system/managed-layout-staging`. Recovery
+starts a fresh scratch directory and never deletes an abandoned copy.
+
+Legacy topology changes and legacy migration apply are refused in a managed
+home. Legacy full-home backup is also refused because its archive format
+does not cover the managed files. Legacy reads and writes to the existing
+default store still use the existing engine. Unix directory synchronization
+and Windows process-crash recovery have different durability guarantees.
+Physical relocation across mounts and unmanaged edits are outside this
+administrative mode.

@@ -432,6 +432,11 @@ pub fn run_with_target(home: &Path, action: &str, target: Option<&Path>) -> Resu
                 .join("\n"))
         }
         "apply" => {
+            if crate::managed_layout::exists(&home)? {
+                return Err(KivaError::ReadOnly(
+                    "offline legacy migration is unavailable in a managed layout home".into(),
+                ));
+            }
             if existing.is_some() {
                 return Err(KivaError::Exists("migration history exists; use status or verify".into()));
             }

@@ -17,18 +17,19 @@ pub(crate) struct Context {
     workspace: WorkspaceId,
     project: Option<ProjectId>,
     collection: Option<CollectionId>,
+    managed: bool,
 }
 
 impl Context {
-    fn workspace(workspace: WorkspaceId) -> Self {
-        Self { workspace, project: None, collection: None }
+    fn workspace(workspace: WorkspaceId, managed: bool) -> Self {
+        Self { workspace, project: None, collection: None, managed }
     }
 
     fn normalize(&mut self, catalog: &Catalog) {
         if catalog.workspace_name(self.workspace).is_none() {
-            *self = Self::workspace(catalog.workspace("default").expect("validated default workspace"));
+            *self = Self::workspace(catalog.workspace("default").expect("validated default workspace"), self.managed);
         } else if self.project.is_some_and(|id| catalog.project_name(id).is_none()) {
-            *self = Self::workspace(self.workspace);
+            *self = Self::workspace(self.workspace, self.managed);
         } else if self.collection.is_some_and(|id| catalog.collection_name(id).is_none()) {
             self.collection = None;
         }
@@ -147,7 +148,10 @@ fn lookup<T>(found: Option<T>, kind: &str, name: &str) -> Result<T> {
 fn navigate(catalog: &Catalog, mut current: Context, command: &str, args: &[Token]) -> Result<Context> {
     match (command, args) {
         ("switch", [name]) => {
-            return Ok(Context::workspace(lookup(catalog.workspace(&name.text), "workspace", &name.text)?))
+            return Ok(Context::workspace(
+                lookup(catalog.workspace(&name.text), "workspace", &name.text)?,
+                current.managed,
+            ))
         }
         ("use", [name]) if !name.text.contains('.') => {
             current.project = Some(lookup(catalog.project(current.workspace, &name.text), "project", &name.text)?);
@@ -180,7 +184,7 @@ fn navigate(catalog: &Catalog, mut current: Context, command: &str, args: &[Toke
         _ => return Err(KivaError::Invalid(format!("invalid collection path '{name}'"))),
     };
     let id = lookup(catalog.collection(project, collection), "collection", collection)?;
-    Ok(Context { workspace, project: Some(project), collection: Some(id) })
+    Ok(Context { workspace, project: Some(project), collection: Some(id), managed: current.managed })
 }
 
 impl Session {
@@ -199,7 +203,7 @@ impl Session {
     pub(crate) fn hierarchy_location(&self) -> Result<Option<[String; 3]>> {
         let Some(mut context) = self.hierarchy else { return Ok(None) };
         self.check_hierarchy_admin()?;
-        let catalog = self.preview_catalog()?;
+        let catalog = self.context_catalog(context.managed)?;
         context.normalize(&catalog);
         Ok(Some(context.names(&catalog).map(str::to_owned)))
     }
@@ -223,19 +227,38 @@ impl Session {
                 [mode] if mode.is_kw("on") => {
                     let catalog = self.preview_catalog()?;
                     self.drop_subscriptions();
-                    self.hierarchy = Some(Context::workspace(catalog.workspace("default").expect("validated default")));
+                    self.hierarchy =
+                        Some(Context::workspace(catalog.workspace("default").expect("validated default"), false));
                     out.say("Hierarchy preview enabled. Data operations are disabled.");
+                }
+                [mode] if mode.is_kw("storage") => {
+                    self.check_managed_access()?;
+                    let inst = self.inst.clone();
+                    let _guard = inst
+                        .managed_layout_lock
+                        .lock()
+                        .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
+                    let catalog =
+                        if let Some(catalog) = crate::managed_layout::open(&inst.home, &inst.engine_options())? {
+                            catalog
+                        } else {
+                            crate::managed_layout::edit(&inst.home, &inst.engine_options(), |_| Ok(()))?
+                        };
+                    self.drop_subscriptions();
+                    self.hierarchy =
+                        Some(Context::workspace(catalog.workspace("default").expect("validated default"), true));
+                    out.say("Managed storage administration enabled. Data operations are disabled.");
                 }
                 [mode] if mode.is_kw("off") => {
                     self.hierarchy = None;
                     out.say("Hierarchy preview disabled.");
                 }
-                _ => return Err(KivaError::Invalid("use hierarchy on or hierarchy off".into())),
+                _ => return Err(KivaError::Invalid("use hierarchy on, hierarchy storage or hierarchy off".into())),
             }
             return Ok(());
         }
         let mut context = self.hierarchy.expect("preview dispatch");
-        let catalog = self.preview_catalog()?;
+        let catalog = self.context_catalog(context.managed)?;
         context.normalize(&catalog);
         if matches!(command, "switch" | "use") {
             let next = navigate(&catalog, context, command, args)?;
@@ -309,7 +332,7 @@ impl Session {
                 out.say(lookup(parent.target(&catalog, &name.text), command, &name.text)?.info(&catalog))
             }
             ("create", [_, ..]) => {
-                self.edit_hierarchy(|catalog| {
+                self.edit_hierarchy(context.managed, |catalog| {
                     for name in args {
                         parent.create(catalog, &name.text)?;
                     }
@@ -318,13 +341,13 @@ impl Session {
                 out.say(format!("Created {} {command} entries", args.len()));
             }
             ("rename", [from, to] | [from, _, to]) if args.len() == 2 || args[1].is_kw("to") => {
-                self.edit_hierarchy(|catalog| {
+                self.edit_hierarchy(context.managed, |catalog| {
                     lookup(parent.target(catalog, &from.text), command, &from.text)?.rename(catalog, &to.text)
                 })?;
                 out.say(format!("Renamed '{}' to '{}'", from.text, to.text));
             }
             ("drop", [name] | [name, _]) if args.len() == 1 || args[1].is_kw("cascade") => {
-                self.edit_hierarchy(|catalog| {
+                self.edit_hierarchy(context.managed, |catalog| {
                     lookup(parent.target(catalog, &name.text), command, &name.text)?.drop_from(catalog, args.len() == 2)
                 })?;
                 out.say(format!("Dropped '{}'", name.text));
@@ -335,6 +358,30 @@ impl Session {
         Ok(())
     }
 
+    fn check_managed_access(&self) -> Result<()> {
+        if !self.local
+            || self.inst.tcp_port.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.inst.repl.is_replica()
+        {
+            return Err(KivaError::Denied("managed storage requires the local shell with --no-listen".into()));
+        }
+        self.inst.check_managed_layout_home()
+    }
+
+    fn context_catalog(&self, managed: bool) -> Result<Catalog> {
+        if !managed {
+            return self.preview_catalog();
+        }
+        self.check_managed_access()?;
+        let _guard = self
+            .inst
+            .managed_layout_lock
+            .lock()
+            .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
+        crate::managed_layout::open(&self.inst.home, &self.inst.engine_options())?
+            .ok_or_else(|| KivaError::Corrupted("missing managed layout".into()))
+    }
+
     fn preview_catalog(&self) -> Result<Catalog> {
         match self.inst.workspace_catalog()? {
             Some(catalog) => Ok(catalog),
@@ -342,7 +389,16 @@ impl Session {
         }
     }
 
-    fn edit_hierarchy(&self, edit: impl FnOnce(&mut Catalog) -> Result<()>) -> Result<()> {
+    fn edit_hierarchy(&self, managed: bool, edit: impl FnOnce(&mut Catalog) -> Result<()>) -> Result<()> {
+        if managed {
+            self.check_managed_access()?;
+            let _guard = self
+                .inst
+                .managed_layout_lock
+                .lock()
+                .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
+            return crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit).map(|_| ());
+        }
         if self.inst.workspace_catalog()?.is_some() || self.inst.repl.is_replica() {
             return Err(KivaError::ReadOnly("a staged migration or replica catalog is read-only".into()));
         }
