@@ -5,7 +5,9 @@
 //! Logical hierarchy metadata, independent of collection engines and paths.
 
 use crate::auth::valid_name_part;
+use crate::engine::{BatchOp, Engine};
 use crate::error::{KivaError, Result};
+use crate::value::Value;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -273,4 +275,74 @@ pub fn plan_legacy_catalog(
         aliases.push(LegacyCollection { name, qualified_name, id });
     }
     Ok((catalog, aliases))
+}
+
+const SYSTEM_KEY: &str = "catalog:workspace-hierarchy";
+
+/// A catalog stored as one versioned record in the system engine.
+///
+/// The instance must finish legacy migration and validate physical mappings
+/// before creating this record. Missing metadata is distinct from corruption.
+pub struct CatalogStore<'a> {
+    system: &'a Engine,
+}
+
+impl<'a> CatalogStore<'a> {
+    pub fn new(system: &'a Engine) -> Self {
+        Self { system }
+    }
+
+    pub fn load(&self) -> Result<Option<Catalog>> {
+        match self.system.get(SYSTEM_KEY)? {
+            None => Ok(None),
+            Some((Value::Doc(document), _)) => Catalog::decode(document).map(Some),
+            Some(_) => Err(KivaError::Corrupted("hierarchy catalog is not a document".into())),
+        }
+    }
+
+    pub fn initialize(&self, catalog: &Catalog) -> Result<()> {
+        let transaction = CatalogTransaction::begin(self.system);
+        if self.load()?.is_some() {
+            return Err(KivaError::Exists("hierarchy catalog already exists".into()));
+        }
+        transaction.write(catalog)
+    }
+
+    /// Publish a catalog-only change. Concurrent writers conflict, so an
+    /// aborted attempt cannot overwrite a newer snapshot.
+    pub fn update<T>(&self, edit: impl FnOnce(&mut Catalog) -> Result<T>) -> Result<T> {
+        let transaction = CatalogTransaction::begin(self.system);
+        let mut catalog = self.load()?.ok_or_else(|| KivaError::NotFound("hierarchy catalog is absent".into()))?;
+        let result = edit(&mut catalog)?;
+        transaction.write(&catalog)?;
+        Ok(result)
+    }
+}
+
+struct CatalogTransaction<'a> {
+    system: &'a Engine,
+    start: u64,
+}
+
+impl<'a> CatalogTransaction<'a> {
+    fn begin(system: &'a Engine) -> Self {
+        Self { system, start: system.txn_begin() }
+    }
+
+    fn write(&self, catalog: &Catalog) -> Result<()> {
+        let record = BatchOp::Put {
+            key: SYSTEM_KEY.into(),
+            value: Value::Doc(catalog.encode()?),
+            expires_at: 0,
+            msgpack: false,
+        };
+        self.system.apply_batch(vec![record], Some(self.start))?;
+        self.system.sync()
+    }
+}
+
+impl Drop for CatalogTransaction<'_> {
+    fn drop(&mut self) {
+        self.system.txn_end();
+    }
 }

@@ -60,3 +60,13 @@ hierarchical writes before those paths can preserve the required IDs and
 resolve access correctly would allow restored and replicated state to diverge.
 The catalog foundation must therefore remain inactive at startup until the
 migration and dependent access paths are integrated.
+
+## Catalog storage implemented in this branch
+
+The catalog store publishes the complete versioned snapshot as one record in
+the system engine. Each update starts an optimistic engine transaction and
+loads the current snapshot. The engine checks for a conflicting write before
+committing. The store syncs the engine before returning success. Failed
+validation leaves the stored snapshot untouched. The store distinguishes
+absence, unsupported versions and malformed records. Startup has no caller
+for this store yet.

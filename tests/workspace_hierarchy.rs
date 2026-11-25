@@ -120,3 +120,40 @@ fn rename_preserves_ids_and_cascade_does_not_reuse_them() {
     assert!(catalog.collection(project, "sales").is_none());
     assert_ne!(catalog.create_workspace("fordima_inc").unwrap(), workspace);
 }
+
+mod common;
+
+#[test]
+fn catalog_updates_are_committed_as_one_record_and_reopen() {
+    use common::TempDir;
+    use kivadb::catalog::CatalogStore;
+    use kivadb::engine::Engine;
+
+    let dir = TempDir::new("hierarchy_store");
+    let path = dir.path().join("system.kiva");
+    let recorded_id = {
+        let engine = Engine::open(&path, Default::default()).unwrap();
+        let store = CatalogStore::new(&engine);
+        assert!(store.load().unwrap().is_none());
+        store.initialize(&Catalog::default()).unwrap();
+        assert!(matches!(store.initialize(&Catalog::default()), Err(KivaError::Exists(_))));
+        let before = store.load().unwrap().unwrap().encode().unwrap();
+        let rejected = store.update(|catalog| {
+            catalog.create_workspace("first")?;
+            catalog.create_workspace("FIRST")
+        });
+        assert!(matches!(rejected, Err(KivaError::Exists(_))));
+        assert_eq!(store.load().unwrap().unwrap().encode().unwrap(), before);
+
+        let rejected = store.update(|catalog| {
+            store.update(|other| other.create_workspace("winner"))?;
+            catalog.create_workspace("stale")
+        });
+        assert!(matches!(rejected, Err(KivaError::Conflict(_))));
+        let catalog = store.load().unwrap().unwrap();
+        assert!(catalog.workspace("stale").is_none());
+        catalog.workspace("winner").unwrap()
+    };
+    let engine = Engine::open(&path, Default::default()).unwrap();
+    assert_eq!(CatalogStore::new(&engine).load().unwrap().unwrap().workspace("winner"), Some(recorded_id));
+}
