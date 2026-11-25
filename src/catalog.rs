@@ -156,6 +156,20 @@ impl Catalog {
         lookup(&self.0.collections, project, name)
     }
 
+    /// Resolve all three names together so the returned identities share the
+    /// same parent chain. Callers must perform their own authorization.
+    pub fn resolve_collection(&self, workspace: &str, project: &str, collection: &str) -> Result<CollectionId> {
+        let workspace_id = self
+            .workspace(workspace)
+            .ok_or_else(|| KivaError::NotFound(format!("workspace '{workspace}' does not exist")))?;
+        let project_id = self
+            .project(workspace_id, project)
+            .ok_or_else(|| KivaError::NotFound(format!("project '{workspace}.{project}' does not exist")))?;
+        self.collection(project_id, collection).ok_or_else(|| {
+            KivaError::NotFound(format!("collection '{workspace}.{project}.{collection}' does not exist"))
+        })
+    }
+
     pub fn create_workspace(&mut self, name: &str) -> Result<WorkspaceId> {
         register(&mut self.0.workspaces, &mut self.0.next_id, WorkspaceId, (), name)
     }

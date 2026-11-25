@@ -58,8 +58,7 @@ A new collection with the same name must receive a fresh storage identity.
 The existing backup and replication formats route by storage name. Activating
 hierarchical writes before those paths can preserve the required IDs and
 resolve access correctly would allow restored and replicated state to diverge.
-The catalog foundation must therefore remain inactive at startup until the
-migration and dependent access paths are integrated.
+Hierarchical routing stays inactive until the migration and dependent access paths are integrated.
 
 ## Catalog storage implemented in this branch
 
@@ -68,5 +67,25 @@ the system engine. Each update starts an optimistic engine transaction and
 loads the current snapshot. The engine checks for a conflicting write before
 committing. The store syncs the engine before returning success. Failed
 validation leaves the stored snapshot untouched. The store distinguishes
-absence, unsupported versions and malformed records. Startup has no caller
-for this store yet.
+absence, unsupported versions and malformed records. Startup validates a staged record before account migration and administrative recovery. Historical homes may still omit this record. A staged record never changes storage routing.
+
+
+## Pull request sequence
+
+1. **Startup and migration preflight.** Load and validate the staged record,
+   resolve a collection identity within its parents, and preview existing
+   collection names and physical paths. Rehearse reopening staged catalogs on
+   copied historical homes. The preview is advisory and does not write.
+2. **Offline migration and rollback.** Validate legacy records and grants
+   while catalog mutations are quiesced. Verify a unique backup and exercise
+   durable migration, recovery from interruption, and rollback. Keep the
+   staged hierarchy separate from serving.
+3. **Sessions and administration.** Add typed context and explicit naming,
+   then enforce workspace and collection scope and revocation before allowing
+   hierarchical data access. Exercise concurrent navigation and mutations.
+4. **Interfaces and maintenance.** Adapt native TCP, REST, Redis and both
+   drivers, along with backup, restore, replication and doctor. Test historical
+   aliases with scoped permissions before enabling new routing by default.
+5. **Activation and validation.** Enable serving only with compatible storage
+   and permissions, complete crash and migration checks, and measure the
+   hierarchy against the release baseline.

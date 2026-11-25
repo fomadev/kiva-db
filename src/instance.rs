@@ -6,6 +6,7 @@
 //! workspace, and the services shared by all sessions.
 
 use crate::auth;
+use crate::catalog::{plan_legacy_catalog, Catalog, CatalogStore, LegacyCollection};
 use crate::compress::Compression;
 use crate::config::Config;
 use crate::engine::{Engine, EngineOptions, Op};
@@ -338,6 +339,9 @@ impl Instance {
                 ..Default::default()
             },
         )?;
+        // Validate staged metadata before account migration and administrative recovery.
+        // An absent record keeps a historical home on the existing storage layout.
+        CatalogStore::new(&system).load()?;
         auth::ensure_admin(&system)?;
         auth::migrate_personal_workspaces(&system, |w| config.workspace_dir(w).is_some())?;
         for done in recover_moves(&system, &config)? {
@@ -646,6 +650,48 @@ impl Instance {
     /// database, so replicas know them too.
     pub fn projects(&self) -> Vec<String> {
         self.system.keys_matching("project:*", 0).into_iter().map(|(k, _)| k["project:".len()..].to_string()).collect()
+    }
+
+    /// Read validated hierarchy metadata for internal migration tooling.
+    /// Serving continues to resolve storage and authorization through the legacy configuration.
+    pub fn workspace_catalog(&self) -> Result<Option<Catalog>> {
+        CatalogStore::new(&self.system).load()
+    }
+
+    /// Prepare an advisory migration plan from the current registrations.
+    /// Activation must revalidate the source with catalog mutations quiesced.
+    pub fn plan_workspace_migration(&self) -> Result<(Catalog, Vec<(LegacyCollection, PathBuf)>)> {
+        let stores: HashMap<String, String> = self.workspaces().into_iter().collect();
+        let (catalog, aliases) = plan_legacy_catalog(self.projects(), stores.keys().cloned().collect())?;
+        let mut locations = HashMap::new();
+        #[cfg(unix)]
+        let mut files = HashMap::new();
+        let mut plan = Vec::with_capacity(aliases.len());
+        for alias in aliases {
+            let directory = PathBuf::from(&stores[&alias.name]);
+            let path = directory.join("store.kiva");
+            let canonical = fs::canonicalize(&path)
+                .map_err(|e| KivaError::Invalid(format!("legacy store '{}': {}: {e}", alias.name, path.display())))?;
+            let meta = fs::metadata(&canonical)?;
+            if !meta.is_file() {
+                return Err(KivaError::Invalid(format!("legacy store '{}' is not a regular file", alias.name)));
+            }
+            if let Some(other) = locations.insert(canonical, alias.name.clone()) {
+                return Err(KivaError::Invalid(format!("legacy stores '{other}' and '{}' share storage", alias.name)));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if let Some(other) = files.insert((meta.dev(), meta.ino()), alias.name.clone()) {
+                    return Err(KivaError::Invalid(format!(
+                        "legacy stores '{other}' and '{}' share storage",
+                        alias.name
+                    )));
+                }
+            }
+            plan.push((alias, directory));
+        }
+        Ok((catalog, plan))
     }
 
     pub fn project_exists(&self, name: &str) -> bool {
