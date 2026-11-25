@@ -23,6 +23,31 @@ fn names(inst: &kivadb::instance::Instance) -> Vec<String> {
 }
 
 #[test]
+fn qualified_navigation_uses_the_existing_collection_and_permissions() {
+    let dir = TempDir::new("ctx_qualified");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "project create shop collections (orders)");
+    ok(&mut admin, "project create other collections (orders)");
+    ok(&mut admin, "use shop.orders");
+    ok(&mut admin, "set order 42");
+    ok(&mut admin, "use collection other.orders");
+    for command in ["use collection shop.orders", "use default.shop.orders", "use collection default.shop.orders"] {
+        ok(&mut admin, command);
+        assert!(ok(&mut admin, "get order").contains("42"));
+        assert_eq!(ok(&mut admin, "collection current"), "Current collection: shop.orders");
+    }
+    assert!(fails(&mut admin, "use collection unknown.shop.orders").contains("invalid collection path"));
+    ok(&mut admin, r#"create user "dev" identified by "pw" role editor grant write on shop.*"#);
+    ok(&mut admin, "config set auth_required true");
+    let mut dev = Session::new(inst, false, None);
+    ok(&mut dev, "auth dev pw");
+    ok(&mut dev, "use collection default.shop.orders");
+    assert!(fails(&mut dev, "use collection default.other.orders").contains("access"));
+    assert_eq!(ok(&mut dev, "collection current"), "Current collection: shop.orders");
+}
+
+#[test]
 fn current_says_where_the_session_is() {
     let dir = TempDir::new("ctx_current");
     let inst = instance(&dir);
