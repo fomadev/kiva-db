@@ -40,6 +40,14 @@ fn home_from(name: &str, dir: &TempDir) -> PathBuf {
     home
 }
 
+fn configure_fixture_key(home: &Path, dir: &TempDir) {
+    // Public test key used to generate the encrypted fixture.
+    let key = dir.path().join("test.key");
+    std::fs::write(&key, format!("{}1", "0".repeat(63))).unwrap();
+    let mut cfg = kivadb::config::Config::load(home).unwrap();
+    cfg.set("encryption", "key_file", &key.display().to_string()).unwrap();
+}
+
 fn open(home: &Path) -> Arc<Instance> {
     Instance::open(home, Options::default()).unwrap()
 }
@@ -129,13 +137,7 @@ fn a_home_written_by_1_7_1_opens_with_everything_in_it() {
 fn an_encrypted_home_of_1_7_1_opens_with_its_key() {
     let dir = TempDir::new("compat_1_7_1_encrypted");
     let home = home_from("v1.7.1-encrypted", &dir);
-    // The test key the fixture was made with (KIVADB_ENCRYPTION_KEY = 63 zeros then 1).
-    let key = dir.path().join("test.key");
-    std::fs::write(&key, format!("{}1", "0".repeat(63))).unwrap();
-    {
-        let mut cfg = kivadb::config::Config::load(&home).unwrap();
-        cfg.set("encryption", "key_file", &key.display().to_string()).unwrap();
-    }
+    configure_fixture_key(&home, &dir);
     {
         let inst = open(&home);
         let mut s = Session::new(inst.clone(), true, None);
@@ -577,4 +579,31 @@ fn a_unique_index_holding_values_now_equal_is_reported_at_opening() {
     assert!(!doctor().contains("both hold"), "repaired");
     let (_, err) = run(&["get z:1"]);
     assert!(!err.contains("[WARN]"), "{err}");
+}
+
+#[test]
+fn historical_homes_have_a_deterministic_hierarchy_plan() {
+    use kivadb::catalog::plan_legacy_catalog;
+
+    for version in ["v1.7.1", "v1.7.1-encrypted", "v2.0.0-rc.2", "v2.0.0-rc.3", "v2.0.0-rc.4"] {
+        let dir = TempDir::new("compat_hierarchy_plan");
+        let home = home_from(version, &dir);
+        if version == "v1.7.1-encrypted" {
+            configure_fixture_key(&home, &dir);
+        }
+        let inst = open(&home);
+        let projects = inst.projects();
+        let stores = inst.workspace_names();
+        let (catalog, aliases) = plan_legacy_catalog(projects.clone(), stores.clone()).unwrap();
+        let default = catalog.workspace("default").unwrap();
+        assert!(catalog.project(default, "legacy").is_some());
+        assert_eq!(aliases.len(), stores.len(), "{version}");
+        for name in stores {
+            let alias = aliases.iter().find(|entry| entry.name == name).unwrap();
+            let expected =
+                if name.contains('.') { format!("default.{name}") } else { format!("default.legacy.{name}") };
+            assert_eq!(alias.qualified_name, expected, "{version}");
+        }
+        assert_eq!(inst.projects(), projects, "{version}");
+    }
 }

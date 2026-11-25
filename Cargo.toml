@@ -35,6 +35,7 @@ crash-points = []
 
 [dependencies]
 crc32fast = "1"
+serde = { version = "1", features = ["derive"] }
 lz4_flex = "0.11"
 flate2 = "1"
 # float_roundtrip: a float read from JSON text is the one the text names, to
