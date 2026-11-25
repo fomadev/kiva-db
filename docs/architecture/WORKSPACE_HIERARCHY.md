@@ -229,3 +229,11 @@ configuration, account migration, active path authority, online allocation,
 physical rename and retirement require subsequent integration. The preview
 catalog remains independent from these files. A completed export cannot
 activate hierarchical routing.
+
+
+For activation, the planned authority is a single versioned catalog record
+in the system engine. The migration and export manifests are inputs to a
+verified cutover and recovery procedure. The experimental preview record
+stays separate and is never merged into an active catalog. A future change
+must define the atomic transition and bind each active collection ID to its
+verified managed path before allowing writes.

@@ -92,6 +92,7 @@ impl Parent {
     }
 
     fn create(self, catalog: &mut Catalog, name: &str) -> Result<()> {
+        crate::hierarchy_layout::segment(name)?;
         match self {
             Self::Root => catalog.create_workspace(name).map(|_| ()),
             Self::Workspace(parent) => catalog.create_project(parent, name).map(|_| ()),
@@ -102,6 +103,7 @@ impl Parent {
 
 impl Target {
     fn rename(self, catalog: &mut Catalog, name: &str) -> Result<()> {
+        crate::hierarchy_layout::segment(name)?;
         match self {
             Self::Workspace(id) => catalog.rename_workspace(id, name),
             Self::Project(id) => catalog.rename_project(id, name),

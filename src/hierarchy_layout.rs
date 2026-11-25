@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const EXPORT_MARKER: &str = "workspace-layout-export.json";
 
-fn segment(name: &str) -> Result<&str> {
+pub(crate) fn segment(name: &str) -> Result<&str> {
     let upper = name.to_ascii_uppercase();
     let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "SYSTEM")
         || (upper.len() == 4

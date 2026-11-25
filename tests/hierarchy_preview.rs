@@ -216,6 +216,7 @@ fn scoped_help_documents_navigation_and_rename_to() {
     assert!(ok(&mut s, "project help").contains("use <project>"));
     assert!(ok(&mut s, "collection help").contains("use collection <collection>"));
     assert!(fails(&mut s, "collection list").contains("ERR_NO_PROJECT_SELECTED"));
+    assert!(fails(&mut s, "workspace create NUL").contains("invalid managed hierarchy name"));
     ok(&mut s, "workspace create Trading");
     ok(&mut s, "workspace rename Trading to Finance");
     assert_eq!(ok(&mut s, "workspace list"), "Finance\ndefault");
