@@ -1226,6 +1226,9 @@ impl Session {
         let mut c = Cur::new(a);
         let name = word(c.next(), "a collection or a project")?;
         c.finish(USAGE)?;
+        if name.contains('.') {
+            return self.use_collection_here(&name, out);
+        }
         // The same name inside the current project, when it is a collection.
         let in_project = match self.current_project() {
             Some(p) if !name.contains('.') => {
@@ -1242,7 +1245,7 @@ impl Session {
             (KivaError::Denied(_), Some(q)) => format!("{e}. {q} is in your project: use {q}"),
             _ => e.to_string(),
         };
-        if self.inst.cfg().workspace_dir(&name).is_some() || name.contains('.') {
+        if self.inst.cfg().workspace_dir(&name).is_some() {
             self.switch_workspace(&name).map_err(hint)?;
             out.say(format!("Using collection '{name}' ({} keys).", self.engine.len()));
             if let Some(q) = &reachable {
@@ -1277,27 +1280,34 @@ impl Session {
         ));
     }
 
-    /// `use collection <name>`: the collection `<name>` of the current
-    /// project and nothing else, neither a project nor a collection outside
-    /// a project of that name.
+    /// Select a collection by its local or qualified name. Existing project
+    /// collections are addressed in the default workspace.
     fn use_collection_here(&mut self, name: &str, out: &mut Out) -> R {
-        if name.contains('.') {
-            return Err(format!(
-                "use collection takes the name of a collection of the current project; for a full name: use {name}"
-            ));
-        }
         if self.txn.is_some() {
             return Err("cannot switch collection inside a transaction".into());
         }
-        let Some(p) = self.current_project().map(str::to_string) else {
-            return Err("no current project: use <project> first, or use <project>.<collection>.".into());
+        let qualified = match name.split('.').collect::<Vec<_>>().as_slice() {
+            [collection] => {
+                let Some(project) = self.current_project() else {
+                    return Err("no current project: use <project> first, or use <project>.<collection>.".into());
+                };
+                let qualified = format!("{project}.{collection}");
+                if self.inst.cfg().workspace_dir(&qualified).is_none() {
+                    return Err(format!(
+                        "collection '{qualified}' does not exist in project '{project}' ('collection list' shows them)."
+                    ));
+                }
+                qualified
+            }
+            [project, collection] | ["default", project, collection]
+                if auth::valid_name_part(project) && auth::valid_name_part(collection) =>
+            {
+                format!("{project}.{collection}")
+            }
+            _ => return Err(format!("invalid collection path '{name}'")),
         };
-        let q = format!("{p}.{name}");
-        if self.inst.cfg().workspace_dir(&q).is_none() {
-            return Err(format!("collection '{q}' does not exist in project '{p}' ('collection list' shows them)."));
-        }
-        self.switch_workspace(&q)?;
-        out.say(format!("Using collection '{q}' ({} keys).", self.engine.len()));
+        self.switch_workspace(&qualified)?;
+        out.say(format!("Using collection '{qualified}' ({} keys).", self.engine.len()));
         Ok(())
     }
 

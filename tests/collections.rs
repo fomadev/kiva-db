@@ -223,7 +223,7 @@ fn use_finds_a_collection_of_the_current_project_last() {
     let err = fails(&mut s, "use nothing");
     assert!(err.contains("named 'nothing', nor a collection 'baak.nothing' in the project 'baak'"), "{err}");
     // A full name never looks into the project; neither does `collection switch`.
-    assert!(fails(&mut s, "use baak.baak.places").contains("does not exist"));
+    assert!(fails(&mut s, "use baak.baak.places").contains("invalid collection path"));
     assert!(fails(&mut s, "collection switch places").contains("does not exist"));
     assert!(fails(&mut s, "workspace switch places").contains("does not exist"));
     // Not inside a transaction.
@@ -372,11 +372,9 @@ fn use_collection_looks_only_in_the_current_project() {
     ok(&mut s, "use dzoket");
     assert!(ok(&mut s, "use collection clients").starts_with("Using collection 'dzoket.clients'"));
 
-    // Unknown, or with a dot: refused, and the session stays where it is.
+    // An unknown collection leaves the session where it is.
     let err = fails(&mut s, "use collection nothing");
     assert!(err.contains("collection 'dzoket.nothing' does not exist in project 'dzoket'"), "{err}");
-    let err = fails(&mut s, "use collection baak.places");
-    assert!(err.contains("for a full name: use baak.places"), "{err}");
     assert!(ok(&mut s, "whoami").contains("dzoket.clients"));
 
     // The old forms keep their meaning.
