@@ -75,6 +75,12 @@ fn read_record(home: &Path) -> Result<Option<Migration>> {
     Ok(Some(record))
 }
 
+pub(crate) fn staged_aliases(home: &Path) -> Result<Option<Vec<LegacyCollection>>> {
+    Ok(read_record(home)?
+        .filter(|record| !record.rolled_back)
+        .map(|record| record.routes.into_iter().map(|route| route.alias).collect()))
+}
+
 pub(crate) fn staged_catalog(home: &Path) -> Result<Option<Catalog>> {
     read_record(home)?.filter(|record| !record.rolled_back).map(|record| Catalog::decode(record.catalog)).transpose()
 }

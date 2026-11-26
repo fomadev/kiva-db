@@ -194,6 +194,14 @@ impl Catalog {
         Ok(entries)
     }
 
+    pub(crate) fn parent_workspace(&self, project: ProjectId) -> Option<WorkspaceId> {
+        self.0.projects.iter().find(|entry| entry.id == project).map(|entry| entry.parent)
+    }
+
+    pub(crate) fn parent_project(&self, collection: CollectionId) -> Option<ProjectId> {
+        self.0.collections.iter().find(|entry| entry.id == collection).map(|entry| entry.parent)
+    }
+
     pub(crate) fn workspace_name(&self, id: WorkspaceId) -> Option<&str> {
         self.0.workspaces.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
     }

@@ -1,0 +1,205 @@
+// Copyright (c) 2026 Fordima Inc. All rights reserved.
+// Licensed under the Fordima Public License (FPL) v1.0.
+// See the LICENSE file in the project root for full license information.
+
+//! Authorization for hierarchy metadata. These decisions never open a data engine.
+
+use crate::auth::{Priv, Role, User};
+use crate::catalog::{Catalog, CollectionId, LegacyCollection, ProjectId, WorkspaceId};
+use crate::engine::{BatchOp, Engine};
+use crate::error::{KivaError, Result};
+use crate::value::Value;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+const POLICY_KEY: &str = "catalog:hierarchy-grants";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
+pub(crate) enum Scope {
+    Instance,
+    Workspace(WorkspaceId),
+    Project(ProjectId),
+    Collection(CollectionId),
+}
+
+impl Scope {
+    fn parent(self, catalog: &Catalog) -> Option<Self> {
+        match self {
+            Self::Instance => None,
+            Self::Workspace(id) => catalog.workspace_name(id).map(|_| Self::Instance),
+            Self::Project(id) => catalog.parent_workspace(id).map(Self::Workspace),
+            Self::Collection(id) => catalog.parent_project(id).map(Self::Project),
+        }
+    }
+
+    fn exists(self, catalog: &Catalog) -> bool {
+        self == Self::Instance || self.parent(catalog).is_some()
+    }
+
+    fn includes(self, mut target: Self, catalog: &Catalog) -> bool {
+        if !target.exists(catalog) {
+            return false;
+        }
+        loop {
+            if self == target {
+                return true;
+            }
+            let Some(parent) = target.parent(catalog) else { return false };
+            target = parent;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Permission {
+    Read,
+    Write,
+    Manage,
+}
+
+impl Permission {
+    pub(crate) fn parse(name: &str) -> Result<Self> {
+        match name {
+            "read" => Ok(Self::Read),
+            "write" => Ok(Self::Write),
+            "manage" => Ok(Self::Manage),
+            _ => Err(KivaError::Invalid("expected read, write or manage".into())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Grant {
+    account: String,
+    subject: String,
+    scope: Scope,
+    permission: Permission,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Policy {
+    version: u32,
+    grants: Vec<Grant>,
+}
+
+pub(crate) fn valid_subject(subject: &str) -> bool {
+    subject.len() == 32 && subject.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl Policy {
+    pub(crate) fn load(system: &Engine) -> Result<Self> {
+        let Some((value, _)) = system.get(POLICY_KEY)? else {
+            return Ok(Self { version: 1, grants: Vec::new() });
+        };
+        let Value::Doc(document) = value else {
+            return Err(KivaError::Corrupted("hierarchy grants are not a document".into()));
+        };
+        let policy: Self = serde_json::from_value(document)
+            .map_err(|error| KivaError::Corrupted(format!("invalid hierarchy grants: {error}")))?;
+        if policy.version != 1 {
+            return Err(KivaError::Format(format!("unsupported hierarchy grants version {}", policy.version)));
+        }
+        let mut unique = BTreeSet::new();
+        if !policy.grants.iter().all(|grant| {
+            crate::auth::valid_username(&grant.account) && valid_subject(&grant.subject) && unique.insert(grant)
+        }) {
+            return Err(KivaError::Corrupted("invalid or duplicate hierarchy grant".into()));
+        }
+        Ok(policy)
+    }
+
+    /// The caller holds the instance's managed catalog lock.
+    pub(crate) fn edit(system: &Engine, user: &User, scope: Scope, permission: Permission, add: bool) -> Result<()> {
+        let mut policy = Self::load(system)?;
+        let grant = Grant { account: user.name.clone(), subject: user.hierarchy_subject.clone(), scope, permission };
+        policy.grants.retain(|entry| entry != &grant);
+        if add {
+            policy.grants.push(grant);
+        }
+        crate::crash_point!("hierarchy_grants.before_commit");
+        system.apply_batch(
+            vec![BatchOp::Put {
+                key: POLICY_KEY.into(),
+                value: Value::Doc(serde_json::to_value(policy)?),
+                expires_at: 0,
+                msgpack: false,
+            }],
+            None,
+        )?;
+        system.sync()?;
+        crate::crash_point!("hierarchy_grants.after_commit");
+        Ok(())
+    }
+
+    pub(crate) fn for_user(self, user: &User) -> Access {
+        Access {
+            role: user.role,
+            grants: self
+                .grants
+                .into_iter()
+                .filter(|g| g.account == user.name && g.subject == user.hierarchy_subject)
+                .map(|g| (g.scope, g.permission))
+                .collect(),
+        }
+    }
+}
+
+pub(crate) struct Access {
+    role: Role,
+    grants: Vec<(Scope, Permission)>,
+}
+
+impl Access {
+    pub(crate) fn legacy(user: &User, aliases: &[LegacyCollection]) -> Self {
+        let grants = aliases
+            .iter()
+            .filter_map(|alias| {
+                let permission = match user.access(&alias.name)? {
+                    Priv::Read => Permission::Read,
+                    Priv::Write => Permission::Write,
+                };
+                Some((Scope::Collection(alias.id), permission))
+            })
+            .collect();
+        Self { role: user.role, grants }
+    }
+
+    pub(crate) fn administrator() -> Self {
+        Self { role: Role::Admin, grants: Vec::new() }
+    }
+
+    pub(crate) fn role(&self) -> Role {
+        self.role
+    }
+
+    pub(crate) fn allows(&self, catalog: &Catalog, target: Scope, permission: Permission) -> bool {
+        if !target.exists(catalog) {
+            return false;
+        }
+        if self.role == Role::Admin {
+            return true;
+        }
+        if self.role == Role::Viewer && permission != Permission::Read {
+            return false;
+        }
+        self.grants.iter().any(|&(scope, grant)| {
+            (grant == permission || (grant == Permission::Write && permission == Permission::Read))
+                && scope.includes(target, catalog)
+        })
+    }
+
+    pub(crate) fn visible(&self, catalog: &Catalog, target: Scope) -> bool {
+        if !target.exists(catalog) {
+            return false;
+        }
+        self.role == Role::Admin
+            || self.grants.iter().any(|&(scope, permission)| {
+                (self.role != Role::Viewer || permission != Permission::Manage)
+                    && (scope.includes(target, catalog) || target.includes(scope, catalog))
+            })
+    }
+}

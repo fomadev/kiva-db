@@ -291,3 +291,56 @@ default store still use the existing engine. Unix directory synchronization
 and Windows process-crash recovery have different durability guarantees.
 Physical relocation across mounts and unmanaged edits are outside this
 administrative mode.
+
+## Hierarchy authorization before routing
+
+Managed metadata grants are keyed by a stable account identity and a typed
+instance, workspace, project, or collection scope. Resource names are resolved
+only when granting or revoking. Each permission flows down to descendants
+through their IDs. A direct grant makes the ancestors visible for navigation,
+without granting access to their other descendants. Unknown and hidden
+qualified paths return the same denial to non-administrators.
+
+In the local managed layout, an account administrator can assign permissions:
+
+```text
+hierarchy storage
+hierarchy grant editor read collection Fordima.Efoma.users
+hierarchy grant editor write project Fordima.Efoma
+hierarchy grant editor manage workspace Fordima
+hierarchy revoke editor write project Fordima.Efoma
+```
+
+An instance grant takes no path argument. `write` implies `read`. `manage`
+permits metadata administration only. Creation and rename require management
+of the namespace where a name is registered. Drop requires management of the
+target. Viewers remain read-only. Only account administrators can edit policy.
+`hierarchy permissions` reports policy decisions on the selected resource.
+Actual data access and backup remain disabled within these hierarchy modes.
+
+The policy is one versioned system-engine record, encrypted when the home
+uses encryption. Policy updates and managed metadata commands share the
+managed catalog lock. Commands refresh the account and policy, so a prior
+selection does not retain an old grant. Renames preserve the same IDs.
+Retired IDs are inert and never reassigned. Account recreation also receives
+a new identity. Older accounts without an explicit identity derive one
+from their existing password salt and persist it on the next account save.
+An old executable dropping the identity field may invalidate new grants.
+
+An offline migration stays read-only. Its metadata view projects historical
+permissions onto exact collection IDs using each alias's recorded original
+name. It preserves the result of the historical scope matcher and does not
+rewrite legacy grants or activate a new data policy.
+
+| Historical grant | Historical name | Staged collection | Decision |
+| --- | --- | --- | --- |
+| `read on Efoma.*` | `Efoma.users` | `default.Efoma.users` | Read |
+| `read on Efoma.*` | `Efoma.products` | `default.Efoma.products` | Read |
+| `read on Efoma.*` | `Fomapay.users` | `default.Fomapay.users` | Denied |
+| `read on Efoma.*` | `default` | `default.legacy.default` | Denied |
+| `write on lab` | `lab` | `default.legacy.lab` | Read and write decision for an editor |
+
+Unknown policy versions and malformed grants stop startup. Historical
+wildcards are never converted into broad workspace or project management
+rights. A future active routing cutover must persist or reevaluate these exact
+collection decisions and check them before opening engines.

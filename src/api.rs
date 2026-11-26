@@ -453,7 +453,7 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "only whoami is available through the structured API in hierarchy preview".into(),
             ));
         }
-        let [workspace, project, collection] = sess.hierarchy_location()?.expect("preview context");
+        let ([workspace, project, collection], role) = sess.hierarchy_location()?.expect("preview context");
         let path = [&workspace, &project, &collection]
             .into_iter()
             .filter(|name| !name.is_empty())
@@ -461,8 +461,8 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
             .collect::<Vec<_>>()
             .join(".");
         return Ok(json!({
-            "user": sess.user_name(), "role": "admin",
-            "workspace": workspace,
+            "user": sess.user_name(), "role": role.name(),
+            "workspace": (!workspace.is_empty()).then_some(workspace),
             "project": (!project.is_empty()).then_some(project),
             "collection": (!collection.is_empty()).then_some(collection),
             "hierarchy_path": path, "hierarchy_preview": true,

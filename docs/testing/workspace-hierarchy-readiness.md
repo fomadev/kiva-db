@@ -123,3 +123,20 @@ UNC and extended Windows paths, cross-volume relocation and sudden
 power loss have no dedicated coverage. The managed catalog is an
 administration record. The final cutover to a serving catalog remains a
 subsequent integration.
+
+## Phase 5 authorization and grants
+
+**NOT READY for hierarchical serving.** The authorization model governs
+managed metadata. Staged historical grants are projected onto exact
+collection identities in the read-only view. No hierarchy mode can route
+data requests or operate backups. The architecture document records the
+before/after migration matrix.
+
+| Area | Verification |
+| --- | --- |
+| Least privilege | Direct and inherited grants, viewer ceilings, separate metadata administration, and denied policy delegation |
+| Session isolation | Qualified name denials match unknown resources. Lists, current context and structured identity hide inaccessible metadata |
+| Lifecycle | Revocation across established sessions, concurrent metadata operations, rename, retirement and account or resource recreation |
+| Recovery | Policy persists after restart and crash tests distinguish precommit and committed revocation |
+| Corruption | Unsupported or malformed grant records prevent startup |
+| Remaining | Permanent authorization cutover, data-engine enforcement, backup and all protocol adapters |
