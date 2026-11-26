@@ -264,7 +264,7 @@ pub(crate) fn compact_collection(
     crate::crash_point!("managed_compact.before_prepare");
     let result = engine.compact_managed(&|before, after| {
         let identity = read_identity(&path, numeric, true)?;
-        if identity.file_id != Some(before) || file_id(&path.join(COMPACT_STORE))? != after {
+        if before == after || identity.file_id != Some(before) || file_id(&path.join(COMPACT_STORE))? != after {
             return Err(KivaError::Corrupted("managed compaction prepared an unexpected store identity".into()));
         }
         let intent = Compaction { collection: numeric, before, after };
