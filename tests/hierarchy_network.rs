@@ -174,11 +174,16 @@ fn native_binary_json_and_typed_contexts_share_authorization_and_data() {
     editor.exec("use app").unwrap();
     assert!(editor.exec("use users").is_err());
     editor.exec("use collection users").unwrap();
+    editor.exec("use app.users").unwrap();
+    editor.exec("use collection app.users").unwrap();
     let hidden = editor.exec(B).unwrap_err().to_string();
     assert_eq!(hidden, editor.exec("use collection Trading.app.missing").unwrap_err().to_string());
     assert_eq!(editor.get("binary").unwrap(), Some(Value::Bytes(vec![0, 1, 255])));
     assert_eq!(b.get("binary").unwrap(), Some(Value::Str("isolated".into())));
-    assert_eq!(editor.api(&json!({"op":"whoami"})).unwrap()["hierarchy_path"], "Fordima.app.users");
+    let identity = editor.api(&json!({"op":"whoami"})).unwrap();
+    assert_eq!(identity["hierarchy_path"], "Fordima.app.users");
+    assert_eq!(identity["can_write"], true);
+    assert_eq!(identity["can_compact"], false);
     viewer.exec(A).unwrap();
     assert!(viewer.get("binary").unwrap().is_some());
     assert!(viewer.set("test", &Value::Str("no".into()), 0).is_err());

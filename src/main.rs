@@ -535,7 +535,12 @@ fn start(home: &Path, args: &Args) -> i32 {
             }
             println!("  Home     : {}", home.display());
             println!("  Log      : {}", log_path.display());
-            println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");
+            if args.hierarchical_tcp {
+                println!("Open a shell with 'kivadb --connect <address> --hierarchical-client -u <account>'.");
+                println!("Stop the database with 'kivadb stop --hierarchical-tcp -u <administrator>'.");
+            } else {
+                println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");
+            }
             return 0;
         }
         if let Ok(Some(status)) = child.try_wait() {

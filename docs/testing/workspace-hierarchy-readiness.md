@@ -380,3 +380,113 @@ The process-crash tests preserve a committed value across an interrupted
 response. Sudden power-loss behavior, long-running production workloads,
 REST, RESP, released drivers, backup/restore, replication, doctor and
 migration cutover remain open.
+
+### Phase 7A Release measurements
+
+The [TCP benchmark example](../../examples/hierarchy_tcp_bench.rs) compares
+the historical and hierarchy/1 routes through separate homes on loopback.
+Both used synchronous writes and the same server execution-slot setting
+(default 8). The runner had five visible Intel Xeon Platinum 8573C CPUs and
+an overlay filesystem shared with other work. TLS correctness was tested
+separately. These measurements use plaintext loopback and exclude WAN
+and TLS overhead.
+
+Four stores each start with two keys and a secondary index. Each worker
+authenticates and selects once. After a barrier, it repeats binary GET,
+durable binary SET, indexed EXEC query, and begin/SET/commit eight times.
+Concentrated clients share a store. Spread clients distribute across four
+workspaces. Each writer uses its own key. Throughput counts completed
+operations or transactions, with each begin/SET/commit counted once. RSS
+and descriptor snapshots include clients and listener threads in the
+benchmark process. Percentiles use the nearest rank and are coarse for
+small sample counts.
+
+Run with `cargo run --locked --release --example hierarchy_tcp_bench --
+<new-scratch-directory> 1 8 32 128`.
+
+| Clients | Workload | Operation | Legacy p50 / p95 / p99 (µs) | Hierarchy/1 p50 / p95 / p99 (µs) |
+| ---: | --- | --- | ---: | ---: |
+| 1 | concentrated | Authentication | 18,362.70 / 18,362.70 / 18,362.70 | 8,760.51 / 8,760.51 / 8,760.51 |
+| 1 | concentrated | Selection | 507.13 / 507.13 / 507.13 | 91.33 / 91.33 / 91.33 |
+| 1 | concentrated | GET | 48.52 / 152.18 / 152.18 | 56.29 / 239.92 / 239.92 |
+| 1 | concentrated | SET | 402.86 / 631.69 / 631.69 | 461.52 / 682.69 / 682.69 |
+| 1 | concentrated | Indexed query | 73.87 / 599.77 / 599.77 | 65.61 / 248.19 / 248.19 |
+| 1 | concentrated | Transaction | 520.63 / 775.89 / 775.89 | 544.29 / 920.87 / 920.87 |
+| 1 | spread | Authentication | 17,539.52 / 17,539.52 / 17,539.52 | 8,904.96 / 8,904.96 / 8,904.96 |
+| 1 | spread | Selection | 92.71 / 92.71 / 92.71 | 76.64 / 76.64 / 76.64 |
+| 1 | spread | GET | 43.22 / 110.23 / 110.23 | 51.82 / 134.22 / 134.22 |
+| 1 | spread | SET | 424.62 / 612.51 / 612.51 | 401.94 / 1,090.74 / 1,090.74 |
+| 1 | spread | Indexed query | 66.35 / 683.19 / 683.19 | 56.63 / 92.26 / 92.26 |
+| 1 | spread | Transaction | 442.51 / 587.19 / 587.19 | 506.46 / 3,736.42 / 3,736.42 |
+| 8 | concentrated | Authentication | 31,345.44 / 50,624.02 / 50,624.02 | 18,496.54 / 24,230.47 / 24,230.47 |
+| 8 | concentrated | Selection | 77.91 / 215.58 / 215.58 | 86.42 / 132.56 / 132.56 |
+| 8 | concentrated | GET | 95.51 / 288.08 / 494.54 | 197.15 / 1,081.56 / 1,374.42 |
+| 8 | concentrated | SET | 1,390.82 / 2,134.80 / 3,983.48 | 1,444.33 / 3,703.20 / 3,908.91 |
+| 8 | concentrated | Indexed query | 120.54 / 433.45 / 515.53 | 188.04 / 1,004.35 / 1,581.80 |
+| 8 | concentrated | Transaction | 1,600.32 / 3,803.21 / 3,853.55 | 2,017.99 / 3,976.39 / 5,119.50 |
+| 8 | spread | Authentication | 34,921.47 / 59,155.01 / 59,155.01 | 26,007.17 / 37,102.36 / 37,102.36 |
+| 8 | spread | Selection | 113.77 / 3,994.13 / 3,994.13 | 403.92 / 4,707.97 / 4,707.97 |
+| 8 | spread | GET | 89.13 / 278.93 / 676.52 | 202.81 / 1,270.44 / 2,465.63 |
+| 8 | spread | SET | 1,432.96 / 2,297.78 / 2,649.71 | 1,947.63 / 4,968.06 / 10,757.48 |
+| 8 | spread | Indexed query | 166.93 / 343.31 / 435.06 | 271.79 / 1,076.07 / 12,153.11 |
+| 8 | spread | Transaction | 1,671.06 / 2,495.51 / 3,005.36 | 2,478.64 / 7,201.47 / 22,358.45 |
+| 32 | concentrated | Authentication | 92,377.42 / 173,320.37 / 175,453.70 | 40,687.38 / 74,142.68 / 75,510.18 |
+| 32 | concentrated | Selection | 236.73 / 28,883.51 / 30,867.71 | 6,840.23 / 38,551.82 / 39,137.51 |
+| 32 | concentrated | GET | 146.98 / 625.36 / 801.25 | 758.51 / 4,386.28 / 7,418.29 |
+| 32 | concentrated | SET | 2,257.56 / 4,264.89 / 5,708.61 | 2,805.09 / 8,255.30 / 11,616.54 |
+| 32 | concentrated | Indexed query | 1,085.41 / 5,496.98 / 7,256.41 | 560.86 / 4,345.08 / 8,335.38 |
+| 32 | concentrated | Transaction | 5,307.74 / 9,830.57 / 12,055.16 | 5,844.65 / 13,576.70 / 16,338.46 |
+| 32 | spread | Authentication | 95,771.93 / 122,735.07 / 123,874.07 | 49,666.91 / 83,110.19 / 84,435.67 |
+| 32 | spread | Selection | 169.91 / 10,881.22 / 28,040.59 | 6,026.61 / 45,958.69 / 64,785.51 |
+| 32 | spread | GET | 120.61 / 720.59 / 1,349.26 | 1,672.16 / 9,342.32 / 19,402.53 |
+| 32 | spread | SET | 2,674.39 / 6,166.29 / 8,668.81 | 5,134.59 / 11,588.67 / 18,098.46 |
+| 32 | spread | Indexed query | 1,128.36 / 5,743.78 / 11,331.60 | 2,004.91 / 9,656.62 / 14,664.38 |
+| 32 | spread | Transaction | 5,528.18 / 11,641.09 / 14,882.05 | 9,486.17 / 22,074.42 / 28,527.11 |
+| 128 | concentrated | Authentication | 368,910.65 / 575,744.64 / 598,124.49 | 285,228.11 / 542,091.30 / 589,420.19 |
+| 128 | concentrated | Selection | 8,052.04 / 56,428.36 / 108,515.76 | 11,057.77 / 315,807.05 / 448,040.56 |
+| 128 | concentrated | GET | 138.61 / 768.20 / 2,066.00 | 7,579.76 / 79,027.61 / 117,193.47 |
+| 128 | concentrated | SET | 1,980.47 / 4,206.60 / 5,681.30 | 13,955.92 / 78,675.68 / 109,968.11 |
+| 128 | concentrated | Indexed query | 6,034.94 / 28,189.56 / 44,590.25 | 8,507.85 / 57,218.19 / 101,815.11 |
+| 128 | concentrated | Transaction | 18,479.96 / 47,358.88 / 66,913.73 | 39,215.30 / 112,346.05 / 153,390.85 |
+| 128 | spread | Authentication | 317,636.37 / 683,869.92 / 692,476.31 | 160,959.92 / 447,960.39 / 503,941.95 |
+| 128 | spread | Selection | 8,235.62 / 55,083.97 / 75,149.91 | 10,705.45 / 326,857.67 / 398,193.97 |
+| 128 | spread | GET | 112.05 / 905.26 / 2,472.72 | 7,291.49 / 29,858.09 / 52,507.53 |
+| 128 | spread | SET | 2,099.11 / 5,498.15 / 9,734.89 | 9,251.03 / 31,544.96 / 54,327.24 |
+| 128 | spread | Indexed query | 7,749.47 / 30,623.06 / 49,624.73 | 6,941.46 / 28,913.43 / 48,669.88 |
+| 128 | spread | Transaction | 18,499.80 / 52,084.71 / 73,547.13 | 27,567.73 / 69,603.28 / 93,528.62 |
+
+| Clients | Workload | Operations/s legacy → hierarchy | RSS KiB legacy → hierarchy | Descriptors legacy → hierarchy |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | concentrated | 3,134 → 3,081 | 7,812 → 12,048 | 18 → 15 |
+| 1 | spread | 3,419 → 2,480 | 7,976 → 12,052 | 19 → 18 |
+| 8 | concentrated | 8,269 → 5,998 | 8,416 → 12,132 | 40 → 32 |
+| 8 | spread | 8,913 → 3,793 | 8,656 → 12,132 | 46 → 32 |
+| 32 | concentrated | 11,224 → 8,963 | 9,872 → 12,784 | 121 → 89 |
+| 32 | spread | 9,932 → 4,961 | 10,264 → 12,692 | 121 → 89 |
+| 128 | concentrated | 13,595 → 4,570 | 14,408 → 15,032 | 409 → 281 |
+| 128 | spread | 12,966 → 7,696 | 15,980 → 15,308 | 409 → 281 |
+
+At 128 spread clients the managed mode completed 7,696 operations/s
+versus 12,966 on the historical route. Its median GET was 7.29 ms versus
+0.11 ms. The managed binary and JSON paths share the execution semaphore
+with shell commands. The legacy binary KV frames use their original
+admission. Queueing, filesystem load and scheduling all contribute to
+this comparison. The run does not isolate their individual costs.
+
+Revocation timings include the acknowledgement of 16 revokes. The managed
+check uses the established editor connection. The historical check signs in
+again before checking the downgraded grant. The compaction measurement is
+a single run. A second client issues 128 reads during that run.
+
+| Maintenance | Legacy p50 / p95 / p99 (µs) | Hierarchy/1 p50 / p95 / p99 (µs) |
+| --- | ---: | ---: |
+| Revoke acknowledgement | 101.36 / 2,107.47 / 2,107.47 | 710.12 / 4,854.60 / 4,854.60 |
+| Compaction | 2,817.24 / 2,817.24 / 2,817.24 | 5,656.50 / 5,656.50 / 5,656.50 |
+| GET during compaction run | 33.84 / 76.03 / 579.05 | 42.78 / 139.89 / 245.72 |
+
+The local Phase 6B example was rerun with the Phase 7A code. The following
+rows retain its p50/p95/p99 values for the selected metrics. Local numbers
+exclude transport, and these runs used separate scratch homes.
+
+| Collections | Open and shutdown (µs) | Selection (µs) | GET (µs) | Compaction (µs) |
+| ---: | ---: | ---: | ---: | ---: |

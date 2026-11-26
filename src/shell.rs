@@ -175,11 +175,9 @@ impl Backend for Local {
     fn place(&mut self) -> (Option<String>, bool) {
         let s = &self.sess;
         if s.hierarchy.is_some() {
-            let place = s
-                .hierarchy_location()
-                .ok()
-                .flatten()
-                .map(|(names, _)| names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join("."));
+            let place = s.hierarchy_location().ok().flatten().map(|location| {
+                location.names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join(".")
+            });
             return (place, true);
         }
         (if s.ws_priv.is_some() { Some(s.ws.clone()) } else { s.project.clone() }, false)

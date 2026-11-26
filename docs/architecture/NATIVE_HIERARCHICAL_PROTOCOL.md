@@ -55,7 +55,8 @@ unavailable on an admitted hierarchy connection.
 | Embedded Rust Engine and Session | Low-level local facilities. Network callers receive the authenticated `Client` interface |
 
 Framed EXEC supports the existing managed collection operations, including
-index, schema, vector, journal and compaction commands. The structured
+index, schema, vector, journal and compaction commands. `whoami` reports the visible context
+and its current data permissions. The structured
 allowlist is `whoami`, `get`, `put`, `add`, `del`, `scan`, `query`,
 `explain`, `aggregate`, `similar`, `changes`, `begin`, `commit` and
 `rollback`. Use the existing type tags and extended JSON rules for native

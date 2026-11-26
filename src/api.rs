@@ -457,22 +457,27 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "only whoami is available through the structured API in hierarchy preview".into(),
             ));
         }
-        let ([workspace, project, collection], role) = sess.hierarchy_location()?.expect("preview context");
+        let location = sess.hierarchy_location()?.expect("hierarchy context");
+        let [workspace, project, collection] = location.names;
         let path = [&workspace, &project, &collection]
             .into_iter()
             .filter(|name| !name.is_empty())
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(".");
-        return Ok(json!({
-            "user": sess.user_name(), "role": role.name(),
+        let mut identity = json!({
+            "user": sess.user_name(), "role": location.role.name(),
             "workspace": (!workspace.is_empty()).then_some(workspace),
             "project": (!project.is_empty()).then_some(project),
             "collection": (!collection.is_empty()).then_some(collection),
             "hierarchy_path": path, "hierarchy_preview": !sess.native_hierarchy,
-            "hierarchy_protocol": sess.native_hierarchy.then_some(crate::proto::HIERARCHY_V1),
-            "access": Json::Null, "can_write": false, "can_compact": false,
-        }));
+            "access": if location.write { json!("write") } else if location.read { json!("read") } else { Json::Null },
+            "can_write": location.write, "can_compact": location.compact,
+        });
+        if sess.native_hierarchy {
+            identity["hierarchy_protocol"] = json!(crate::proto::HIERARCHY_V1);
+        }
+        return Ok(identity);
     }
     handle_data(sess, req, op)
 }

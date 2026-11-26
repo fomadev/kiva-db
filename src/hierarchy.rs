@@ -261,6 +261,14 @@ enum LayoutGuard<'a> {
     Exclusive(#[allow(dead_code)] RwLockWriteGuard<'a, ()>),
 }
 
+pub(crate) struct HierarchyLocation {
+    pub(crate) names: [String; 3],
+    pub(crate) role: Role,
+    pub(crate) read: bool,
+    pub(crate) write: bool,
+    pub(crate) compact: bool,
+}
+
 impl Session {
     fn hierarchy_user(&self) -> Result<User> {
         let ctx =
@@ -292,14 +300,25 @@ impl Session {
         Err(KivaError::Denied("the metadata-only preview requires an administrator".into()))
     }
 
-    pub(crate) fn hierarchy_location(&self) -> Result<Option<([String; 3], Role)>> {
+    pub(crate) fn hierarchy_location(&self) -> Result<Option<HierarchyLocation>> {
         let Some(mut context) = self.hierarchy else { return Ok(None) };
         let _guard = lock_layout(&self.inst, context.managed, false)?;
         let user = self.hierarchy_user()?;
         let catalog = self.context_catalog(context.managed)?;
         let access = self.hierarchy_access(&user, context.managed)?;
         context.normalize(&catalog);
-        Ok(Some((context.visible_names(&catalog, &access), access.role())))
+        let scope = context.scope();
+        let selected = self.native_hierarchy && context.collection.is_some();
+        let read = selected && access.allows(&catalog, scope, Permission::Read);
+        let write = read && access.allows(&catalog, scope, Permission::Write);
+        let compact = write && access.allows(&catalog, scope, Permission::Manage);
+        Ok(Some(HierarchyLocation {
+            names: context.visible_names(&catalog, &access),
+            role: access.role(),
+            read,
+            write,
+            compact,
+        }))
     }
 }
 
