@@ -419,7 +419,11 @@ pub fn read_changes(
     };
     let until = std::time::Instant::now() + std::time::Duration::from_millis(wait.min(30_000));
     loop {
-        sess.check_reads_now()?;
+        if sess.managed_dispatch.is_some() {
+            sess.check(Need::Read)?;
+        } else {
+            sess.check_reads_now()?;
+        }
         let read = sess.engine.read_changes(from, limit, pattern, consumer)?;
         if !read.changes.is_empty() || read.more || std::time::Instant::now() >= until {
             let list: Vec<Json> =
@@ -453,22 +457,66 @@ pub fn handle(sess: &mut Session, req: &Json) -> Result<Json> {
                 "only whoami is available through the structured API in hierarchy preview".into(),
             ));
         }
-        let ([workspace, project, collection], role) = sess.hierarchy_location()?.expect("preview context");
+        let location = sess.hierarchy_location()?.expect("hierarchy context");
+        let [workspace, project, collection] = location.names;
         let path = [&workspace, &project, &collection]
             .into_iter()
             .filter(|name| !name.is_empty())
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(".");
-        return Ok(json!({
-            "user": sess.user_name(), "role": role.name(),
+        let mut identity = json!({
+            "user": sess.user_name(), "role": location.role.name(),
             "workspace": (!workspace.is_empty()).then_some(workspace),
             "project": (!project.is_empty()).then_some(project),
             "collection": (!collection.is_empty()).then_some(collection),
-            "hierarchy_path": path, "hierarchy_preview": true,
-            "access": Json::Null, "can_write": false, "can_compact": false,
-        }));
+            "hierarchy_path": path, "hierarchy_preview": !sess.native_hierarchy,
+            "access": if location.write { json!("write") } else if location.read { json!("read") } else { Json::Null },
+            "can_write": location.write, "can_compact": location.compact,
+        });
+        if sess.native_hierarchy {
+            identity["hierarchy_protocol"] = json!(crate::proto::HIERARCHY_V1);
+        }
+        return Ok(identity);
     }
+    handle_data(sess, req, op)
+}
+
+pub(crate) fn handle_native_hierarchy(sess: &mut Session, req: &Json) -> Result<Json> {
+    sess.use_zone();
+    let op = str_field(req, "op")?;
+    if op == "whoami" {
+        return handle(sess, req);
+    }
+    let need = match op {
+        "get" | "scan" | "query" | "explain" | "aggregate" | "similar" => Need::Read,
+        "put" | "add" | "del" | "begin" | "commit" => Need::Write,
+        "rollback" => Need::None,
+        "changes" => {
+            if !req["wait"].is_null() && req["wait"].as_u64() != Some(0) {
+                return Err(invalid("hierarchical journal reads require wait=0"));
+            }
+            if req["consumer"].is_null() {
+                Need::Read
+            } else {
+                Need::Write
+            }
+        }
+        _ => return Err(KivaError::Denied("structured operation unavailable in hierarchical mode".into())),
+    };
+    let result = sess.with_managed_engine(op, need, |sess| match op {
+        "begin" => Ok(json!({"transaction": sess.begin()?})),
+        "commit" => Ok(json!({"written": sess.commit()?})),
+        "rollback" => Ok(json!({"rolled_back": sess.rollback()})),
+        _ => handle_data(sess, req, op),
+    });
+    if result.is_err() && matches!(op, "put" | "add" | "del") {
+        sess.rollback();
+    }
+    result
+}
+
+fn handle_data(sess: &mut Session, req: &Json, op: &str) -> Result<Json> {
     let types = Types::of_request(req)?;
     match op {
         "whoami" => {

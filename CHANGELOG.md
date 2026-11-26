@@ -4,6 +4,11 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 ## [Unreleased]
 
+- Adds explicit `hierarchy/1` negotiation for authenticated native TCP
+  sessions and typed Rust collection handles. This mode uses the managed
+  catalog and grants for framed commands, binary keys and structured data
+  operations.
+
 - Allows concurrent local managed data commands under a shared authorization
   barrier. The managed engine registry uses a configurable limit and evicts
   the least recently used idle store.

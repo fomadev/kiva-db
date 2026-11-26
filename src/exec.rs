@@ -1427,7 +1427,10 @@ impl Session {
         self.wrote = false;
         let managed_need = self.hierarchy_data.then(|| managed_command(&cmd, &tokens[1..])).flatten();
         let res = if let Some(need) = managed_need {
-            self.with_managed_engine(&cmd, need, |session| session.dispatch(&cmd, &tokens, line, &mut out))
+            self.with_managed_engine(&cmd, need, |session| {
+                session.dispatch(&cmd, &tokens, line, &mut out).map_err(KivaError::Other)
+            })
+            .map_err(|error| error.to_string())
         } else if cmd == "hierarchy"
             || (self.hierarchy.is_some() && !matches!(cmd.as_str(), "quit" | "exit" | "auth" | "login"))
         {
@@ -2892,7 +2895,7 @@ impl Session {
             s.compactions,
             s.last_compact.map(|t| format!(", last {}", fmt_time(t))).unwrap_or_default()
         ));
-        if let Some(err) = &s.compact_error {
+        if let Some(err) = s.compact_error.as_ref().filter(|_| !self.native_hierarchy) {
             out.err(format!(" > Auto-Compaction Error: {err}"));
         }
         out.say(format!(" > Secondary Indexes    : {} (+ {} vector)", s.indexes, s.vector_indexes));
@@ -2909,7 +2912,8 @@ impl Session {
             out.say(" > Value Cache          : off (values are read from disk)");
         }
         if self.managed_dispatch.is_some() {
-            out.say(" > Mode                 : local managed data");
+            let mode = if self.native_hierarchy { "hierarchical TCP" } else { "local managed data" };
+            out.say(format!(" > Mode                 : {mode}"));
             return Ok(());
         }
         let repl = &self.inst.repl;

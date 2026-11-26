@@ -12,13 +12,14 @@ const MANUAL: &str = include_str!("../DOCUMENTATION.md");
 const NODE: &str = include_str!("../drivers/node/index.js");
 const PYTHON: &str = include_str!("../drivers/python/src/kivadb/client.py");
 
-/// The operations of `api::handle`: its match arms `"op" =>` and `"a" | "b" =>`.
+/// The legacy operations dispatched by `api::handle` through `handle_data`.
+/// The negotiated extension has a separate compatibility contract.
 fn operations() -> Vec<String> {
     // A checkout on Windows may hold CRLF line ends.
     let api = API.replace("\r\n", "\n");
-    let start = api.find("pub fn handle(sess: &mut Session, req: &Json)").expect("api::handle");
+    let start = api.find("fn handle_data(sess: &mut Session, req: &Json, op: &str)").expect("api::handle_data");
     let body = &api[start..];
-    let end = body.find("\n}\n").expect("end of handle");
+    let end = body.find("\n}\n").expect("end of handle_data");
     let mut ops = Vec::new();
     for line in body[..end].lines() {
         let t = line.trim();

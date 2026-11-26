@@ -175,11 +175,9 @@ impl Backend for Local {
     fn place(&mut self) -> (Option<String>, bool) {
         let s = &self.sess;
         if s.hierarchy.is_some() {
-            let place = s
-                .hierarchy_location()
-                .ok()
-                .flatten()
-                .map(|(names, _)| names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join("."));
+            let place = s.hierarchy_location().ok().flatten().map(|location| {
+                location.names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join(".")
+            });
             return (place, true);
         }
         (if s.ws_priv.is_some() { Some(s.ws.clone()) } else { s.project.clone() }, false)
@@ -451,6 +449,18 @@ pub fn run_embedded(inst: Arc<Instance>, opts: ShellOpts) -> i32 {
 
 /// Shell connected to a running instance.
 pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
+    run_client_mode(addr, opts, false)
+}
+
+pub fn run_hierarchical_client(addr: &str, opts: ShellOpts) -> i32 {
+    if opts.workspace.is_some() || opts.hierarchy_preview {
+        eprintln!("Error: use hierarchy navigation commands after native login");
+        return 1;
+    }
+    run_client_mode(addr, opts, true)
+}
+
+fn run_client_mode(addr: &str, opts: ShellOpts, hierarchical: bool) -> i32 {
     let connected = if opts.tls || opts.tls_fingerprint.is_some() {
         connect_secure(addr, &opts)
     } else {
@@ -465,6 +475,10 @@ pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
     };
     let remote = stream.peer_addr().map(|p| !p.ip().is_loopback()).unwrap_or(false);
     if remote && !opts.tls && opts.tls_fingerprint.is_none() {
+        if hierarchical {
+            eprintln!("Error: hierarchical TCP requires --tls for remote connections.");
+            return 1;
+        }
         eprintln!("[WARN] this connection is not encrypted: the password travels in clear. Add --tls.");
     }
     let _ = stream.set_nodelay(true);
@@ -477,6 +491,21 @@ pub fn run_client(addr: &str, opts: ShellOpts) -> i32 {
     if code == ST_ERR {
         eprintln!("Error: {hello}");
         return 1;
+    }
+    if hierarchical {
+        let negotiation =
+            write_frame(&mut stream, CMD_NEGOTIATE, HIERARCHY_V1.as_bytes()).and_then(|_| read_frame(&mut stream));
+        match negotiation {
+            Ok((ST_OK, capability)) if capability == HIERARCHY_V1.as_bytes() => {}
+            Ok((ST_ERR, response)) => {
+                eprintln!("Error: {}", String::from_utf8_lossy(&response));
+                return 1;
+            }
+            _ => {
+                eprintln!("Error: server did not confirm hierarchy/1.");
+                return 1;
+            }
+        }
     }
     if io::stdin().is_terminal() && opts.commands.is_empty() {
         println!("Connected to {} at {addr}", hello.lines().next().unwrap_or("KivaDB"));

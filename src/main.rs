@@ -42,12 +42,14 @@ SHELL OPTIONS:
   -p, --password <password>   Password (prompted when omitted)
   -e <command>                Run a command and exit (repeatable)
       --connect <host:port>   Connect to a running server instead of opening files
+      --hierarchical-client  Negotiate hierarchy/1 over --connect
       --tls                   Encrypt that connection (TLS); a new server is shown first
       --hierarchy-preview     Open the administrative hierarchy preview\n\
       --tls-fingerprint <fp>  Accept only the server certificate with this SHA-256
       --no-listen             Do not accept other local shells on this instance
 
 SERVER OPTIONS (start, serve):
+      --hierarchical-tcp      Serve initialized managed collections using hierarchy/1
       --port <n>              TCP port (default: [network] port, 2911)
       --bind <address>        Listen address (default: [network] bind, 127.0.0.1)
       --http-port <n>         REST API port (default: [http] port, 8080)
@@ -66,6 +68,8 @@ COMMON OPTIONS:
 #[derive(Default)]
 struct Args {
     serve: bool,
+    hierarchical_tcp: bool,
+    hierarchical_client: bool,
     action: Option<&'static str>,
     migration: Option<String>,
     home: Option<PathBuf>,
@@ -167,6 +171,8 @@ fn parse_args() -> Args {
             "-e" => args.shell.commands.push(value(&mut it, "-e")),
             "--connect" => args.connect = Some(value(&mut it, "--connect")),
             "--no-listen" => args.no_listen = true,
+            "--hierarchical-tcp" => args.hierarchical_tcp = true,
+            "--hierarchical-client" => args.hierarchical_client = true,
             "--hierarchy-preview" => args.shell.hierarchy_preview = true,
             "--skip-auth" => args.opts.skip_auth = true,
             "--lua-debug" => args.opts.lua_debug = true,
@@ -260,7 +266,8 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     };
     println!("KivaDB {VERSION} server");
     println!("  Home         : {}", inst.home.display());
-    println!("  TCP protocol : {bind}:{tcp_port} (binary and plain text)");
+    let mode = if args.hierarchical_tcp { "hierarchy/1 binary" } else { "binary and plain text" };
+    println!("  TCP protocol : {bind}:{tcp_port} ({mode})");
     let tls_required = inst.cfg().get_bool("tls", "required");
     match tls {
         Some(t) => println!(
@@ -275,7 +282,7 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
             "[WARN] other machines may still connect without encryption. To refuse it: config set tls.required true"
         );
     }
-    if http_on {
+    if http_on && !args.hierarchical_tcp {
         match http::start_http(&inst, &bind, http_port) {
             Ok(p) => println!(
                 "  REST API     : http://{bind}:{p}  (docs: /docs, metrics: /metrics, events: /ws, /v1/stream)"
@@ -290,7 +297,7 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
             args.resp_port.or_else(|| env_port("KIVADB_RESP_PORT")).unwrap_or(c.get_u64("resp", "port") as u16),
         )
     };
-    if resp_on {
+    if resp_on && !args.hierarchical_tcp {
         match kivadb::resp::start_resp(&inst, &bind, resp_port) {
             Ok(p) => println!("  Redis (RESP) : {bind}:{p}  (redis-cli and Redis client libraries)"),
             Err(e) => eprintln!("[WARN] Redis-compatible listener not started: {e}"),
@@ -301,7 +308,9 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
         eprintln!("[WARN] Authentication disabled - unsafe for production");
     }
     // Heartbeats, failure detection and elections (idle unless failover.auto).
-    kivadb::failover::start(&inst);
+    if !args.hierarchical_tcp {
+        kivadb::failover::start(&inst);
+    }
     let (role, host, mport) = {
         let c = inst.cfg();
         (
@@ -313,6 +322,8 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     if matches!(role.as_str(), "replica" | "slave") && !host.is_empty() {
         repl::start_replica(&inst, &host, mport);
         println!("  Replication  : replica of {host}:{mport}");
+    } else if args.hierarchical_tcp {
+        println!("  Replication  : unavailable in hierarchical TCP mode");
     } else {
         println!("  Replication  : master");
     }
@@ -454,6 +465,9 @@ fn start(home: &Path, args: &Args) -> i32 {
     let Ok(log_err) = log.try_clone() else { return 1 };
     let mut cmd = Command::new(exe);
     cmd.arg("serve").arg("--home").arg(home);
+    if args.hierarchical_tcp {
+        cmd.arg("--hierarchical-tcp");
+    }
     if let Some(p) = args.port {
         cmd.arg("--port").arg(p.to_string());
     }
@@ -521,7 +535,12 @@ fn start(home: &Path, args: &Args) -> i32 {
             }
             println!("  Home     : {}", home.display());
             println!("  Log      : {}", log_path.display());
-            println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");
+            if args.hierarchical_tcp {
+                println!("Open a shell with 'kivadb --connect <address> --hierarchical-client -u <account>'.");
+                println!("Stop the database with 'kivadb stop --hierarchical-tcp -u <administrator>'.");
+            } else {
+                println!("Open a shell with 'kivadb', stop the database with 'kivadb stop'.");
+            }
             return 0;
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -545,7 +564,8 @@ fn stop(home: &Path, args: &Args) -> i32 {
     };
     let mut opts = args.shell.clone();
     opts.commands = vec!["shutdown".to_string()];
-    if shell::run_client(&format!("127.0.0.1:{port}"), opts) != 0 {
+    let connect = if args.hierarchical_tcp { shell::run_hierarchical_client } else { shell::run_client };
+    if connect(&format!("127.0.0.1:{port}"), opts) != 0 {
         return 1;
     }
     for _ in 0..100 {
@@ -782,7 +802,11 @@ fn main() {
     // A server runs unattended: nobody would read the notice.
     let notice = if args.serve { None } else { update::Notice::begin(&home) };
     if let Some(addr) = &args.connect {
-        finish(&notice, shell::run_client(addr, args.shell.clone()));
+        let connect = if args.hierarchical_client { shell::run_hierarchical_client } else { shell::run_client };
+        finish(&notice, connect(addr, args.shell.clone()));
+    }
+    if args.hierarchical_client {
+        fail("--hierarchical-client requires --connect");
     }
     match args.action {
         Some("start") => finish(&notice, start(&home, &args)),
@@ -790,7 +814,11 @@ fn main() {
         Some("status") => finish(&notice, status(&home)),
         _ => {}
     }
-    let inst = match Instance::open(&home, args.opts.clone()) {
+    if args.hierarchical_tcp && !args.serve {
+        fail("--hierarchical-tcp requires serve or start");
+    }
+    let open = if args.hierarchical_tcp { Instance::open_hierarchical } else { Instance::open };
+    let inst = match open(&home, args.opts.clone()) {
         Ok(i) => i,
         Err(KivaError::Locked(_)) if !args.serve => {
             // KivaDB is already running on this home: join it instead of

@@ -282,6 +282,7 @@ struct TriggerJob {
 pub struct Instance {
     pub home: PathBuf,
     staged_migration: bool,
+    pub(crate) hierarchical_tcp: bool,
     pub(crate) managed_layout_lock: RwLock<()>,
     pub(crate) managed_engines: Mutex<crate::managed_layout::EngineRegistry>,
     pub(crate) managed_catalog: Mutex<Option<Arc<Catalog>>>,
@@ -326,6 +327,16 @@ impl Instance {
     /// Opens (creating on first run) the instance rooted at `home`.
     /// Fails with `Locked` if another process already owns it.
     pub fn open(home: &Path, opts: Options) -> Result<Arc<Instance>> {
+        Self::open_mode(home, opts, false)
+    }
+
+    /// Opens an initialized managed home for the authenticated native listener.
+    /// Provision accounts and initialize the managed catalog before using this mode.
+    pub fn open_hierarchical(home: &Path, opts: Options) -> Result<Arc<Instance>> {
+        Self::open_mode(home, opts, true)
+    }
+
+    fn open_mode(home: &Path, opts: Options, hierarchical_tcp: bool) -> Result<Arc<Instance>> {
         if home.join(crate::hierarchy_layout::EXPORT_MARKER).try_exists()? {
             return Err(KivaError::Invalid("a hierarchy layout export is not a runnable database home".into()));
         }
@@ -337,6 +348,23 @@ impl Instance {
         let _ = fs::remove_file(home.join("instance.port"));
         let _ = fs::remove_file(home.join("instance.pid"));
         let config = Config::load(home)?;
+        if hierarchical_tcp {
+            if opts.skip_auth || !config.get_bool("security", "auth_required") {
+                return Err(KivaError::Denied("hierarchical TCP requires account authentication".into()));
+            }
+            if matches!(config.get("replication", "role").as_str(), "replica" | "slave")
+                || config.get_bool("failover", "auto")
+            {
+                return Err(KivaError::Invalid(
+                    "hierarchical TCP requires replication and failover to be disabled".into(),
+                ));
+            }
+            if !crate::managed_layout::exists(home)? {
+                return Err(KivaError::Invalid(
+                    "initialize the managed catalog from an offline local shell first".into(),
+                ));
+            }
+        }
         let keys = crate::crypt::Keys::load(&config)?;
         let require_encryption = config.get_bool("encryption", "required");
         let system = Engine::open(
@@ -370,6 +398,7 @@ impl Instance {
         let inst = Arc::new_cyclic(|weak| Instance {
             home: home.to_path_buf(),
             staged_migration,
+            hierarchical_tcp,
             managed_layout_lock: RwLock::new(()),
             managed_engines: Mutex::new(crate::managed_layout::EngineRegistry::new(
                 config.get_u64("storage", "managed_open_engines").clamp(1, 1024) as usize,

@@ -22,6 +22,9 @@ pub const CMD_SET: u16 = 6;
 pub const CMD_DEL: u16 = 7;
 /// Structured request: a JSON object in, a JSON object out (see the api module).
 pub const CMD_API: u16 = 8;
+/// Opt into the negotiated hierarchy before authenticating.
+pub const CMD_NEGOTIATE: u16 = 9;
+pub const HIERARCHY_V1: &str = "hierarchy/1";
 pub const CMD_REPL_SYNC: u16 = 20;
 pub const CMD_REPL_ACK: u16 = 21;
 /// Node-to-node request of the automatic failover (JSON in, JSON out).
@@ -85,10 +88,18 @@ pub fn read_full(r: &mut impl Read, buf: &mut [u8], keep_going: &dyn Fn() -> boo
 }
 
 pub fn read_frame_with(r: &mut impl Read, keep_going: &dyn Fn() -> bool) -> io::Result<(u16, Vec<u8>)> {
+    read_frame_bounded(r, MAX_FRAME, keep_going)
+}
+
+pub(crate) fn read_frame_bounded(
+    r: &mut impl Read,
+    maximum: usize,
+    keep_going: &dyn Fn() -> bool,
+) -> io::Result<(u16, Vec<u8>)> {
     let mut head = [0u8; 6];
     read_full(r, &mut head, keep_going)?;
     let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
-    if !(2..=MAX_FRAME).contains(&len) {
+    if !(2..=maximum).contains(&len) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid frame length"));
     }
     let code = u16::from_be_bytes([head[4], head[5]]);
@@ -99,6 +110,18 @@ pub fn read_frame_with(r: &mut impl Read, keep_going: &dyn Fn() -> bool) -> io::
 
 pub fn read_frame(r: &mut impl Read) -> io::Result<(u16, Vec<u8>)> {
     read_frame_with(r, &|| true)
+}
+
+/// Negotiated document payloads can carry KDOC, whose leading version byte
+/// is distinct from JSON. Legacy connections keep their JSON encoding.
+pub(crate) fn decode_value(ty: crate::Type, bytes: &[u8], hierarchical: bool) -> crate::Result<crate::Value> {
+    use crate::value::DocEnc;
+    let encoding = if hierarchical && ty.is_doc() && bytes.first() == Some(&crate::doc::KDOC_VERSION) {
+        DocEnc::Kdoc
+    } else {
+        DocEnc::Json
+    };
+    crate::Value::decode(ty, bytes, encoding)
 }
 
 /// Cursor over a payload.

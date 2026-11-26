@@ -206,7 +206,7 @@ pub fn accept(
     let peer = stream.peer_addr().ok()?;
     let mut first = [0u8; 1];
     // A client that connects and says nothing for a minute is let go.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(if inst.hierarchical_tcp { 30 } else { 60 })));
     match stream.peek(&mut first) {
         Ok(1) => {}
         _ => return None,
@@ -232,6 +232,10 @@ pub fn accept(
         // Encryption is off: nothing sensible can be answered to a handshake.
         return None;
     };
+    if inst.hierarchical_tcp {
+        stream.set_read_timeout(Some(Duration::from_secs(30))).ok()?;
+        stream.set_write_timeout(Some(Duration::from_secs(30))).ok()?;
+    }
     let conn = rustls::ServerConnection::new(tls.config.clone()).ok()?;
     let (inner, outer) = loopback_pair().ok()?;
     relay(Connection::Server(conn), stream, outer);
