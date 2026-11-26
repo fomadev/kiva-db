@@ -63,7 +63,7 @@ fn data_lives_in_the_selected_collection_and_survives_restart() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(ok(&mut s, "get transient").contains("(nil)"));
     assert!(ok(&mut s, "check").contains("CORRUPTED: 0"));
-    assert!(fails(&mut s, "compact").contains("only hierarchy metadata commands"));
+    assert!(ok(&mut s, "compact").contains("compacted successfully"));
     ok(&mut s, "use collection Fordima.app.users");
     assert_eq!(ok(&mut s, "get key"), "key: 17 [int]");
 }
@@ -276,4 +276,200 @@ fn encrypted_managed_writes_recover_across_implicit_and_explicit_commits() {
         let path = dir.path().join("workspaces/Trading/projects/app/collections/users/store.kiva");
         assert!(!std::fs::read(path).unwrap().windows(17).any(|value| value == b"encrypted payload"));
     }
+}
+
+#[test]
+fn registry_evicts_the_least_recent_idle_store_and_reports_saturation() {
+    let dir = TempDir::new("registry_lru");
+    let mut cfg = kivadb::config::Config::load(dir.path()).unwrap();
+    cfg.set("storage", "managed_open_engines", "2").unwrap();
+    drop(cfg);
+    let inst = instance(&dir);
+    let mut a = Session::new(inst.clone(), true, None);
+    provision(&mut a);
+    ok(&mut a, "collection create positions");
+    ok(&mut a, "use collection Trading.app.users");
+    ok(&mut a, "set pinned 10");
+    ok(&mut a, "begin");
+
+    let mut b = Session::new(inst.clone(), true, None);
+    ok(&mut b, "hierarchy data");
+    ok(&mut b, "use collection Fordima.app.users");
+    ok(&mut b, "set pinned 20");
+    ok(&mut b, "begin");
+
+    let mut c = Session::new(inst, true, None);
+    ok(&mut c, "hierarchy data");
+    ok(&mut c, "use collection Trading.app.positions");
+    assert!(fails(&mut c, "get pinned").contains("all open stores are in use"));
+    ok(&mut b, "rollback");
+    ok(&mut c, "set position 30");
+    assert!(ok(&mut c, "hierarchy engines").contains("3 opens, 1 evictions, 1 saturated"));
+    ok(&mut a, "commit");
+    // Refresh Trading.users, leaving Trading.positions the least recent.
+    ok(&mut a, "get pinned");
+    assert_eq!(ok(&mut b, "get pinned"), "pinned: 20 [int]");
+    assert!(ok(&mut b, "hierarchy engines").contains("4 opens, 2 evictions"));
+    assert_eq!(ok(&mut c, "get position"), "position: 30 [int]");
+    assert!(ok(&mut c, "hierarchy engines").contains("5 opens, 3 evictions"));
+}
+
+#[test]
+fn compaction_requires_write_and_manage_and_respects_transaction_pins() {
+    let dir = TempDir::new("managed_compact_gate");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "create user editor identified by test-pass role editor");
+    provision(&mut admin);
+    ok(&mut admin, "use collection users");
+    ok(&mut admin, "set data 1");
+    ok(&mut admin, "hierarchy grant editor write collection Trading.app.users");
+    let mut editor = Session::new(inst, true, None);
+    editor.login("editor", "test-pass").unwrap();
+    ok(&mut editor, "hierarchy data");
+    ok(&mut editor, "use collection Trading.app.users");
+    assert!(fails(&mut editor, "compact").contains("insufficient permission"));
+    ok(&mut admin, "hierarchy grant editor manage collection Trading.app.users");
+    ok(&mut admin, "begin");
+    ok(&mut admin, "update data 2");
+    assert!(fails(&mut editor, "compact").contains("collection transaction"));
+    ok(&mut admin, "commit");
+    assert!(ok(&mut editor, "compact").contains("compacted successfully"));
+    assert_eq!(ok(&mut editor, "get data"), "data: 2 [int]");
+    ok(&mut admin, "collection rename users to renamed");
+    assert_eq!(ok(&mut editor, "get data"), "data: 2 [int]");
+}
+
+#[cfg(feature = "crash-points")]
+#[test]
+fn compaction_recovers_values_and_identity_at_each_durable_boundary() {
+    use std::process::Command;
+
+    let points = [
+        ("before_prepare", false),
+        ("during_copy", false),
+        ("after_sync", false),
+        ("before_intent_install", false),
+        ("before_replace", false),
+        ("after_replace", true),
+        ("before_publish", true),
+        ("before_marker_install", true),
+        ("after_publish", true),
+        ("during_cleanup", true),
+    ];
+    for (encrypted, (point, installed)) in [false, true].into_iter().flat_map(|e| points.map(|p| (e, p))) {
+        let dir = TempDir::new("managed_compact_crash");
+        if encrypted {
+            let keyfile = dir.path().join("test.key");
+            std::fs::write(&keyfile, "b3".repeat(32)).unwrap();
+            let mut config = kivadb::config::Config::load(dir.path()).unwrap();
+            config.set("encryption", "key_file", &keyfile.display().to_string()).unwrap();
+            config.set("encryption", "required", "true").unwrap();
+        }
+        {
+            let inst = instance(&dir);
+            let mut s = Session::new(inst.clone(), true, None);
+            provision(&mut s);
+            ok(&mut s, "use collection users");
+            ok(&mut s, r#"set doc:1 {"city":"Paris","embedding":[1,0]}"#);
+            ok(&mut s, "create index on doc:* (city)");
+            ok(&mut s, "create vector index on doc:* (embedding)");
+            ok(&mut s, r#"schema set doc: {"city":{"type":"string"}}"#);
+            ok(&mut s, "changes enable");
+            ok(&mut s, "set temporary 1 ttl 3600");
+            ok(&mut s, "set dead 1");
+            ok(&mut s, "del dead");
+            ok(&mut s, "begin");
+            ok(&mut s, "set date native '2004-05-09'");
+            ok(&mut s, r#"set secret "managed recovery payload""#);
+            ok(&mut s, "commit");
+            drop(s);
+            inst.shutdown();
+        }
+        let store = dir.path().join("workspaces/Trading/projects/app/collections/users");
+        let snapshot = std::fs::read(store.join(".managed-identity")).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_kivadb"))
+            .arg("--home")
+            .arg(dir.path())
+            .args(["--no-listen", "-e", "hierarchy data", "-e", "use collection Trading.app.users", "-e", "compact"])
+            .env("KIVADB_CRASH_ARMED", "1")
+            .env("KIVADB_CRASH_POINT", format!("managed_compact.{point}"))
+            .output()
+            .unwrap();
+        assert!(!result.status.success(), "{point}: {result:?}");
+        assert!(String::from_utf8_lossy(&result.stderr).contains("KIVADB-CRASH-POINT"), "{point}: {result:?}");
+        let inst = instance(&dir);
+        let mut s = Session::new(inst, true, None);
+        ok(&mut s, "hierarchy data");
+        ok(&mut s, "use collection Trading.app.users");
+        assert_eq!(ok(&mut s, "get native"), "native: 2004-05-09 [date]");
+        assert_eq!(ok(&mut s, "get secret"), "secret: managed recovery payload [string]");
+        assert_eq!(ok(&mut s, "get temporary"), "temporary: 1 [int]");
+        assert!(ok(&mut s, "get dead").contains("(nil)"));
+        assert!(ok(&mut s, r#"explain get where doc:*.city = "Paris""#).contains("INDEX SCAN"));
+        assert!(ok(&mut s, "get similar doc:*.embedding to [1,0] limit 1").contains("doc:1"));
+        assert!(ok(&mut s, "schemas").contains("doc:"));
+        assert!(ok(&mut s, "changes read from beginning").contains("secret"));
+        let identity = std::fs::read(store.join(".managed-identity")).unwrap();
+        let previous_marker: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        let recovered_marker: serde_json::Value = serde_json::from_slice(&identity).unwrap();
+        assert_eq!(previous_marker["id"], recovered_marker["id"], "{point}");
+        assert_eq!(previous_marker["file_id"] != recovered_marker["file_id"], installed, "{point}");
+        assert!(!store.join(".managed-compaction").exists());
+        assert!(!store.join(".managed-compaction.pending").exists());
+        assert!(!store.join(".managed-identity.pending").exists());
+        assert!(!store.join("store.kiva.compact").exists());
+    }
+}
+
+#[test]
+fn recreated_account_cannot_commit_or_reuse_prior_managed_permissions() {
+    let dir = TempDir::new("managed_account_recreation");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    ok(&mut admin, "create user editor identified by test-pass role editor");
+    provision(&mut admin);
+    ok(&mut admin, "use collection users");
+    ok(&mut admin, "hierarchy grant editor write collection Trading.app.users");
+    let mut writer = Session::new(inst.clone(), true, None);
+    writer.login("editor", "test-pass").unwrap();
+    ok(&mut writer, "hierarchy data");
+    ok(&mut writer, "use collection Trading.app.users");
+    ok(&mut writer, "begin");
+    ok(&mut writer, "set uncommitted 1");
+    let mut accounts = Session::new(inst, true, None);
+    ok(&mut accounts, "drop user editor");
+    ok(&mut accounts, "create user editor identified by test-pass role editor");
+    assert!(fails(&mut writer, "commit").contains("unavailable"));
+    assert!(ok(&mut admin, "get uncommitted").contains("(nil)"));
+    writer.login("editor", "test-pass").unwrap();
+    ok(&mut writer, "hierarchy data");
+    assert!(fails(&mut writer, "use collection Trading.app.users").contains("unavailable"));
+}
+
+#[test]
+fn an_unrelated_compaction_intent_is_rejected_without_altering_data() {
+    let dir = TempDir::new("managed_compact_substitution");
+    {
+        let inst = instance(&dir);
+        let mut s = Session::new(inst.clone(), true, None);
+        provision(&mut s);
+        ok(&mut s, "use collection users");
+        ok(&mut s, "set untouched 42");
+        drop(s);
+        inst.shutdown();
+    }
+    let collection = dir.path().join("workspaces/Trading/projects/app/collections/users");
+    let store = collection.join("store.kiva");
+    let before = std::fs::read(&store).unwrap();
+    let journal = collection.join(".managed-compaction");
+    std::fs::write(&journal, r#"{"collection":0,"before":1,"after":2}"#).unwrap();
+    let error = kivadb::Instance::open(dir.path(), kivadb::Options::default()).err().expect("invalid intent accepted");
+    assert!(error.to_string().contains("managed compaction identity mismatch"));
+    assert_eq!(std::fs::read(&store).unwrap(), before);
+    std::fs::remove_file(journal).unwrap();
+    let mut s = Session::new(instance(&dir), true, None);
+    ok(&mut s, "hierarchy data");
+    ok(&mut s, "use collection Trading.app.users");
+    assert_eq!(ok(&mut s, "get untouched"), "untouched: 42 [int]");
 }

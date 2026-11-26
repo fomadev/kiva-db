@@ -66,7 +66,8 @@ impl Session {
                 if !a.is_empty() {
                     return Err("'compact' command does not accept arguments.".into());
                 }
-                let r = self.engine.compact()?;
+                let r =
+                    if self.managed_dispatch.is_some() { self.compact_managed()? } else { self.engine.compact()? };
                 if r.aborted {
                     out.say("Compaction skipped: the database was reset while it was running.");
                 } else {

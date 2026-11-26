@@ -200,3 +200,163 @@ variation in synchronous write times makes this run unsuitable for claiming
 a throughput improvement. Managed operations serialize on the layout lock.
 These measurements cover a small local workload and exclude network,
 large data sets and backup/restore.
+
+
+## Phase 6B managed engine hardening
+
+**NOT READY for production.** Managed routing remains local and requires
+explicit activation with the listener disabled.
+
+- The admission test holds an authorized command open and verifies that
+  commands in the same and a different workspace can complete while
+  layout writers are excluded. Revocation, retirement and transaction tests
+  verify visibility and write publication through existing sessions.
+- The registry test sets the capacity to two engines and exercises saturation,
+  transaction pins, LRU eviction, and reopening an evicted store.
+- The compaction test interrupts ten prepare, copy, sync, swap, publication
+  and cleanup boundaries with and without encryption. It verifies actual
+  stored values, tombstones, TTL-visible values, index plans, vector results,
+  schema metadata, change journal history and generation recovery.
+- The platform failure model is process interruption. Power-cut tests,
+  protocol adapters, driver integration, managed backup, restore, replication,
+  doctor and migration cutover remain open.
+
+### Phase 6B Release comparison
+
+The [benchmark example](../../examples/hierarchy_routing_bench.rs) uses
+`Session::execute` in Release with managed writes synced in both versions.
+The baseline is commit `90f0c8c`, the merge of PR #168. The comparison used
+Linux, an overlay filesystem and five visible Intel Xeon Platinum 8573C
+CPUs in a shared runner. No process or disk cache was flushed between samples.
+
+Each case has four workspaces, two projects per workspace, four editors
+and 5, 36 or 132 stored grants. Up to four collections contain six keys
+and a document with a secondary index and a two-dimensional vector. Startup
+samples include open and clean shutdown. The open-or-hit sample rotates
+through up to 128 selections and executes a GET, so includes both the cold
+open path and the registry path. The concurrent workload starts two readers
+and two writers with a barrier. In the distributed case each worker uses a
+separate workspace when at least four collections are present. The 1-store
+distributed case is another run of the concentrated workload. The compaction
+case includes a first rewrite followed by repeated rewrites of the same
+small populated store.
+
+Run using `cargo run --locked --release --example hierarchy_routing_bench --
+<new-scratch-directory> 1 32 128 1000 10000`. Build the same example with the
+baseline library and append `--baseline` to omit commands unavailable in that
+revision. Provision separate homes for each executable.
+
+Latency is p50 / p95 / p99 in microseconds, using nearest-rank percentiles.
+Sample counts per run are 12 for open and shutdown, 128 for selection and up
+to 128 for select plus GET, 256 for warm reads and the four-thread workload,
+64 for serial writes and transactions, 16 for policy changes and 8 for
+compaction. Small samples give coarse tail estimates.
+
+| Collections | Operation | Phase 6 | Phase 6B |
+| ---: | --- | ---: | ---: |
+| 1 | Open + shutdown | 5,196.62 / 17,800.32 / 17,800.32 | 4,709.10 / 49,848.44 / 49,848.44 |
+| 1 | Qualified selection | 8.41 / 9.62 / 44.01 | 7.91 / 8.63 / 22.30 |
+| 1 | Select + first access or hit | 873.55 / 873.55 / 873.55 | 296.10 / 296.10 / 296.10 |
+| 1 | GET | 9.25 / 9.74 / 40.17 | 8.80 / 10.42 / 35.37 |
+| 1 | SET | 537.71 / 1,250.82 / 2,613.09 | 450.75 / 5,094.59 / 27,401.34 |
+| 1 | Indexed query | 13.79 / 15.00 / 51.12 | 12.96 / 15.36 / 140.41 |
+| 1 | Vector search | 9.41 / 10.31 / 47.10 | 13.64 / 15.16 / 175.38 |
+| 1 | Begin + update + commit | 506.27 / 4,722.01 / 13,027.62 | 456.62 / 1,623.22 / 7,039.42 |
+| 1 | Permissions command | 5.07 / 7.87 / 28.31 | 7.15 / 8.54 / 77.83 |
+| 1 | Mixed operations in one collection | 356.30 / 4,319.62 / 22,985.92 | 205.99 / 4,004.83 / 7,816.74 |
+| 1 | Mixed operations across workspaces | 448.78 / 3,727.09 / 42,081.40 | 361.03 / 4,960.95 / 7,610.03 |
+| 1 | Grant, revoke and GET | 1,442.20 / 4,027.31 / 4,027.31 | 855.89 / 7,706.37 / 7,706.37 |
+| 1 | Compaction | — | 6,915.42 / 9,798.40 / 9,798.40 |
+| 32 | Open + shutdown | 3,025.87 / 7,905.78 / 7,905.78 | 9,553.21 / 29,541.05 / 29,541.05 |
+| 32 | Qualified selection | 7.69 / 12.55 / 91.90 | 5.27 / 5.99 / 28.19 |
+| 32 | Select + first access or hit | 69.75 / 156.29 / 9,571.03 | 67.89 / 2,302.62 / 17,914.55 |
+| 32 | GET | 8.21 / 8.40 / 11.71 | 8.86 / 9.58 / 31.98 |
+| 32 | SET | 435.11 / 1,776.38 / 4,165.81 | 1,016.26 / 6,470.72 / 8,464.63 |
+| 32 | Indexed query | 10.96 / 11.76 / 63.65 | 8.82 / 14.68 / 46.91 |
+| 32 | Vector search | 11.23 / 20.54 / 127.90 | 8.48 / 8.76 / 27.60 |
+| 32 | Begin + update + commit | 393.39 / 2,662.69 / 6,593.08 | 438.92 / 2,080.95 / 3,406.20 |
+| 32 | Permissions command | 6.83 / 7.98 / 43.32 | 6.94 / 7.59 / 9.10 |
+| 32 | Mixed operations in one collection | 334.06 / 4,299.62 / 23,506.72 | 294.48 / 6,800.01 / 15,565.16 |
+| 32 | Mixed operations across workspaces | 278.86 / 1,389.75 / 7,125.38 | 72.94 / 12,978.85 / 44,175.90 |
+| 32 | Grant, revoke and GET | 3,531.34 / 10,764.63 / 10,764.63 | 5,645.72 / 28,172.26 / 28,172.26 |
+| 32 | Compaction | — | 5,701.78 / 30,919.15 / 30,919.15 |
+| 128 | Open + shutdown | 8,253.16 / 10,070.10 / 10,070.10 | 15,210.14 / 35,933.64 / 35,933.64 |
+| 128 | Qualified selection | 18.98 / 21.28 / 89.73 | 8.08 / 8.99 / 32.69 |
+| 128 | Select + first access or hit | 695.27 / 2,891.10 / 6,128.09 | 1,042.48 / 4,973.91 / 11,722.90 |
+| 128 | GET | 20.23 / 24.72 / 165.90 | 5.78 / 8.71 / 33.93 |
+| 128 | SET | 391.35 / 605.20 / 817.00 | 970.83 / 8,146.78 / 14,479.43 |
+| 128 | Indexed query | 15.82 / 34.11 / 89.26 | 8.44 / 14.58 / 125.87 |
+| 128 | Vector search | 16.04 / 23.79 / 49.12 | 8.48 / 9.36 / 71.89 |
+| 128 | Begin + update + commit | 541.52 / 1,375.85 / 3,100.65 | 2,251.18 / 15,569.67 / 34,493.32 |
+| 128 | Permissions command | 17.09 / 18.65 / 71.40 | 4.98 / 8.88 / 81.27 |
+| 128 | Mixed operations in one collection | 314.51 / 2,508.08 / 23,659.51 | 155.54 / 11,356.45 / 71,389.91 |
+| 128 | Mixed operations across workspaces | 266.20 / 5,411.90 / 41,609.10 | 345.42 / 8,549.80 / 30,635.87 |
+| 128 | Grant, revoke and GET | 9,141.27 / 18,088.77 / 18,088.77 | 14,455.19 / 237,070.58 / 237,070.58 |
+| 128 | Compaction | — | 11,388.89 / 20,615.69 / 20,615.69 |
+| 1,000 | Open + shutdown | 53,524.40 / 93,715.37 / 93,715.37 | 93,307.20 / 190,512.44 / 190,512.44 |
+| 1,000 | Qualified selection | 83.91 / 123.85 / 483.74 | 5.65 / 6.76 / 20.97 |
+| 1,000 | Select + first access or hit | 1,225.94 / 13,335.77 / 53,700.10 | 657.34 / 3,951.11 / 20,179.85 |
+| 1,000 | GET | 61.09 / 83.17 / 124.15 | 5.84 / 6.16 / 15.94 |
+| 1,000 | SET | 1,108.31 / 9,233.39 / 52,278.32 | 2,158.26 / 7,531.50 / 26,054.59 |
+| 1,000 | Indexed query | 64.19 / 120.96 / 3,695.00 | 8.57 / 9.40 / 33.83 |
+| 1,000 | Vector search | 64.15 / 91.44 / 249.07 | 8.66 / 21.25 / 103.25 |
+| 1,000 | Begin + update + commit | 1,271.43 / 21,418.51 / 36,020.81 | 401.49 / 625.51 / 17,817.06 |
+| 1,000 | Permissions command | 59.64 / 109.77 / 328.83 | 4.87 / 5.13 / 22.10 |
+| 1,000 | Mixed operations in one collection | 390.07 / 15,695.51 / 173,330.63 | 314.29 / 853.95 / 3,838.71 |
+| 1,000 | Mixed operations across workspaces | 359.66 / 7,941.44 / 19,157.71 | 336.90 / 928.74 / 2,456.54 |
+| 1,000 | Grant, revoke and GET | 14,106.87 / 36,321.27 / 36,321.27 | 5,325.18 / 24,090.91 / 24,090.91 |
+| 1,000 | Compaction | — | 4,381.21 / 5,559.82 / 5,559.82 |
+| 10,000 | Open + shutdown | 1,608,679.58 / 2,825,246.32 / 2,825,246.32 | 933,698.95 / 2,111,178.62 / 2,111,178.62 |
+| 10,000 | Qualified selection | 604.23 / 8,594.73 / 16,645.39 | 7.62 / 21.65 / 56.62 |
+| 10,000 | Select + first access or hit | 6,906.40 / 52,611.01 / 79,632.93 | 796.59 / 2,541.20 / 7,117.17 |
+| 10,000 | GET | 888.61 / 5,060.21 / 9,158.56 | 5.96 / 6.28 / 15.43 |
+| 10,000 | SET | 7,603.56 / 28,780.09 / 35,997.85 | 464.07 / 974.21 / 2,084.03 |
+| 10,000 | Indexed query | 968.72 / 9,151.14 / 32,921.16 | 8.55 / 8.79 / 28.32 |
+| 10,000 | Vector search | 938.15 / 12,662.58 / 33,361.82 | 8.61 / 9.01 / 79.74 |
+| 10,000 | Begin + update + commit | 10,731.77 / 35,767.91 / 85,810.55 | 418.45 / 728.21 / 845.03 |
+| 10,000 | Permissions command | 903.04 / 9,591.29 / 32,944.68 | 4.96 / 5.09 / 7.01 |
+| 10,000 | Mixed operations in one collection | 2,064.30 / 34,166.19 / 414,760.51 | 203.88 / 1,374.69 / 2,950.19 |
+| 10,000 | Mixed operations across workspaces | 2,606.36 / 30,899.66 / 658,394.62 | 473.74 / 1,616.96 / 3,938.79 |
+| 10,000 | Grant, revoke and GET | 14,786.73 / 40,711.65 / 40,711.65 | 8,903.25 / 21,870.86 / 21,870.86 |
+| 10,000 | Compaction | — | 5,871.24 / 8,038.43 / 8,038.43 |
+
+| Collections | Concentrated ops/s before → after | Distributed ops/s before → after | RSS KiB before → after | Descriptors before → after |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1,655 → 2,512 | 1,723 → 1,434 | 7,712 → 7,812 | 15 → 14 |
+| 32 | 2,238 → 1,251 | 2,545 → 473 | 8,084 → 8,092 | 78 → 77 |
+| 128 | 2,796 → 667 | 1,571 → 912 | 8,652 → 8,736 | 78 → 77 |
+| 1,000 | 565 → 5,358 | 901 → 6,625 | 10,976 → 10,748 | 78 → 77 |
+| 10,000 | 163 → 5,277 | 198 → 3,696 | 31,832 → 31,028 | 78 → 77 |
+
+RSS and descriptors are process snapshots after the workload. RSS may include
+allocator retention from preceding cases. The registry held 32 open engines
+at the larger sizes and evicted 100 idle engines in the 128-open sweep.
+Disk-bound tails vary considerably on the shared runner. The measured GET
+improvement follows elimination of per-request catalog cloning and grant
+scanning. The startup path still verifies the physical store and marker for
+each collection and checks for interrupted compaction. Open and shutdown were slower at 1,000 collections and faster at 10,000
+in this run. The mixed results and shared filesystem make a general
+startup improvement unverified. The hardening comparison preceded the
+final write-through and failed-replacement cleanup changes. The separate
+component measurements include the revised recovery checks.
+
+### Authorization and catalog component costs
+
+These Release samples use the 1,000-collection benchmark home with 132
+grants. The ignored `managed_routing_component_costs` test reads that home
+when `KIVADB_HIERARCHY_BENCH_HOME` is set. It measures each component in
+isolation. The layout barrier sample is uncontended. The policy load
+includes reading, deserializing, validating and indexing the grant record.
+The catalog load includes filesystem validation. Comparisons under real
+contention are represented by the mixed workload above.
+
+| Component | Samples | p50 / p95 / p99 (ns) |
+| --- | ---: | ---: |
+| validated catalog load | 16 | 104,606,527 / 1,084,789,682 / 1,084,789,682 |
+| policy load and index | 128 | 436,071 / 4,445,995 / 11,670,190 |
+| catalog Arc lookup | 2,048 | 68 / 171 / 204 |
+| collection ID and parent resolution | 2,048 | 53 / 59 / 64 |
+| current account validation | 2,048 | 4,322 / 5,926 / 70,945 |
+| versioned policy and account lookup | 2,048 | 157 / 176 / 224 |
+| inherited permission | 2,048 | 153 / 185 / 212 |
+| uncontended layout guard | 2,048 | 53 / 61 / 74 |

@@ -59,6 +59,10 @@ fn lookup<Id: Copy, Parent: PartialEq>(entries: &[Entry<Id, Parent>], parent: Pa
     entries.iter().find(|entry| entry.parent == parent && entry.name.eq_ignore_ascii_case(name)).map(|entry| entry.id)
 }
 
+fn by_id<Id: Copy + Ord, Parent>(entries: &[Entry<Id, Parent>], id: Id) -> Option<&Entry<Id, Parent>> {
+    entries.binary_search_by_key(&id, |entry| entry.id).ok().map(|index| &entries[index])
+}
+
 fn valid_name(name: &str) -> bool {
     valid_name_part(name) && !name.eq_ignore_ascii_case("system")
 }
@@ -121,7 +125,7 @@ fn rename<Id: Copy + PartialEq, Parent: Copy + PartialEq>(
 
 impl Catalog {
     pub fn decode(value: serde_json::Value) -> Result<Self> {
-        let snapshot: Snapshot = serde_json::from_value(value)
+        let mut snapshot: Snapshot = serde_json::from_value(value)
             .map_err(|error| KivaError::Corrupted(format!("invalid hierarchy catalog: {error}")))?;
         if snapshot.version != VERSION {
             return Err(KivaError::Format(format!("unsupported hierarchy catalog version {}", snapshot.version)));
@@ -137,6 +141,11 @@ impl Catalog {
         if !snapshot.workspaces.iter().any(|entry| entry.id == WorkspaceId(1) && entry.name == "default") {
             return Err(KivaError::Corrupted("missing default workspace".into()));
         }
+        // IDs are allocated in increasing order and topology edits preserve
+        // that order. Older snapshots may have been serialized in any order.
+        snapshot.workspaces.sort_unstable_by_key(|entry| entry.id);
+        snapshot.projects.sort_unstable_by_key(|entry| entry.id);
+        snapshot.collections.sort_unstable_by_key(|entry| entry.id);
         Ok(Self(snapshot))
     }
 
@@ -195,7 +204,7 @@ impl Catalog {
     }
 
     pub(crate) fn parent_workspace(&self, project: ProjectId) -> Option<WorkspaceId> {
-        self.0.projects.iter().find(|entry| entry.id == project).map(|entry| entry.parent)
+        by_id(&self.0.projects, project).map(|entry| entry.parent)
     }
 
     pub(crate) fn managed_collection(&self, id: CollectionId) -> Result<(u64, std::path::PathBuf)> {
@@ -212,11 +221,11 @@ impl Catalog {
     }
 
     pub(crate) fn parent_project(&self, collection: CollectionId) -> Option<ProjectId> {
-        self.0.collections.iter().find(|entry| entry.id == collection).map(|entry| entry.parent)
+        by_id(&self.0.collections, collection).map(|entry| entry.parent)
     }
 
     pub(crate) fn workspace_name(&self, id: WorkspaceId) -> Option<&str> {
-        self.0.workspaces.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+        by_id(&self.0.workspaces, id).map(|entry| entry.name.as_str())
     }
 
     pub(crate) fn workspace_names(&self) -> impl Iterator<Item = &str> {
@@ -224,7 +233,7 @@ impl Catalog {
     }
 
     pub(crate) fn project_name(&self, id: ProjectId) -> Option<&str> {
-        self.0.projects.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+        by_id(&self.0.projects, id).map(|entry| entry.name.as_str())
     }
 
     pub(crate) fn project_names(&self, parent: WorkspaceId) -> impl Iterator<Item = &str> {
@@ -232,7 +241,7 @@ impl Catalog {
     }
 
     pub(crate) fn collection_name(&self, id: CollectionId) -> Option<&str> {
-        self.0.collections.iter().find(|entry| entry.id == id).map(|entry| entry.name.as_str())
+        by_id(&self.0.collections, id).map(|entry| entry.name.as_str())
     }
 
     pub(crate) fn collection_names(&self, parent: ProjectId) -> impl Iterator<Item = &str> {

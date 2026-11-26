@@ -6538,6 +6538,16 @@ assign Read, Write or Manage with `hierarchy grant`. Manage covers collection
 definitions, and data access needs Read or Write. A transaction stays bound to
 its original collection and is discarded if commit authorization fails.
 
-Network access, replication, scripts, compaction and managed backup/restore remain
+Run `compact` with Write and Manage to reclaim space in the selected
+collection. A transaction on that collection prevents compaction. The local
+instance waits for running data commands before compacting and resumes data
+commands once it has published the replacement identity. The instance
+reconciles interrupted replacements on startup.
+
+Set `storage.managed_open_engines` to change the number of managed stores
+kept open after restart. The default is 32. `hierarchy engines` displays
+aggregate activity for administrators.
+
+Network access, replication, scripts and managed backup/restore remain
 unavailable in this mode. See the
 [managed data architecture](docs/architecture/WORKSPACE_HIERARCHY.md#local-managed-data-routing).

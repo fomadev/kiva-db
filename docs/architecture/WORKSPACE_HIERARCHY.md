@@ -353,35 +353,66 @@ and a collection, or resolve an authorized fully qualified name with
 `use collection Fordima.app.users`. `hierarchy off` leaves this session mode.
 `hierarchy storage` continues to provide metadata administration.
 
-Each admitted command resolves the current selection to a collection ID under
-the managed layout lock before acquiring catalog, registry or engine locks.
-In-flight commands finish before a revoke takes the layout lock. It refreshes the account and reads the policy record's
-version. The instance reuses the parsed policy at the same version and evaluates
-the current account and resource IDs for every request. A confirmed revoke
-takes effect for subsequent operations, including commits in established
-sessions. Reads and queries require Read, mutations require Write, and index,
-vector, schema and journal definitions require Write and Manage. Integrity checks use the same permissions. Named journal cursors require Write.
+Each admitted command holds the shared side of the layout barrier from
+authorization through execution and synchronous publication. Topology edits,
+account mutations and grant changes take the exclusive side. A revoke waits
+for previously admitted commands, and subsequent commands check the current
+policy. A transaction holds an engine reference between commands. Commit
+takes a new shared guard, refreshes the account, and discards pending writes
+if access has been revoked.
 
-The instance holds up to 32 collection engines keyed by stable collection ID.
-On a cache miss, it verifies the layout and store identities and opens the
-existing engine with the home's storage and encryption settings. Idle handles
-can be evicted. Rename and retirement release cached handles under the layout
-lock. Retirement preserves the old store and recreation allocates fresh IDs
-and storage. The registry closes and reopens engines after topology changes,
-including after recovery.
+The lock order is layout barrier, then catalog or policy cache, followed by
+registry admission and command execution. The registry mutex is released
+before executing a command. A cold open or eviction holds the registry
+mutex while verifying storage or closing an idle engine. Store internals
+still coordinate access through the existing engine locks. Compaction takes
+the exclusive layout barrier for its full duration. Rename and retirement
+wait for running operations and fail if any managed transaction still pins
+a store. Account identity is checked under the same layout barrier on
+metadata and data paths.
 
-A transaction pins its engine. Topology changes are refused until active
-managed transactions release their handles. Commit repeats authorization while
-holding the same lock as writes and policy updates. A denied commit discards
-pending changes. The existing engine provides batch recovery and encryption.
+The managed catalog is an immutable shared snapshot and ID lookups use
+binary search. Policy deserialization builds a grant index by account
+and immutable subject ID. The system record version identifies the cached
+policy. Data permission checks consult exact grants along the actual parent
+chain. Metadata visibility can also inspect descendant grants. Reads and
+queries require Read. Mutations require Write. Index, vector, schema and
+journal definitions, integrity checks and compaction require Write and
+Manage. Named journal cursors require Write.
 
-The local allowlist covers key and document commands, native types, queries,
-index/schema/vector operations, transactions, change journal and integrity
-checks. TTL uses on-access expiry. Managed engines sync writes before acknowledgment
-because their background maintenance is disabled. Compaction is blocked
-until managed storage can safely publish the replacement file identity.
-Scripts, trigger and subscription entry points, network listeners, protocol
-adapters, staged migration, replication and backup/restore of the managed
-layout remain outside this mode. The managed layout continues to carry its
-own catalog and store identity markers. See
+### Managed engine registry
+
+The registry keeps up to `storage.managed_open_engines` engines, with a
+default of 32 and a range from 1 to 1024. Config changes apply on restart.
+The least recently used idle engine is eligible for eviction. A running
+operation or transaction retains a reference, and saturation reports a
+retryable command error. On a cold open the engine verifies the collection
+marker and physical file identity. Topology changes invalidate the registry
+before changing any paths. `hierarchy engines` reports aggregate registry
+counts to instance administrators.
+
+### Compaction and recovery
+
+`compact` rewrites the selected managed collection through the same
+engine used by the legacy path. The collection ID and path stay stable.
+The compacted file gets a new physical generation ID. The managed wrapper
+requires the replacement to be synced and records the old and replacement
+IDs in a per-collection intent before the engine swaps the live file.
+Compaction refuses unreadable live records and an active transaction on the
+target collection.
+
+Open and topology validation check the live file header against the marker
+and intent. If the old generation is present, recovery keeps it. If the
+prepared generation is live, recovery publishes its verified identity,
+then removes the intent and any temporary file. An unexpected generation
+fails validation. Recovery never installs a temporary file. Unix syncs the
+directory before publishing and after cleanup. Windows requests write-through replacement for the store and its markers. The recovery tests simulate
+process interruption. Sudden power loss on Windows remains unverified.
+
+The allowlist covers key and document commands, native types, queries,
+index/schema/vector operations, transactions, change journal, compaction
+and integrity checks. Managed engines sync writes before acknowledgment.
+TTL uses on-access expiry. Scripts, trigger and subscription entry points,
+network listeners, protocol adapters, staged migration, replication and
+backup/restore of the managed layout remain outside this mode. See
 [readiness and measurements](../testing/workspace-hierarchy-readiness.md).

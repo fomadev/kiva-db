@@ -282,9 +282,9 @@ struct TriggerJob {
 pub struct Instance {
     pub home: PathBuf,
     staged_migration: bool,
-    pub(crate) managed_layout_lock: Mutex<()>,
-    pub(crate) managed_engines: Mutex<HashMap<crate::catalog::CollectionId, Arc<Engine>>>,
-    pub(crate) managed_catalog: Mutex<Option<Catalog>>,
+    pub(crate) managed_layout_lock: RwLock<()>,
+    pub(crate) managed_engines: Mutex<crate::managed_layout::EngineRegistry>,
+    pub(crate) managed_catalog: Mutex<Option<Arc<Catalog>>>,
     pub(crate) managed_policy: Mutex<crate::hierarchy_auth::CachedPolicy>,
 
     pub config: RwLock<Config>,
@@ -370,8 +370,10 @@ impl Instance {
         let inst = Arc::new_cyclic(|weak| Instance {
             home: home.to_path_buf(),
             staged_migration,
-            managed_layout_lock: Mutex::new(()),
-            managed_engines: Mutex::default(),
+            managed_layout_lock: RwLock::new(()),
+            managed_engines: Mutex::new(crate::managed_layout::EngineRegistry::new(
+                config.get_u64("storage", "managed_open_engines").clamp(1, 1024) as usize,
+            )),
             managed_catalog: Mutex::default(),
             managed_policy: Mutex::default(),
 
@@ -409,7 +411,8 @@ impl Instance {
         });
         if crate::managed_layout::exists(home)? {
             inst.check_managed_layout_home()?;
-            crate::managed_layout::open(home, &inst.engine_options())?;
+            let catalog = crate::managed_layout::open(home, &inst.engine_options())?.map(Arc::new);
+            *inst.managed_catalog.lock().unwrap_or_else(|e| e.into_inner()) = catalog;
         }
         inst.recover_pending_projects()?;
         inst.reload_triggers();
@@ -1051,11 +1054,9 @@ impl Instance {
             e.close();
         }
         {
-            let _layout = self.managed_layout_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _layout = self.managed_layout_lock.write().unwrap_or_else(|e| e.into_inner());
             let mut engines = self.managed_engines.lock().unwrap_or_else(|e| e.into_inner());
-            for (_, engine) in engines.drain() {
-                engine.close();
-            }
+            engines.close();
         }
         self.system.close();
         let _ = fs::remove_file(self.home.join("instance.port"));
