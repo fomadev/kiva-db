@@ -188,12 +188,46 @@ fn concurrent_readers_and_writers_observe_revocation_after_confirmation() {
     assert!(ok(&mut admin, "get after").contains("(nil)"));
 }
 
+#[test]
+fn concurrent_retirement_blocks_old_sessions_from_the_replacement() {
+    let dir = TempDir::new("managed_data_retirement");
+    let inst = instance(&dir);
+    let mut admin = Session::new(inst.clone(), true, None);
+    provision(&mut admin);
+    ok(&mut admin, "use collection users");
+    let mut writer = Session::new(inst, true, None);
+    ok(&mut writer, "hierarchy data");
+    ok(&mut writer, "use collection Trading.app.users");
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            barrier.wait();
+            let result = writer.execute("set racing 2");
+            if result.has_err() {
+                assert!(result.lines.iter().any(|(_, line)| line.contains("unavailable")));
+            }
+        });
+        barrier.wait();
+        ok(&mut admin, "collection drop users");
+    });
+    ok(&mut admin, "collection create users");
+    assert!(fails(&mut writer, "set stale 3").contains("unavailable"));
+    ok(&mut admin, "use collection users");
+    assert!(ok(&mut admin, "get racing").contains("(nil)"));
+    assert!(ok(&mut admin, "get stale").contains("(nil)"));
+}
+
 #[cfg(feature = "crash-points")]
 #[test]
-fn encrypted_managed_transactions_recover_across_the_commit_boundary() {
+fn encrypted_managed_writes_recover_across_implicit_and_explicit_commits() {
     use std::process::Command;
 
-    for (point, committed) in [("batch.before_append", false), ("batch.after_append", true)] {
+    for (point, committed, transaction) in [
+        ("batch.before_append", false, true),
+        ("batch.after_append", true, true),
+        ("batch.torn_append", false, false),
+        ("batch.after_append", true, false),
+    ] {
         let dir = TempDir::new("managed_data_crash");
         let keyfile = dir.path().join("test.key");
         std::fs::write(&keyfile, "b3".repeat(32)).unwrap();
@@ -207,29 +241,26 @@ fn encrypted_managed_transactions_recover_across_the_commit_boundary() {
             provision(&mut s);
             ok(&mut s, "use collection users");
             ok(&mut s, "set existing 42");
+            if !transaction {
+                ok(&mut s, r#"set source "encrypted payload""#);
+            }
             drop(s);
             inst.shutdown();
         }
-        let out = Command::new(env!("CARGO_BIN_EXE_kivadb"))
-            .arg("--home")
-            .arg(dir.path())
-            .args([
-                "--no-listen",
-                "-e",
-                "hierarchy data",
-                "-e",
-                "use collection Trading.app.users",
-                "-e",
-                "begin",
-                "-e",
-                r#"set secret "encrypted payload""#,
-                "-e",
-                "commit",
-            ])
-            .env("KIVADB_CRASH_ARMED", "1")
-            .env("KIVADB_CRASH_POINT", point)
-            .output()
-            .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kivadb"));
+        child.arg("--home").arg(dir.path()).args([
+            "--no-listen",
+            "-e",
+            "hierarchy data",
+            "-e",
+            "use collection Trading.app.users",
+        ]);
+        if transaction {
+            child.args(["-e", "begin", "-e", r#"set secret "encrypted payload""#, "-e", "commit"]);
+        } else {
+            child.args(["-e", "change source to secret"]);
+        }
+        let out = child.env("KIVADB_CRASH_ARMED", "1").env("KIVADB_CRASH_POINT", point).output().unwrap();
         assert!(!out.status.success(), "{out:?}");
         assert!(String::from_utf8_lossy(&out.stderr).contains("KIVADB-CRASH-POINT"), "{out:?}");
         let inst = instance(&dir);
@@ -239,6 +270,9 @@ fn encrypted_managed_transactions_recover_across_the_commit_boundary() {
         assert_eq!(ok(&mut s, "get existing"), "existing: 42 [int]");
         let value = ok(&mut s, "get secret");
         assert_eq!(value.contains("encrypted payload"), committed, "{point}: {value}");
+        if !transaction {
+            assert_eq!(ok(&mut s, "get source").contains("encrypted payload"), !committed);
+        }
         let path = dir.path().join("workspaces/Trading/projects/app/collections/users/store.kiva");
         assert!(!std::fs::read(path).unwrap().windows(17).any(|value| value == b"encrypted payload"));
     }
