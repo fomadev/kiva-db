@@ -487,10 +487,9 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
             let decode = span(Stage::Decode);
             let key = native_text(payload, crate::format::MAX_KEY_LEN)?;
             drop(decode);
-            let permit = inst.native_admission.enter(Class::Read)?;
+            let _permit = inst.native_admission.enter(Class::Read)?;
             let value =
                 sess.with_managed_key("get", Need::Read, |sess| Ok(sess.kv_get(key)?.map(|(value, _)| value)))?;
-            drop(permit);
             let _encode = span(Stage::Encode);
             match value {
                 Some(value) => {
@@ -521,17 +520,13 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
             })
         }
         CMD_API => {
+            // Parsing JSON can allocate substantially more than its frame.
+            // Keep decoding, dispatch and serialization under data admission.
+            let _permit = inst.native_admission.enter(Class::Data)?;
             let decode = span(Stage::Decode);
             let request = crate::num::from_slice(payload).map_err(KivaError::Invalid)?;
             drop(decode);
-            let class = match request["op"].as_str() {
-                Some("get") => Class::Read,
-                Some("whoami" | "rollback") => Class::Control,
-                _ => Class::Data,
-            };
-            let permit = inst.native_admission.enter(class)?;
             let result = crate::api::handle_native_hierarchy(sess, &request)?;
-            drop(permit);
             let _encode = span(Stage::Encode);
             ok(result.to_string().into_bytes())
         }
@@ -608,7 +603,7 @@ mod native_tests {
         assert!(refused.to_string().starts_with("ERR_SERVER_BUSY"));
         assert_eq!(reader.get("sample").unwrap(), Some(Value::Num("42".into())));
         assert!(reader.exec("hierarchy timings").is_err());
-        assert!(admin.api(&serde_json::json!({"op":"rollback"})).is_ok());
+        assert!(admin.exec("rollback").is_ok());
         admin.exec("hierarchy revoke reader read instance").unwrap();
         assert!(reader.get("sample").is_err());
         drop(held);

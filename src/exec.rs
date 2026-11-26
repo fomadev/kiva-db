@@ -1429,6 +1429,7 @@ impl Session {
                 "auth" | "login" => Class::Authentication,
                 "workspace" | "project" | "collection" | "collections" | "switch" | "use" | "hierarchy" | "whoami"
                 | "compact" | "shutdown" | "exit" | "quit" => Class::Control,
+                "rollback" if tokens.len() == 1 => Class::Control,
                 "create" | "drop" if tokens.get(1).is_some_and(|token| token.is_kw("user")) => Class::Control,
                 _ => Class::Data,
             };

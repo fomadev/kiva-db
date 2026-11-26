@@ -100,10 +100,11 @@ engine and query settings. The server retains no per-client notification queue i
 
 ### Admission lanes and overload
 
-The read lane admits binary GET and structured GET. The data lane admits
-mutations, transactions and queries. Each uses `server.threads` slots, capped
+The read lane admits binary GET. The data lane admits mutations,
+transactions, queries and structured requests. It bounds JSON decoding
+and response serialization as well as execution. Each uses `server.threads` slots, capped
 at 64 per lane. The control lane reserves one slot for navigation, catalog and
-account administration, compaction, and structured rollback. Authentication
+account administration, compaction and argument-free framed rollback. Authentication
 has at most four independent slots. Requests in a lane are admitted in FIFO
 order. Each socket submits one request at a time. `server.native_queue`
 bounds the waiting entries per lane from 0 to 128. Both settings take effect
