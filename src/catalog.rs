@@ -19,7 +19,7 @@ pub struct WorkspaceId(u64);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ProjectId(u64);
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct CollectionId(u64);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,6 +196,19 @@ impl Catalog {
 
     pub(crate) fn parent_workspace(&self, project: ProjectId) -> Option<WorkspaceId> {
         self.0.projects.iter().find(|entry| entry.id == project).map(|entry| entry.parent)
+    }
+
+    pub(crate) fn managed_collection(&self, id: CollectionId) -> Result<(u64, std::path::PathBuf)> {
+        let project = self.parent_project(id).ok_or_else(|| KivaError::NotFound("collection unavailable".into()))?;
+        let workspace =
+            self.parent_workspace(project).ok_or_else(|| KivaError::Corrupted("missing workspace".into()))?;
+        let path = crate::hierarchy_layout::collection(
+            std::path::Path::new(""),
+            self.workspace_name(workspace).expect("validated workspace"),
+            self.project_name(project).expect("validated project"),
+            self.collection_name(id).expect("validated collection"),
+        )?;
+        Ok((id.0, path))
     }
 
     pub(crate) fn parent_project(&self, collection: CollectionId) -> Option<ProjectId> {

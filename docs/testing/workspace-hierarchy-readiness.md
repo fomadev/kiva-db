@@ -128,8 +128,7 @@ subsequent integration.
 
 **NOT READY for hierarchical serving.** The authorization model governs
 managed metadata. Staged historical grants are projected onto exact
-collection identities in the read-only view. No hierarchy mode can route
-data requests or operate backups. The architecture document records the
+collection identities in the read-only view. In Phase 5, hierarchy modes could only manage metadata. The architecture document records the
 before/after migration matrix.
 
 | Area | Verification |
@@ -140,3 +139,22 @@ before/after migration matrix.
 | Recovery | Policy persists after restart and crash tests distinguish precommit and committed revocation |
 | Corruption | Unsupported or malformed grant records prevent startup |
 | Remaining | Permanent authorization cutover, data-engine enforcement, backup and all protocol adapters |
+
+## Phase 6 local data routing
+
+**NOT READY for production.** `hierarchy data` enables local collection data
+commands in standard, unstaged homes with listeners disabled.
+
+| Area | Verification |
+| --- | --- |
+| DATA01–DATA09, DATA11–DATA12 | Collection reads and writes, missing selection, homonymous resources, restart, documents and native dates, index and schema isolation, TTL, vector search, transactions, change journal and compaction |
+| AUTH01–AUTH06, AUTH08 | Read, Write and Manage decisions, qualified selection, revoke during a session and before commit, and fresh resource identities |
+| AUTH07 | Account identity and recreation tests in `hierarchy_grants` |
+| LIFE01–LIFE04 | Rename, retirement, stale selection and empty recreation. Active transactions prevent concurrent topology changes |
+| DATA10, CRASH02 | Encrypted managed transaction recovery around the durable batch boundary |
+| CRASH01 and CRASH03 | Existing engine crash and managed administration recovery suites |
+| CONC01–CONC03 | Concurrent local data calls and grant changes, with completion checks |
+
+The test suite simulates process crashes. Managed backup, restoration,
+replication, doctor, protocol integration, drivers, staged cutover and
+dedicated power-loss validation remain open.

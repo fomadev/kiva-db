@@ -11,7 +11,7 @@ use crate::error::{KivaError, Result};
 use crate::exec::Out;
 use crate::hierarchy_auth::{Access, Permission, Policy, Scope};
 use crate::lexer::Token;
-use crate::session::Session;
+use crate::session::{Need, Session};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Context {
@@ -274,7 +274,7 @@ impl Session {
 
     fn hierarchy_access(&self, user: &User, managed: bool) -> Result<Access> {
         if managed {
-            return Ok(Policy::load(&self.inst.system)?.for_user(user));
+            return Ok(Policy::load_cached(&self.inst)?.for_user(user));
         }
         if let Some(aliases) = crate::migration::staged_aliases(&self.inst.home)? {
             return Ok(Access::legacy(user, &aliases));
@@ -318,7 +318,7 @@ impl Session {
     fn hierarchy_command(&mut self, command: &str, args: &[Token], out: &mut Out) -> Result<()> {
         let inst = self.inst.clone();
         let managed = self.hierarchy.is_some_and(|context| context.managed)
-            || command == "hierarchy" && args.first().is_some_and(|mode| mode.is_kw("storage"));
+            || command == "hierarchy" && args.first().is_some_and(|mode| mode.is_kw("storage") || mode.is_kw("data"));
         let _guard = if managed {
             Some(inst.managed_layout_lock.lock().map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?)
         } else {
@@ -334,11 +334,12 @@ impl Session {
                     self.hierarchy_access(&user, false)?;
                     let catalog = self.preview_catalog()?;
                     self.drop_subscriptions();
+                    self.hierarchy_data = false;
                     self.hierarchy =
                         Some(Context::workspace(catalog.workspace("default").expect("validated default"), false));
                     out.say("Hierarchy preview enabled. Data operations are disabled.");
                 }
-                [mode] if mode.is_kw("storage") => {
+                [mode] if mode.is_kw("storage") || mode.is_kw("data") => {
                     self.check_managed_access()?;
                     let inst = self.inst.clone();
                     Policy::load(&inst.system)?;
@@ -354,7 +355,16 @@ impl Session {
                     self.drop_subscriptions();
                     self.hierarchy =
                         Some(Context::workspace(catalog.workspace("default").expect("validated default"), true));
-                    out.say("Managed storage administration enabled. Data operations are disabled.");
+                    *inst
+                        .managed_catalog
+                        .lock()
+                        .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))? = Some(catalog);
+                    self.hierarchy_data = mode.is_kw("data");
+                    out.say(if self.hierarchy_data {
+                        "Local managed data mode enabled."
+                    } else {
+                        "Managed storage administration enabled. Data operations are disabled."
+                    });
                 }
                 [mode] if mode.is_kw("permissions") => {
                     let mut context = self.hierarchy.ok_or_else(hidden)?;
@@ -371,6 +381,7 @@ impl Session {
                 }
                 [mode] if mode.is_kw("off") => {
                     self.hierarchy = None;
+                    self.hierarchy_data = false;
                     out.say("Hierarchy preview disabled.");
                 }
                 [action, account, permission, kind, target @ ..] if action.is_kw("grant") || action.is_kw("revoke") => {
@@ -390,7 +401,7 @@ impl Session {
                     )?;
                     out.say("Hierarchy grants updated.");
                 }
-                _ => return Err(KivaError::Invalid("use hierarchy on, storage, off, grant or revoke".into())),
+                _ => return Err(KivaError::Invalid("use hierarchy on, storage, data, off, grant or revoke".into())),
             }
             return Ok(());
         }
@@ -547,22 +558,125 @@ impl Session {
     }
 
     fn check_managed_access(&self) -> Result<()> {
+        self.check_local_managed()?;
+        self.inst.check_managed_layout_home()
+    }
+
+    fn check_local_managed(&self) -> Result<()> {
         if !self.local
             || self.inst.tcp_port.load(std::sync::atomic::Ordering::Acquire) != 0
             || self.inst.repl.is_replica()
         {
             return Err(KivaError::Denied("managed storage requires the local shell with --no-listen".into()));
         }
-        self.inst.check_managed_layout_home()
+        Ok(())
     }
 
     fn context_catalog(&self, managed: bool) -> Result<Catalog> {
         if !managed {
             return self.preview_catalog();
         }
-        self.check_managed_access()?;
-        crate::managed_layout::open(&self.inst.home, &self.inst.engine_options())?
-            .ok_or_else(|| KivaError::Corrupted("missing managed layout".into()))
+        self.check_local_managed()?;
+        let mut cache =
+            self.inst.managed_catalog.lock().map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
+        if let Some(catalog) = &*cache {
+            return Ok(catalog.clone());
+        }
+        self.inst.check_managed_layout_home()?;
+        let catalog = crate::managed_layout::open(&self.inst.home, &self.inst.engine_options())?
+            .ok_or_else(|| KivaError::Corrupted("missing managed layout".into()))?;
+        *cache = Some(catalog.clone());
+        Ok(catalog)
+    }
+
+    /// Grants, engine lookup, and execution are linearized by the same lock
+    /// used by revocation and layout changes. The legacy engine is restored
+    /// before returning. An open transaction retains its exact engine.
+    pub(crate) fn with_managed_engine(
+        &mut self,
+        command: &str,
+        need: Need,
+        execute: impl FnOnce(&mut Self) -> std::result::Result<(), String>,
+    ) -> std::result::Result<(), String> {
+        let inst = self.inst.clone();
+        let _guard = inst.managed_layout_lock.lock().map_err(|_| "managed layout lock poisoned".to_owned())?;
+        if command == "rollback" && need == Need::None {
+            return execute(self);
+        }
+        let route = (|| -> Result<_> {
+            self.check_local_managed()?;
+            let context = self.hierarchy.filter(|context| context.managed).ok_or_else(hidden)?;
+            let mut selected = context;
+            let id = context
+                .collection
+                .ok_or_else(|| KivaError::Invalid("No collection selected. Use 'use collection <name>'.".into()))?;
+            let catalog = self.context_catalog(true)?;
+            selected.normalize(&catalog);
+            if selected.collection != Some(id) {
+                return Err(hidden());
+            }
+            let user = self.hierarchy_user()?;
+            let access = self.hierarchy_access(&user, true)?;
+            let scope = Scope::Collection(id);
+            let read = access.allows(&catalog, scope, Permission::Read);
+            let write = access.allows(&catalog, scope, Permission::Write);
+            let manage = access.allows(&catalog, scope, Permission::Manage);
+            if !(read && (need != Need::Write || write) && (need != Need::Owner || write && manage)) {
+                return Err(KivaError::Denied("insufficient permission on managed collection".into()));
+            }
+            if need == Need::Owner && self.txn.is_some() {
+                return Err(KivaError::Invalid("collection maintenance is blocked during a transaction".into()));
+            }
+            let mut engines =
+                inst.managed_engines.lock().map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
+            const MAX_OPEN_MANAGED_ENGINES: usize = 32;
+            if !engines.contains_key(&id) && engines.len() >= MAX_OPEN_MANAGED_ENGINES {
+                let idle = engines
+                    .iter()
+                    .find(|(_, engine)| std::sync::Arc::strong_count(engine) == 1)
+                    .map(|(id, _)| *id)
+                    .ok_or_else(|| {
+                        KivaError::Invalid("managed engine limit reached with active transactions".into())
+                    })?;
+                engines.remove(&idle);
+            }
+            let engine = match engines.entry(id) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                std::collections::hash_map::Entry::Vacant(entry) => entry
+                    .insert(crate::managed_layout::open_collection(&inst.home, &catalog, id, inst.engine_options())?)
+                    .clone(),
+            };
+            if self
+                .managed_txn_engine
+                .as_ref()
+                .is_some_and(|(pinned_id, pinned)| *pinned_id != id || !std::sync::Arc::ptr_eq(pinned, &engine))
+            {
+                return Err(KivaError::Conflict("managed transaction engine changed".into()));
+            }
+            Ok((id, engine, write, manage, selected.path(&catalog, &access)))
+        })();
+        let (id, engine, write, manage, label) = match route {
+            Ok(route) => route,
+            Err(error) => {
+                if command == "commit" {
+                    self.rollback();
+                }
+                return Err(error.to_string());
+            }
+        };
+        let old_engine = std::mem::replace(&mut self.engine, engine.clone());
+        let old_label = std::mem::replace(&mut self.ws, label);
+        self.managed_dispatch = Some((write, manage));
+        let result = execute(self);
+        self.managed_dispatch = None;
+        self.engine = old_engine;
+        self.ws = old_label;
+        if self.txn.is_some() && self.managed_txn_engine.is_none() {
+            self.managed_txn_engine = Some((id, engine));
+        }
+        // Managed engines are not hooked into legacy replication.
+        self.wrote = false;
+        result
     }
 
     fn preview_catalog(&self) -> Result<Catalog> {
@@ -575,7 +689,27 @@ impl Session {
     fn edit_hierarchy(&self, managed: bool, edit: impl FnOnce(&mut Catalog) -> Result<()>) -> Result<()> {
         if managed {
             self.check_managed_access()?;
-            return crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit).map(|_| ());
+            let mut engines = self
+                .inst
+                .managed_engines
+                .lock()
+                .map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
+            if engines.values().any(|engine| std::sync::Arc::strong_count(engine) > 1) {
+                return Err(KivaError::Invalid(
+                    "a managed transaction is active; finish it before a layout change".into(),
+                ));
+            }
+            engines.clear();
+            drop(engines);
+            let mut cache = self
+                .inst
+                .managed_catalog
+                .lock()
+                .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
+            cache.take();
+            let catalog = crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit)?;
+            *cache = Some(catalog);
+            return Ok(());
         }
         if self.inst.workspace_catalog()?.is_some() || self.inst.repl.is_replica() {
             return Err(KivaError::ReadOnly("a staged migration or replica catalog is read-only".into()));
