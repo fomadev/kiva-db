@@ -354,13 +354,13 @@ and a collection, or resolve an authorized fully qualified name with
 `hierarchy storage` continues to provide metadata administration.
 
 Each admitted command resolves the current selection to a collection ID under
-the managed layout lock. It refreshes the account and reads the policy record's
+the managed layout lock before acquiring catalog, registry or engine locks.
+In-flight commands finish before a revoke takes the layout lock. It refreshes the account and reads the policy record's
 version. The instance reuses the parsed policy at the same version and evaluates
 the current account and resource IDs for every request. A confirmed revoke
 takes effect for subsequent operations, including commits in established
 sessions. Reads and queries require Read, mutations require Write, and index,
-vector and schema definitions require Manage. Check and compaction require
-Write and Manage. The change journal requires Write for named cursors.
+vector, schema and journal definitions require Write and Manage. Integrity checks use the same permissions. Named journal cursors require Write.
 
 The instance holds up to 32 collection engines keyed by stable collection ID.
 On a cache miss, it verifies the layout and store identities and opens the
@@ -376,8 +376,10 @@ holding the same lock as writes and policy updates. A denied commit discards
 pending changes. The existing engine provides batch recovery and encryption.
 
 The local allowlist covers key and document commands, native types, queries,
-index/schema/vector operations, transactions, change journal and selected
-maintenance commands. TTL uses on-access expiry and explicit compaction.
+index/schema/vector operations, transactions, change journal and integrity
+checks. TTL uses on-access expiry. Managed engines sync writes before acknowledgment
+because their background maintenance is disabled. Compaction is blocked
+until managed storage can safely publish the replacement file identity.
 Scripts, trigger and subscription entry points, network listeners, protocol
 adapters, staged migration, replication and backup/restore of the managed
 layout remain outside this mode. The managed layout continues to carry its

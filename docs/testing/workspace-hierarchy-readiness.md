@@ -147,7 +147,8 @@ commands in standard, unstaged homes with listeners disabled.
 
 | Area | Verification |
 | --- | --- |
-| DATA01–DATA09, DATA11–DATA12 | Collection reads and writes, missing selection, homonymous resources, restart, documents and native dates, index and schema isolation, TTL, vector search, transactions, change journal and compaction |
+| DATA01–DATA09, DATA11 | Collection reads and writes, missing selection, homonymous resources, restart, documents and native dates, index and schema isolation, TTL, vector search, transactions, change journal and integrity checks |
+| DATA12 | Compaction is refused pending crash-safe publication of the replacement store identity |
 | AUTH01–AUTH06, AUTH08 | Read, Write and Manage decisions, qualified selection, revoke during a session and before commit, and fresh resource identities |
 | AUTH07 | Account identity and recreation tests in `hierarchy_grants` |
 | LIFE01–LIFE04 | Rename, retirement, stale selection and empty recreation. Active transactions prevent concurrent topology changes |

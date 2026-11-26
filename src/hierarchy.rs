@@ -353,6 +353,7 @@ impl Session {
                             crate::managed_layout::edit(&inst.home, &inst.engine_options(), |_| Ok(()))?
                         };
                     self.drop_subscriptions();
+                    self.unwatch();
                     self.hierarchy =
                         Some(Context::workspace(catalog.workspace("default").expect("validated default"), true));
                     *inst
@@ -564,6 +565,7 @@ impl Session {
 
     fn check_local_managed(&self) -> Result<()> {
         if !self.local
+            || self.inst.shutting_down.load(std::sync::atomic::Ordering::Acquire)
             || self.inst.tcp_port.load(std::sync::atomic::Ordering::Acquire) != 0
             || self.inst.repl.is_replica()
         {

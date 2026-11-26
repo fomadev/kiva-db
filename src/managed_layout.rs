@@ -407,7 +407,9 @@ pub(crate) fn open_collection(
     if checked_meta(&legacy, false)? && same_file::is_same_file(&store, &legacy)? {
         return Err(KivaError::Corrupted("managed collection shares the legacy store".into()));
     }
-    // The local pilot uses lazy expiration and explicit compaction.
+    // The local pilot has no periodic flush worker. Make each acknowledged
+    // write durable, while expiry and compaction are handled on demand.
     options.background = false;
+    options.sync_writes = true;
     Engine::open(store, options)
 }

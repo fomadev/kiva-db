@@ -62,7 +62,8 @@ fn data_lives_in_the_selected_collection_and_survives_restart() {
     assert!(ok(&mut s, "indexes").contains("doc:*"));
     std::thread::sleep(std::time::Duration::from_millis(1100));
     assert!(ok(&mut s, "get transient").contains("(nil)"));
-    ok(&mut s, "compact");
+    assert!(ok(&mut s, "check").contains("CORRUPTED: 0"));
+    assert!(fails(&mut s, "compact").contains("only hierarchy metadata commands"));
     ok(&mut s, "use collection Fordima.app.users");
     assert_eq!(ok(&mut s, "get key"), "key: 17 [int]");
 }

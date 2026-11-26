@@ -706,6 +706,9 @@ impl Session {
     /// Watches `keys` of the current workspace (Redis `WATCH`); the next
     /// commit fails as a conflict if one of them changes meanwhile.
     pub fn watch(&mut self, keys: &[String]) {
+        if self.hierarchy.is_some() {
+            return;
+        }
         match &mut self.watch {
             Some((e, w)) if Arc::ptr_eq(e, &self.engine) => {
                 // Already watching here: the engine holds one watch already.

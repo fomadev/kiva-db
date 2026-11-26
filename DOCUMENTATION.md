@@ -6538,6 +6538,6 @@ assign Read, Write or Manage with `hierarchy grant`. Manage covers collection
 definitions, and data access needs Read or Write. A transaction stays bound to
 its original collection and is discarded if commit authorization fails.
 
-Network access, replication, scripts and managed backup/restore remain
+Network access, replication, scripts, compaction and managed backup/restore remain
 unavailable in this mode. See the
 [managed data architecture](docs/architecture/WORKSPACE_HIERARCHY.md#local-managed-data-routing).

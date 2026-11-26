@@ -1050,6 +1050,13 @@ impl Instance {
         for (_, e) in self.open_engines() {
             e.close();
         }
+        {
+            let _layout = self.managed_layout_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut engines = self.managed_engines.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, engine) in engines.drain() {
+                engine.close();
+            }
+        }
         self.system.close();
         let _ = fs::remove_file(self.home.join("instance.port"));
         let _ = fs::remove_file(self.home.join("instance.pid"));
