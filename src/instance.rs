@@ -283,6 +283,7 @@ pub struct Instance {
     pub home: PathBuf,
     staged_migration: bool,
     pub(crate) hierarchical_tcp: bool,
+    pub(crate) managed_layout_turnstile: Mutex<()>,
     pub(crate) managed_layout_lock: RwLock<()>,
     pub(crate) managed_engines: Mutex<crate::managed_layout::EngineRegistry>,
     pub(crate) managed_catalog: Mutex<Option<Arc<Catalog>>>,
@@ -308,6 +309,7 @@ pub struct Instance {
     pub clients: AtomicUsize,
     pub started: Instant,
     pub exec_slots: Semaphore,
+    pub(crate) native_admission: crate::native_admission::NativeAdmission,
     pub(crate) native_metrics: Option<crate::native_timing::NativeMetrics>,
     pub shutting_down: AtomicBool,
     /// Set by the `shutdown` command; the process hosting the instance exits.
@@ -400,6 +402,7 @@ impl Instance {
             home: home.to_path_buf(),
             staged_migration,
             hierarchical_tcp,
+            managed_layout_turnstile: Mutex::new(()),
             managed_layout_lock: RwLock::new(()),
             managed_engines: Mutex::new(crate::managed_layout::EngineRegistry::new(
                 config.get_u64("storage", "managed_open_engines").clamp(1, 1024) as usize,
@@ -407,6 +410,10 @@ impl Instance {
             managed_catalog: Mutex::default(),
             managed_policy: Mutex::default(),
 
+            native_admission: crate::native_admission::NativeAdmission::new(
+                threads,
+                config.get_u64("server", "native_queue").min(128) as usize,
+            ),
             native_metrics: (hierarchical_tcp && config.get_bool("server", "native_metrics")).then(Default::default),
             config: RwLock::new(config),
             system,
@@ -1090,6 +1097,7 @@ impl Instance {
             e.close();
         }
         {
+            let _turn = self.managed_layout_turnstile.lock().unwrap_or_else(|e| e.into_inner());
             let _layout = self.managed_layout_lock.write().unwrap_or_else(|e| e.into_inner());
             let mut engines = self.managed_engines.lock().unwrap_or_else(|e| e.into_inner());
             engines.close();

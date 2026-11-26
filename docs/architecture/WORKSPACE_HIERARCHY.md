@@ -421,3 +421,17 @@ context and uses the same layout barrier, grants and registry. Native frame
 limits, supported operations and disabled adapters are covered in the
 [native hierarchical protocol](NATIVE_HIERARCHICAL_PROTOCOL.md). See
 [readiness and measurements](../testing/workspace-hierarchy-readiness.md).
+
+### Native admission and layout ordering
+
+Phase 7A.2 adds independent FIFO admission lanes for native requests.
+The lock order is request lane, layout turnstile, layout barrier, caches,
+registry and engine. Exclusive operations hold the turnstile while waiting
+for previously admitted layout operations to finish. The turnstile is
+released once the layout guard is acquired. A confirmed revoke has drained
+all operations previously admitted under the shared guard. Socket replies
+follow release of the lane and layout guards.
+
+Compaction still uses the exclusive instance barrier. Per-store compaction
+would need to coordinate the generation journal, registry eviction, layout
+moves and transaction pins across the swap. That work remains separate.

@@ -2,19 +2,20 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! TCP server. Each connection gets its own thread and session; the number
-//! of commands executing at once is bounded by `[server] threads`.
+//! TCP server. Each connection gets its own thread and session.
+//! The hierarchical listener uses bounded admission lanes before dispatch.
 
 use crate::error::{KivaError, Result};
 use crate::exec::{validate_key_name, Action};
 use crate::instance::{Instance, VERSION};
+use crate::native_admission::Class;
 pub use crate::native_timing::NativeTiming;
 use crate::native_timing::{span, Stage};
 use crate::proto::*;
 use crate::repl;
 use crate::session::{Need, Session};
 use crate::value::Type;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, IoSlice, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
@@ -304,16 +305,17 @@ const NATIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const NATIVE_REQUEST_MAX: usize = 2 * 1024 * 1024;
 const NATIVE_REPLY_MAX: usize = 4 * 1024 * 1024;
 
-/// Bound the duration of the entire frame, including clients that make
-/// steady progress below the desired rate.
+/// Bound the whole frame. Cache the socket setting across ordinary
+/// frames, then shorten it as the absolute deadline approaches.
 struct Deadline<'a> {
     stream: &'a mut TcpStream,
+    configured: &'a mut Option<Duration>,
     expires: Instant,
 }
 
 impl<'a> Deadline<'a> {
-    fn new(stream: &'a mut TcpStream) -> Self {
-        Self { stream, expires: Instant::now() + NATIVE_TIMEOUT }
+    fn new(stream: &'a mut TcpStream, configured: &'a mut Option<Duration>) -> Self {
+        Self { stream, configured, expires: Instant::now() + NATIVE_TIMEOUT }
     }
 
     fn remaining(&self) -> std::io::Result<Duration> {
@@ -323,19 +325,43 @@ impl<'a> Deadline<'a> {
         }
         Ok(delay)
     }
+
+    fn transfer(
+        &mut self,
+        configure: impl Fn(&TcpStream, Option<Duration>) -> std::io::Result<()>,
+        mut operation: impl FnMut(&mut TcpStream) -> std::io::Result<usize>,
+    ) -> std::io::Result<usize> {
+        loop {
+            let delay = self.remaining()?.min(Duration::from_secs(1));
+            if *self.configured != Some(delay) {
+                configure(self.stream, Some(delay))?;
+                *self.configured = Some(delay);
+            }
+            match operation(self.stream) {
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                Ok(n) => {
+                    self.remaining()?;
+                    return Ok(n);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
 }
 
-impl std::io::Read for Deadline<'_> {
+impl Read for Deadline<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(bytes)
+        self.transfer(TcpStream::set_read_timeout, |stream| stream.read(bytes))
     }
 }
 
 impl Write for Deadline<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(bytes)
+        self.transfer(TcpStream::set_write_timeout, |stream| stream.write(bytes))
+    }
+
+    fn write_vectored(&mut self, bytes: &[IoSlice<'_>]) -> std::io::Result<usize> {
+        self.transfer(TcpStream::set_write_timeout, |stream| stream.write_vectored(bytes))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -346,16 +372,26 @@ impl Write for Deadline<'_> {
 fn hierarchy_loop(inst: &Arc<Instance>, mut stream: TcpStream) {
     let mut session = Session::new_native(inst.clone(), false, None);
     let mut negotiated = false;
+    let mut payload = Vec::new();
+    let (mut read_timeout, mut write_timeout) = (None, None);
     while !inst.shutting_down.load(Ordering::Acquire) {
         if let Some(metrics) = &inst.native_metrics {
             metrics.begin();
         }
         let input = {
             let _read = span(Stage::FrameRead);
-            read_frame_bounded(&mut Deadline::new(&mut stream), NATIVE_REQUEST_MAX, &|| false)
+            read_frame_into(
+                &mut Deadline::new(&mut stream, &mut read_timeout),
+                NATIVE_REQUEST_MAX,
+                &|| false,
+                &mut payload,
+            )
         };
-        let Ok((cmd, payload)) = input else { break };
+        let Ok(cmd) = input else { break };
         let response = hierarchy_request(&mut session, &mut negotiated, cmd, &payload);
+        if payload.capacity() > 64 * 1024 {
+            payload = Vec::new();
+        }
         let (status, bytes) = match response {
             Ok(reply) => reply,
             Err(error) => {
@@ -384,7 +420,7 @@ fn hierarchy_loop(inst: &Arc<Instance>, mut stream: TcpStream) {
         // Session dispatch has released all admission and storage guards.
         let output = {
             let _write = span(Stage::FrameWrite);
-            write_frame(&mut Deadline::new(&mut stream), status, body)
+            write_native_frame(&mut Deadline::new(&mut stream, &mut write_timeout), status, body)
         };
         if let Some(metrics) = &inst.native_metrics {
             metrics.finish(cmd);
@@ -416,9 +452,7 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
     }
     if cmd == CMD_AUTH {
         let inst = sess.inst.clone();
-        let wait = span(Stage::Queue);
-        let _login = inst.exec_slots.acquire();
-        drop(wait);
+        let _login = inst.native_admission.enter(Class::Authentication)?;
         let _authentication = span(Stage::Authentication);
         let credentials = native_text(payload, 4096)?;
         let (user, password) = credentials
@@ -448,29 +482,41 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
         return Ok((status, body.into_bytes()));
     }
     let inst = sess.inst.clone();
-    let wait = span(Stage::Queue);
-    let _slot = inst.exec_slots.acquire();
-    drop(wait);
     let response = match cmd {
         CMD_GET => {
+            let decode = span(Stage::Decode);
             let key = native_text(payload, crate::format::MAX_KEY_LEN)?;
-            sess.with_managed_engine("get", Need::Read, |sess| {
-                let Some((value, _)) = sess.kv_get(key)? else {
-                    return Ok((ST_NOT_FOUND, Vec::new()));
-                };
-                let _encode = span(Stage::Encode);
-                let mut bytes = vec![value.ty() as u8];
-                bytes.extend_from_slice(&value.encode_stored(false)?.0);
-                ok(bytes)
+            drop(decode);
+            let permit = inst.native_admission.enter(Class::Read)?;
+            let value =
+                sess.with_managed_key("get", Need::Read, |sess| Ok(sess.kv_get(key)?.map(|(value, _)| value)))?;
+            drop(permit);
+            let _encode = span(Stage::Encode);
+            match value {
+                Some(value) => {
+                    let tag = value.ty() as u8;
+                    let mut bytes = match value {
+                        crate::Value::Str(text) | crate::Value::Num(text) => text.into_bytes(),
+                        crate::Value::Bytes(bytes) => bytes,
+                        value => value.encode_stored(false)?.0,
+                    };
+                    bytes.insert(0, tag);
+                    ok(bytes)
+                }
+                None => Ok((ST_NOT_FOUND, Vec::new())),
+            }
+        }
+        CMD_SET => {
+            let _permit = inst.native_admission.enter(Class::Data)?;
+            sess.with_managed_key("set", Need::Write, |sess| {
+                binary_set(sess, payload)?;
+                ok(b"OK".to_vec())
             })
         }
-        CMD_SET => sess.with_managed_engine("set", Need::Write, |sess| {
-            binary_set(sess, payload)?;
-            ok(b"OK".to_vec())
-        }),
         CMD_DEL => {
             let key = native_text(payload, crate::format::MAX_KEY_LEN)?;
-            sess.with_managed_engine("del", Need::Write, |sess| {
+            let _permit = inst.native_admission.enter(Class::Data)?;
+            sess.with_managed_key("del", Need::Write, |sess| {
                 Ok(if sess.kv_del(key)? { (ST_OK, b"1".to_vec()) } else { (ST_NOT_FOUND, b"0".to_vec()) })
             })
         }
@@ -478,7 +524,14 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
             let decode = span(Stage::Decode);
             let request = crate::num::from_slice(payload).map_err(KivaError::Invalid)?;
             drop(decode);
+            let class = match request["op"].as_str() {
+                Some("get") => Class::Read,
+                Some("whoami" | "rollback") => Class::Control,
+                _ => Class::Data,
+            };
+            let permit = inst.native_admission.enter(class)?;
             let result = crate::api::handle_native_hierarchy(sess, &request)?;
+            drop(permit);
             let _encode = span(Stage::Encode);
             ok(result.to_string().into_bytes())
         }
@@ -495,4 +548,77 @@ fn native_text(payload: &[u8], max: usize) -> Result<&str> {
         return Err(KivaError::Invalid("native payload is too large".into()));
     }
     std::str::from_utf8(payload).map_err(|_| KivaError::Invalid("native payload must be valid UTF-8".into()))
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::{Options, Value};
+
+    #[test]
+    fn network_data_backpressure_preserves_reads_controls_and_transactions() {
+        let home =
+            std::env::temp_dir().join(format!("kiva-native-admission-{:016x}", crate::util::random_u64().unwrap()));
+        {
+            let inst = Instance::open(&home, Options::default()).unwrap();
+            let mut session = Session::new(inst.clone(), true, None);
+            for command in [
+                "modify user kiva password test-pass",
+                "create user reader identified by reader-pass role editor",
+                "config set server.threads 1",
+                "config set server.native_queue 0",
+                "config set server.native_metrics true",
+                "config set auth_required true",
+            ] {
+                assert!(!session.execute(command).has_err(), "{command}");
+            }
+            session.login("kiva", "test-pass").unwrap();
+            for command in [
+                "hierarchy data",
+                "project create app",
+                "use app",
+                "collection create items",
+                "use collection items",
+                "set sample 42",
+                "hierarchy grant reader read instance",
+            ] {
+                let result = session.execute(command);
+                assert!(!result.has_err(), "{command}: {}", result.text());
+            }
+            drop(session);
+            inst.shutdown();
+        }
+
+        let inst = Instance::open_hierarchical(&home, Options::default()).unwrap();
+        let port = start_tcp(&inst, "127.0.0.1", 0).unwrap();
+        let connect = |user, password| {
+            let mut client = Client::connect(("127.0.0.1", port)).unwrap();
+            client.negotiate_hierarchy().unwrap();
+            client.auth(user, password).unwrap();
+            client.exec("use collection default.app.items").unwrap();
+            client
+        };
+        let mut admin = connect("kiva", "test-pass");
+        let mut reader = connect("reader", "reader-pass");
+        admin.exec("begin").unwrap();
+        admin.set("pending", &Value::Num("7".into()), 0).unwrap();
+        let held = inst.native_admission.enter(Class::Data).unwrap();
+        let refused = admin.set("refused", &Value::Num("9".into()), 0).unwrap_err();
+        assert!(refused.to_string().starts_with("ERR_SERVER_BUSY"));
+        assert_eq!(reader.get("sample").unwrap(), Some(Value::Num("42".into())));
+        assert!(reader.exec("hierarchy timings").is_err());
+        assert!(admin.api(&serde_json::json!({"op":"rollback"})).is_ok());
+        admin.exec("hierarchy revoke reader read instance").unwrap();
+        assert!(reader.get("sample").is_err());
+        drop(held);
+        assert_eq!(admin.get("refused").unwrap(), None);
+        assert_eq!(admin.get("pending").unwrap(), None);
+        assert!(admin.exec("hierarchy timings").unwrap().contains("get queue"));
+        drop(reader);
+        drop(admin);
+        inst.shutdown();
+        let _ = TcpStream::connect(("127.0.0.1", port));
+        let _ = std::fs::remove_dir_all(home);
+    }
 }

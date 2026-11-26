@@ -328,6 +328,12 @@ fn lock_layout(inst: &crate::instance::Instance, managed: bool, exclusive: bool)
         return Ok(None);
     }
     let _layout = crate::native_timing::span(crate::native_timing::Stage::Layout);
+    // An exclusive waiter closes admission to new readers while it waits
+    // for already admitted commands to finish.
+    let _turn = inst
+        .managed_layout_turnstile
+        .lock()
+        .map_err(|_| KivaError::Other("managed layout turnstile poisoned".into()))?;
     let lock = &inst.managed_layout_lock;
     let guard = if exclusive {
         lock.write().map(LayoutGuard::Exclusive).map_err(|_| ())
@@ -459,6 +465,20 @@ impl Session {
                         access.allows(&catalog, scope, Permission::Write),
                         access.allows(&catalog, scope, Permission::Manage)
                     ));
+                }
+                [mode] if mode.is_kw("timings") => {
+                    if !self.native_hierarchy || user.role != Role::Admin {
+                        return Err(hidden());
+                    }
+                    let rows = self.inst.native_timings();
+                    if rows.is_empty() {
+                        out.say("Native timings are disabled.");
+                    } else {
+                        out.say("operation stage samples total_nanoseconds");
+                        for row in rows.into_iter().filter(|row| row.samples > 0) {
+                            out.say(format!("{} {} {} {}", row.operation, row.stage, row.samples, row.nanos));
+                        }
+                    }
                 }
                 [mode] if mode.is_kw("engines") => {
                     if !self.hierarchy.is_some_and(|context| context.managed) || user.role != Role::Admin {
@@ -713,6 +733,26 @@ impl Session {
         need: Need,
         execute: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
+        self.route_managed(command, need, true, execute)
+    }
+
+    /// Binary key operations do not need a textual collection label.
+    pub(crate) fn with_managed_key<T>(
+        &mut self,
+        command: &str,
+        need: Need,
+        execute: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        self.route_managed(command, need, false, execute)
+    }
+
+    fn route_managed<T>(
+        &mut self,
+        command: &str,
+        need: Need,
+        label: bool,
+        execute: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
         let inst = self.inst.clone();
         let _guard = lock_layout(&inst, true, command == "compact")?;
         if command == "rollback" && need == Need::None {
@@ -739,7 +779,7 @@ impl Session {
             let scope = Scope::Collection(id);
             let read = access.allows(&catalog, scope, Permission::Read);
             let write = access.allows(&catalog, scope, Permission::Write);
-            let manage = access.allows(&catalog, scope, Permission::Manage);
+            let manage = label && access.allows(&catalog, scope, Permission::Manage);
             if !(read && (need != Need::Write || write) && (need != Need::Owner || write && manage)) {
                 return Err(KivaError::Denied("insufficient permission on managed collection".into()));
             }
@@ -764,7 +804,8 @@ impl Session {
             {
                 return Err(KivaError::Conflict("managed transaction engine changed".into()));
             }
-            Ok((id, engine, write, manage, selected.names(&catalog).join(".")))
+            let display = label.then(|| selected.names(&catalog).join("."));
+            Ok((id, engine, write, manage, display))
         })();
         let (id, engine, write, manage, label) = match route {
             Ok(route) => route,
@@ -776,14 +817,16 @@ impl Session {
             }
         };
         let old_engine = std::mem::replace(&mut self.engine, engine.clone());
-        let old_label = std::mem::replace(&mut self.ws, label);
+        let old_label = label.map(|label| std::mem::replace(&mut self.ws, label));
         self.managed_dispatch = Some((write, manage));
         let execute_span = crate::native_timing::span(crate::native_timing::Stage::Execute);
         let result = execute(self);
         drop(execute_span);
         self.managed_dispatch = None;
         self.engine = old_engine;
-        self.ws = old_label;
+        if let Some(label) = old_label {
+            self.ws = label;
+        }
         if command == "compact" && result.is_err() {
             // Force validation and intent recovery before admitting another
             // command after an uncertain replacement or publication failure.

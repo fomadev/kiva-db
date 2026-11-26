@@ -43,6 +43,7 @@ pub mod lineedit;
 pub mod literal;
 mod managed_layout;
 pub mod migration;
+mod native_admission;
 mod native_timing;
 pub mod num;
 pub mod proto;

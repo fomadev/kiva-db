@@ -20,11 +20,12 @@ pub(crate) enum Stage {
     Registry,
     Execute,
     Sync,
+    Disk,
     Encode,
     FrameWrite,
 }
 
-const STAGES: [&str; 13] = [
+const STAGES: [&str; 14] = [
     "frame_read",
     "decode",
     "queue",
@@ -36,6 +37,7 @@ const STAGES: [&str; 13] = [
     "registry",
     "execute",
     "sync",
+    "disk",
     "encode",
     "frame_write",
 ];

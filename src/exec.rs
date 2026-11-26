@@ -1422,11 +1422,28 @@ impl Session {
         }
         let inst = self.inst.clone();
         drop(decode);
-        let wait = crate::native_timing::span(crate::native_timing::Stage::Queue);
-        let _slot = inst.exec_slots.acquire();
-        drop(wait);
-        let started = Instant::now();
         let cmd = if tokens[0].is_bare() { tokens[0].text.to_ascii_lowercase() } else { String::new() };
+        let _native = if self.native_hierarchy {
+            use crate::native_admission::Class;
+            let class = match cmd.as_str() {
+                "auth" | "login" => Class::Authentication,
+                "workspace" | "project" | "collection" | "collections" | "switch" | "use" | "hierarchy" | "whoami"
+                | "compact" | "shutdown" | "exit" | "quit" => Class::Control,
+                "create" | "drop" if tokens.get(1).is_some_and(|token| token.is_kw("user")) => Class::Control,
+                _ => Class::Data,
+            };
+            match inst.native_admission.enter(class) {
+                Ok(permit) => Some(permit),
+                Err(error) => {
+                    out.err(error_line(&cmd, &error.to_string()));
+                    return out;
+                }
+            }
+        } else {
+            None
+        };
+        let _slot = (!self.native_hierarchy).then(|| inst.exec_slots.acquire());
+        let started = Instant::now();
 
         self.wrote = false;
         let managed_need = self.hierarchy_data.then(|| managed_command(&cmd, &tokens[1..])).flatten();
@@ -1446,7 +1463,13 @@ impl Session {
                 || (matches!(cmd.as_str(), "create" | "drop" | "modify")
                     && tokens.get(1).is_some_and(|token| token.is_kw("user")))
                 || (cmd == "config" && tokens.get(1).is_some_and(|token| token.is_kw("set")));
+            let turn = changes_account.then(|| inst.managed_layout_turnstile.lock());
+            if turn.as_ref().is_some_and(|guard| guard.is_err()) {
+                out.err("Error: managed authorization turnstile poisoned.");
+                return out;
+            }
             let _account_guard = changes_account.then(|| inst.managed_layout_lock.write());
+            drop(turn);
             if _account_guard.as_ref().is_some_and(|guard| guard.is_err()) {
                 out.err("Error: managed authorization lock poisoned.");
                 return out;

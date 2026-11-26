@@ -96,5 +96,39 @@ Each frame has a 30-second read or write deadline. Malformed lengths or
 truncated frames close the connection. Malformed UTF-8, JSON and typed
 values yield a command error on a valid frame. Replies above the limit
 yield an error. Large query intermediates remain governed by the existing
-engine and query settings. The server uses its configured execution slots
-and retains no per-client notification queue in hierarchical mode.
+engine and query settings. The server retains no per-client notification queue in hierarchical mode.
+
+### Admission lanes and overload
+
+The read lane admits binary GET and structured GET. The data lane admits
+mutations, transactions and queries. Each uses `server.threads` slots, capped
+at 64 per lane. The control lane reserves one slot for navigation, catalog and
+account administration, compaction, and structured rollback. Authentication
+has at most four independent slots. Requests in a lane are admitted in FIFO
+order. Each socket submits one request at a time. `server.native_queue`
+bounds the waiting entries per lane from 0 to 128. Both settings take effect
+at startup.
+
+A full queue returns the existing error status with code text
+`ERR_SERVER_BUSY` before dispatch. A busy reply confirms the command was
+refused before execution. Existing transaction state remains active and
+can be rolled back explicitly. A lost connection or unusable reply after
+sending a write can leave the outcome uncertain. Reconnect and verify
+application state before issuing another write.
+
+The connection reads a complete bounded frame before acquiring a slot.
+The reader reuses a buffer and releases allocations above 64 KiB after the
+request. The writer sends the header and payload as separate buffers. The
+absolute deadline covers the entire frame. The socket reuses a one-second
+timeout between transfers and shortens it near the deadline. The lane
+permit and all layout and engine guards are released before socket writes.
+
+### Diagnostics
+
+Enable `server.native_metrics` before startup for fixed aggregate timing
+counters by command and stage. An authenticated administrator can run
+`hierarchy timings`. Embedded diagnostics can call `Instance::native_timings`.
+Counters contain sample counts and accumulated nanoseconds. A read timer
+includes the time waiting for a client frame. Execution can include group
+sync, and disk sync is a subset of group sync. The counters are disabled
+by default and contain only fixed operation and stage labels.

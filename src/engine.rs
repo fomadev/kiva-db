@@ -2838,7 +2838,10 @@ impl Engine {
             };
             (file, inner.file_len)
         };
-        file.sync_data()?;
+        {
+            let _disk = crate::native_timing::span(crate::native_timing::Stage::Disk);
+            file.sync_data()?;
+        }
         self.disk_syncs.fetch_add(1, Ordering::Relaxed);
         Ok(Some(len))
     }

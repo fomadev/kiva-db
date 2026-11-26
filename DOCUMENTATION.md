@@ -6566,6 +6566,11 @@ Rust programs use `Client::negotiate_hierarchy` before `auth`, then select a
 collection using `Client::collection` or the typed workspace and project
 handles. Keep one connection for the lifetime of a transaction. Connection
 loss during commit can leave the result unknown to the client. Reconnect
-and verify state before issuing another write.
+and verify state before issuing another write. A reply containing
+`ERR_SERVER_BUSY` means the request was refused before execution.
+The server reserves separate capacity for binary reads, data, authentication
+and control. Adjust `server.threads` and `server.native_queue` before starting
+the listener. Administrators can inspect aggregate timings with
+`hierarchy timings` when `server.native_metrics` is enabled.
 
 See the [native hierarchical protocol](docs/architecture/NATIVE_HIERARCHICAL_PROTOCOL.md).

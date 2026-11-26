@@ -495,3 +495,30 @@ exclude transport, and these runs used separate scratch homes.
 | 128 | 8,288.27 / 11,852.31 / 11,852.31 | 5.18 / 8.07 / 72.32 | 5.64 / 7.08 / 64.75 | 4,786.47 / 8,196.51 / 8,196.51 |
 | 1,000 | 89,361.10 / 153,232.72 / 153,232.72 | 8.69 / 63.79 / 122.60 | 9.02 / 12.56 / 146.40 | 7,019.87 / 10,681.81 / 10,681.81 |
 | 10,000 | 396,202.28 / 883,187.58 / 883,187.58 | 11.39 / 25.88 / 93.16 | 5.75 / 6.13 / 17.99 | 6,204.11 / 10,769.45 / 10,769.45 |
+
+## Phase 7A.2 native admission
+
+**NOT READY for production.** Native admission changes retain the
+authentication, TLS, authorization and durable-write contract of Phase 7A.
+
+The path is socket read and frame validation, payload decode, FIFO lane
+admission, shared or exclusive layout guard, account and catalog resolution,
+permission check, registry lookup, engine dispatch and synchronous
+publication. Encoding and socket write follow dispatch. System account
+and policy changes and topology operations retain exclusive admission.
+Compaction still blocks data across collections.
+
+The FIFO unit test verifies direct handoff, queue saturation and independent
+lanes. The native socket test saturates the data lane and checks the explicit
+refusal, continued reads, rollback and revocation. Native end-to-end coverage
+retains TLS, slow connections, malformed frames, account and collection
+replacement, restart, compaction, transaction pins, lost commit replies and
+historical transport isolation. The framing test forces partial writes of the
+header and payload.
+
+The seven existing ignored tests are opt-in timing workloads. The four in
+`power` exercise HNSW speed, filtering, quantization and query speed.
+`group_commit_speed` measures disk-dependent batching throughput.
+`invalidation_speed` measures semantic-cache update throughput.
+`managed_routing_component_costs` needs a separately provisioned Release
+benchmark home. CI still runs the functional assertions for those areas.
