@@ -35,7 +35,7 @@
 
 use crate::error::{KivaError, Result};
 use crate::proto::*;
-use crate::value::{DocEnc, Type, Value};
+use crate::value::{Type, Value};
 use std::net::{TcpStream, ToSocketAddrs};
 
 pub struct Client {
@@ -161,7 +161,7 @@ impl Client {
         match self.call(CMD_GET, key.as_bytes())? {
             (ST_OK, b) if !b.is_empty() => {
                 let ty = Type::from_u8(b[0]).ok_or_else(|| KivaError::Invalid("unknown type tag".into()))?;
-                Value::decode(ty, &b[1..], DocEnc::Json).map(Some)
+                decode_value(ty, &b[1..], self.hierarchical).map(Some)
             }
             (ST_NOT_FOUND, _) => Ok(None),
             (_, b) => Err(KivaError::Other(Self::text(&b))),
@@ -175,7 +175,8 @@ impl Client {
         let len = u16::try_from(key.len()).map_err(|_| KivaError::Invalid("key is too long".into()))?;
         p.extend_from_slice(&len.to_be_bytes());
         p.extend_from_slice(key.as_bytes());
-        p.extend_from_slice(&value.encode(false)?);
+        let value_bytes = if self.hierarchical { value.encode_stored(false)?.0 } else { value.encode(false)? };
+        p.extend_from_slice(&value_bytes);
         match self.call(CMD_SET, &p)? {
             (ST_OK, _) => Ok(()),
             (_, b) => Err(KivaError::Other(Self::text(&b))),

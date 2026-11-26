@@ -23,7 +23,7 @@ fn select(managed: bool, store: usize) -> String {
     if managed {
         format!("use collection bench{store}.app.users")
     } else {
-        format!("switch bench{store}")
+        format!("workspace switch bench{store}")
     }
 }
 

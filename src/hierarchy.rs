@@ -332,7 +332,8 @@ impl Session {
         let native_account = self.native_hierarchy
             && matches!(command, "create" | "drop")
             && args.first().is_some_and(|token| token.is_kw("user"));
-        let exclusive = if native_account {
+        let native_shutdown = self.native_hierarchy && command == "shutdown" && args.is_empty();
+        let exclusive = if native_account || native_shutdown {
             true
         } else if command == "hierarchy" {
             args.first()
@@ -348,6 +349,16 @@ impl Session {
         let user = self.hierarchy_user()?;
         if self.txn.is_some() {
             return Err(KivaError::Invalid("hierarchy preview is unavailable during a transaction".into()));
+        }
+        if native_shutdown {
+            if user.role != Role::Admin {
+                return Err(hidden());
+            }
+            self.inst.audit.log(self.user_name(), "shutdown", true);
+            self.inst.stop_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+            out.say("KivaDB is shutting down.");
+            out.action = crate::exec::Action::Exit;
+            return Ok(());
         }
         if native_account {
             if user.role != Role::Admin {
@@ -627,11 +638,11 @@ impl Session {
     }
 
     fn check_managed_access(&self) -> Result<()> {
-        self.check_local_managed()?;
+        self.check_managed_session()?;
         self.inst.check_managed_layout_home()
     }
 
-    fn check_local_managed(&self) -> Result<()> {
+    fn check_managed_session(&self) -> Result<()> {
         let admitted = if self.native_hierarchy {
             self.inst.hierarchical_tcp && self.hierarchy_subject.is_some()
         } else {
@@ -643,7 +654,12 @@ impl Session {
             || self.inst.shutting_down.load(std::sync::atomic::Ordering::Acquire)
             || self.inst.repl.is_replica()
         {
-            return Err(KivaError::Denied("managed storage requires the local shell with --no-listen".into()));
+            let message = if self.native_hierarchy {
+                "managed native session is unavailable"
+            } else {
+                "managed storage requires the local shell with --no-listen"
+            };
+            return Err(KivaError::Denied(message.into()));
         }
         Ok(())
     }
@@ -652,7 +668,7 @@ impl Session {
         if !managed {
             return self.preview_catalog().map(Arc::new);
         }
-        self.check_local_managed()?;
+        self.check_managed_session()?;
         let mut cache =
             self.inst.managed_catalog.lock().map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
         if let Some(catalog) = &*cache {
@@ -682,7 +698,7 @@ impl Session {
             return execute(self);
         }
         let route = (|| -> Result<_> {
-            self.check_local_managed()?;
+            self.check_managed_session()?;
             let context = self.hierarchy.filter(|context| context.managed).ok_or_else(hidden)?;
             let mut selected = context;
             let id = context

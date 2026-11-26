@@ -112,6 +112,18 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<(u16, Vec<u8>)> {
     read_frame_with(r, &|| true)
 }
 
+/// Negotiated document payloads can carry KDOC, whose leading version byte
+/// is distinct from JSON. Legacy connections keep their JSON encoding.
+pub(crate) fn decode_value(ty: crate::Type, bytes: &[u8], hierarchical: bool) -> crate::Result<crate::Value> {
+    use crate::value::DocEnc;
+    let encoding = if hierarchical && ty.is_doc() && bytes.first() == Some(&crate::doc::KDOC_VERSION) {
+        DocEnc::Kdoc
+    } else {
+        DocEnc::Json
+    };
+    crate::Value::decode(ty, bytes, encoding)
+}
+
 /// Cursor over a payload.
 pub struct Reader<'a> {
     buf: &'a [u8],

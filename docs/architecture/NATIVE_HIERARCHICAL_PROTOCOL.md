@@ -59,13 +59,17 @@ index, schema, vector, journal and compaction commands. The structured
 allowlist is `whoami`, `get`, `put`, `add`, `del`, `scan`, `query`,
 `explain`, `aggregate`, `similar`, `changes`, `begin`, `commit` and
 `rollback`. Use the existing type tags and extended JSON rules for native
-values. A journal read uses `wait=0`. A named consumer requires Write.
+values. Binary GET and SET carry plain JSON or KDOC for document values
+on a negotiated connection. KDOC starts with its version byte `0x01`.
+Scalar encodings and legacy document encodings stay as before. A journal read uses `wait=0`. A named consumer requires Write.
 Push subscriptions and cross-session semantic caches are unavailable.
 Journal polling rechecks grants on every request. Path-bearing diagnostics
 and incompatible administrative operations are unavailable. Administrators
 can create and drop accounts through the restricted EXEC forms and can
 edit hierarchy grants. Provision or change passwords for existing
-accounts from an offline local shell.
+accounts from an offline local shell. A negotiated administrator can use
+`shutdown`. For a local server started in the background, use
+`kivadb stop --hierarchical-tcp --home <home> -u <administrator>`.
 
 ## Admission and transactions
 

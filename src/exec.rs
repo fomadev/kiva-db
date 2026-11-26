@@ -2895,7 +2895,7 @@ impl Session {
             s.compactions,
             s.last_compact.map(|t| format!(", last {}", fmt_time(t))).unwrap_or_default()
         ));
-        if let Some(err) = &s.compact_error {
+        if let Some(err) = s.compact_error.as_ref().filter(|_| !self.native_hierarchy) {
             out.err(format!(" > Auto-Compaction Error: {err}"));
         }
         out.say(format!(" > Secondary Indexes    : {} (+ {} vector)", s.indexes, s.vector_indexes));

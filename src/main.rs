@@ -322,6 +322,8 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     if matches!(role.as_str(), "replica" | "slave") && !host.is_empty() {
         repl::start_replica(&inst, &host, mport);
         println!("  Replication  : replica of {host}:{mport}");
+    } else if args.hierarchical_tcp {
+        println!("  Replication  : unavailable in hierarchical TCP mode");
     } else {
         println!("  Replication  : master");
     }
@@ -557,7 +559,8 @@ fn stop(home: &Path, args: &Args) -> i32 {
     };
     let mut opts = args.shell.clone();
     opts.commands = vec!["shutdown".to_string()];
-    if shell::run_client(&format!("127.0.0.1:{port}"), opts) != 0 {
+    let connect = if args.hierarchical_tcp { shell::run_hierarchical_client } else { shell::run_client };
+    if connect(&format!("127.0.0.1:{port}"), opts) != 0 {
         return 1;
     }
     for _ in 0..100 {

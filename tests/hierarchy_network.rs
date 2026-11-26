@@ -165,6 +165,11 @@ fn native_binary_json_and_typed_contexts_share_authorization_and_data() {
     b.exec(B).unwrap();
     a.set("binary", &Value::Bytes(vec![0, 1, 255]), 600).unwrap();
     b.set("binary", &Value::Str("isolated".into()), 0).unwrap();
+    a.exec(r#"set typed {"born":date "2004-05-09"}"#).unwrap();
+    let typed = a.get("typed").unwrap().unwrap();
+    assert!(matches!(typed, Value::Typed(_)));
+    a.set("typed_copy", &typed, 0).unwrap();
+    assert_eq!(a.get("typed_copy").unwrap(), Some(typed));
     editor.exec("switch Fordima").unwrap();
     editor.exec("use app").unwrap();
     assert!(editor.exec("use users").is_err());
@@ -182,6 +187,7 @@ fn native_binary_json_and_typed_contexts_share_authorization_and_data() {
     assert!(manager.get("binary").is_err());
     assert!(manager.api(&json!({"op":"scan"})).is_err());
     assert!(manager.exec("hierarchy grant manager read instance").is_err());
+    assert!(manager.exec("shutdown").is_err());
     a.exec(r#"set doc:1 {"city":"Paris","embedding":[1,0]}"#).unwrap();
     a.exec("create index on doc:* (city)").unwrap();
     a.exec("create vector index on doc:* (embedding)").unwrap();

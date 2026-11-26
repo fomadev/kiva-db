@@ -11,7 +11,7 @@ use crate::instance::{Instance, VERSION};
 use crate::proto::*;
 use crate::repl;
 use crate::session::{Need, Session};
-use crate::value::{DocEnc, Type, Value};
+use crate::value::Type;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
@@ -290,7 +290,7 @@ fn binary_set(sess: &mut Session, payload: &[u8]) -> Result<()> {
     let ttl = r.u32()? as i64;
     let key = r.str16()?;
     validate_key_name(&key).map_err(KivaError::Invalid)?;
-    let value = Value::decode(ty, r.rest(), DocEnc::Json)
+    let value = decode_value(ty, r.rest(), sess.native_hierarchy)
         .map_err(|e| KivaError::Invalid(format!("value does not match its type: {e}")))?;
     let expires_at = crate::util::deadline_in(ttl);
     sess.kv_put(&key, value, expires_at, false)
@@ -437,7 +437,7 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
                     return Ok((ST_NOT_FOUND, Vec::new()));
                 };
                 let mut bytes = vec![value.ty() as u8];
-                bytes.extend_from_slice(&value.encode(false)?);
+                bytes.extend_from_slice(&value.encode_stored(false)?.0);
                 ok(bytes)
             })
         }
