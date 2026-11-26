@@ -73,6 +73,7 @@ pub struct Session {
     pub txn: Option<Txn>,
     pub(crate) hierarchy: Option<crate::hierarchy::Context>,
     pub(crate) hierarchy_data: bool,
+    pub(crate) native_hierarchy: bool,
     pub(crate) managed_dispatch: Option<(bool, bool)>,
     pub(crate) managed_txn_engine: Option<(crate::catalog::CollectionId, Arc<Engine>)>,
 
@@ -108,6 +109,7 @@ impl Session {
             txn: None,
             hierarchy: None,
             hierarchy_data: false,
+            native_hierarchy: false,
             managed_dispatch: None,
             managed_txn_engine: None,
             hierarchy_subject: None,
@@ -123,6 +125,17 @@ impl Session {
             s.become_root();
         }
         s
+    }
+
+    pub(crate) fn new_native(inst: Arc<Instance>, local_peer: bool, events: Option<Sender<String>>) -> Self {
+        let managed = inst.hierarchical_tcp;
+        let mut session = Self::new(inst, local_peer && !managed, events);
+        session.native_hierarchy = managed;
+        if managed {
+            session.user = None;
+            session.leave();
+        }
+        session
     }
 
     /// An internal, fully privileged session (triggers, replication tooling).
@@ -187,6 +200,20 @@ impl Session {
     /// `app@travel.places` logs `app` in, straight into `travel.places`: clients
     /// send it again at every reconnection, in a URL like any user name.
     pub fn login(&mut self, name: &str, password: &str) -> Result<User> {
+        if self.native_hierarchy {
+            self.rollback();
+            self.hierarchy = None;
+            self.hierarchy_data = false;
+            self.hierarchy_subject = None;
+            self.user = None;
+            if password.is_empty() {
+                return Err(KivaError::Denied("invalid username or password".into()));
+            }
+            if name.contains('@') {
+                return Err(KivaError::Denied("authenticate with an account name, then select a collection".into()));
+            }
+            return self.login_user(name, password);
+        }
         let Some((user, workspace)) = name.split_once('@') else { return self.login_user(name, password) };
         let u = self.login_user(user, password)?;
         if let Err(e) = self.switch_workspace(workspace) {
@@ -225,12 +252,16 @@ impl Session {
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
         self.take_account_formats(&user);
         self.use_zone();
-        match user.arrival(&self.inst.workspace_names()) {
-            Some(w) => {
-                let level = user.access(&w).unwrap_or(Priv::Read);
-                self.enter(&w, level)?;
+        if self.native_hierarchy {
+            self.enter_native_hierarchy()?;
+        } else {
+            match user.arrival(&self.inst.workspace_names()) {
+                Some(w) => {
+                    let level = user.access(&w).unwrap_or(Priv::Read);
+                    self.enter(&w, level)?;
+                }
+                None => self.leave(),
             }
-            None => self.leave(),
         }
         self.inst.audit.log(name, "login", true);
         Ok(user)
@@ -358,7 +389,9 @@ impl Session {
                 _ => Err(KivaError::Denied("insufficient permission on managed collection".into())),
             };
         }
-        if self.hierarchy.is_some() && matches!(need, Need::Read | Need::Write | Need::Owner | Need::Admin) {
+        if (self.hierarchy.is_some() || self.native_hierarchy)
+            && matches!(need, Need::Read | Need::Write | Need::Owner | Need::Admin)
+        {
             return Err(KivaError::Denied(
                 "data operations and server administration are disabled in hierarchy preview".into(),
             ));

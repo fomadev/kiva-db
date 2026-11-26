@@ -6551,3 +6551,21 @@ aggregate activity for administrators.
 Network access, replication, scripts and managed backup/restore remain
 unavailable in this mode. See the
 [managed data architecture](docs/architecture/WORKSPACE_HIERARCHY.md#local-managed-data-routing).
+
+
+### Native hierarchical connections
+
+Provision and password-protect an administrator and initialize the managed
+catalog in a local shell using `--no-listen`. Enable `security.auth_required`
+and start the initialized home using `kivadb serve --hierarchical-tcp`.
+Non-loopback binds require TLS.
+
+Connect through `kivadb --connect <address> --hierarchical-client -u <account>`
+and add `--tls` for remote connections. Use hierarchy navigation after login.
+Rust programs use `Client::negotiate_hierarchy` before `auth`, then select a
+collection using `Client::collection` or the typed workspace and project
+handles. Keep one connection for the lifetime of a transaction. Connection
+loss during commit can leave the result unknown to the client. Reconnect
+and verify state before issuing another write.
+
+See the [native hierarchical protocol](docs/architecture/NATIVE_HIERARCHICAL_PROTOCOL.md).

@@ -246,7 +246,7 @@ impl Session {
         Ok(())
     }
 
-    fn cmd_create(&mut self, a: &[Token], out: &mut Out) -> R {
+    pub(crate) fn cmd_create(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
         if c.eat("user") {
             const USAGE: &str = "create user \"<name>\" identified by \"<password>\" [role admin|editor|viewer] \
@@ -566,7 +566,7 @@ impl Session {
             .map(|v| v.vectors)
     }
 
-    fn cmd_drop(&mut self, a: &[Token], out: &mut Out) -> R {
+    pub(crate) fn cmd_drop(&mut self, a: &[Token], out: &mut Out) -> R {
         let mut c = Cur::new(a);
         if c.eat("user") {
             let name = word(c.next(), "a user name")?;
@@ -1635,7 +1635,11 @@ impl Session {
                     return Ok(());
                 };
                 if let Some(e) = &s.error {
-                    out.say(format!("Change journal: unusable ({e}). Restart KivaDB to rebuild it from the data."));
+                    if self.native_hierarchy {
+                        out.say("Change journal is unavailable.");
+                    } else {
+                        out.say(format!("Change journal: unusable ({e}). Restart KivaDB to rebuild it from the data."));
+                    }
                     return Ok(());
                 }
                 out.say(format!(

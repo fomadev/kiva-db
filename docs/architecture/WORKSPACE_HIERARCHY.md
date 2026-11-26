@@ -412,7 +412,12 @@ process interruption. Sudden power loss on Windows remains unverified.
 The allowlist covers key and document commands, native types, queries,
 index/schema/vector operations, transactions, change journal, compaction
 and integrity checks. Managed engines sync writes before acknowledgment.
-TTL uses on-access expiry. Scripts, trigger and subscription entry points,
-network listeners, protocol adapters, staged migration, replication and
-backup/restore of the managed layout remain outside this mode. See
+TTL uses on-access expiry. Scripts, triggers, subscriptions, staged
+migration, replication and backup/restore remain unavailable in this mode.
+
+Phase 7A adds a separate native TCP listener mode for initialized managed
+homes. The negotiated connection keeps its own authenticated hierarchy
+context and uses the same layout barrier, grants and registry. Native frame
+limits, supported operations and disabled adapters are covered in the
+[native hierarchical protocol](NATIVE_HIERARCHICAL_PROTOCOL.md). See
 [readiness and measurements](../testing/workspace-hierarchy-readiness.md).

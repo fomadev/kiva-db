@@ -360,3 +360,23 @@ contention are represented by the mixed workload above.
 | versioned policy and account lookup | 2,048 | 157 / 176 / 224 |
 | inherited permission | 2,048 | 153 / 185 / 212 |
 | uncontended layout guard | 2,048 | 53 / 61 / 74 |
+
+
+## Phase 7A native TCP
+
+**NOT READY for production.** Native managed TCP requires explicit startup
+and per-connection capability negotiation. The legacy native listener
+remains available for historical homes.
+
+| Coverage | Regression checks |
+| --- | --- |
+| NET01–NET08, NET12–NET15 | Login, negotiation, separate contexts, initial empty selection, homonymous collections, binary and JSON requests, restart and legacy compatibility |
+| NET09–NET11, API02–API04 | Revocation, failed commit after account recreation, stale collection handles, rollback, disconnect and a crash just before the commit reply |
+| NET16–NET22 | Malformed frames, slow reader of request bytes, TLS pinning, engine limit, disconnect cleanup, concurrent data, compaction and rename |
+| NET23 | Push subscriptions are refused. Managed journal reads reauthorize each request |
+| API01 | Rust workspace, project and collection selections and typed value operations |
+
+The process-crash tests preserve a committed value across an interrupted
+response. Sudden power-loss behavior, long-running production workloads,
+REST, RESP, released drivers, backup/restore, replication, doctor and
+migration cutover remain open.

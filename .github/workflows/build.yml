@@ -135,7 +135,7 @@ jobs:
           CARGO_TARGET_DIR: target/crash-points
         run: |
           cargo clippy --features crash-points --all-targets -- -D warnings
-          cargo test --features crash-points --test crash --test txn_recovery --test encryption --test workspace_migration --test managed_layout --test hierarchy_grants --test hierarchy_data
+          cargo test --features crash-points --test crash --test txn_recovery --test encryption --test workspace_migration --test managed_layout --test hierarchy_grants --test hierarchy_data --test hierarchy_network
           # The executable of the step before, built without the feature,
           # holds none of it.
           if grep -a -q KIVADB_CRASH_ARMED "$GITHUB_WORKSPACE"/target/debug/kivadb*; then

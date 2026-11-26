@@ -78,6 +78,9 @@ type RateTable = Arc<Mutex<HashMap<IpAddr, (u64, u64)>>>;
 
 /// Starts the HTTP listener and returns the bound port.
 pub fn start_http(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
+    if inst.hierarchical_tcp {
+        return Err(KivaError::Denied("this listener is unavailable in hierarchical TCP mode".into()));
+    }
     let listener = TcpListener::bind((bind, port))
         .map_err(|e| KivaError::Other(format!("cannot listen on {bind}:{port}: {e}")))?;
     let port = listener.local_addr()?.port();

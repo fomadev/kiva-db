@@ -1427,7 +1427,10 @@ impl Session {
         self.wrote = false;
         let managed_need = self.hierarchy_data.then(|| managed_command(&cmd, &tokens[1..])).flatten();
         let res = if let Some(need) = managed_need {
-            self.with_managed_engine(&cmd, need, |session| session.dispatch(&cmd, &tokens, line, &mut out))
+            self.with_managed_engine(&cmd, need, |session| {
+                session.dispatch(&cmd, &tokens, line, &mut out).map_err(KivaError::Other)
+            })
+            .map_err(|error| error.to_string())
         } else if cmd == "hierarchy"
             || (self.hierarchy.is_some() && !matches!(cmd.as_str(), "quit" | "exit" | "auth" | "login"))
         {
@@ -2909,7 +2912,8 @@ impl Session {
             out.say(" > Value Cache          : off (values are read from disk)");
         }
         if self.managed_dispatch.is_some() {
-            out.say(" > Mode                 : local managed data");
+            let mode = if self.native_hierarchy { "hierarchical TCP" } else { "local managed data" };
+            out.say(format!(" > Mode                 : {mode}"));
             return Ok(());
         }
         let repl = &self.inst.repl;
