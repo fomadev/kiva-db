@@ -4,6 +4,12 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 ## [Unreleased]
 
+- Allows concurrent local managed data commands under a shared authorization
+  barrier. The managed engine registry uses a configurable limit and evicts
+  the least recently used idle store.
+- Adds explicit managed collection compaction with an on-disk intent for
+  recovering the replacement file identity after interruption.
+
 - Adds the opt-in local `hierarchy data` mode for data and transactions in
   managed collections. Collection engines follow stable identities and pending
   transactions recheck current grants at commit. Network and migration cutover

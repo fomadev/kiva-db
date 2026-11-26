@@ -2,7 +2,7 @@
 // Licensed under the Fordima Public License (FPL) v1.0.
 // See the LICENSE file in the project root for full license information.
 
-//! Authorization for hierarchy metadata. These decisions never open a data engine.
+//! Authorization for hierarchy metadata and managed data routing.
 
 use crate::auth::{Priv, Role, User};
 use crate::catalog::{Catalog, CollectionId, LegacyCollection, ProjectId, WorkspaceId};
@@ -10,10 +10,11 @@ use crate::engine::{BatchOp, Engine};
 use crate::error::{KivaError, Result};
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 const POLICY_KEY: &str = "catalog:hierarchy-grants";
-pub(crate) type CachedPolicy = Option<(Option<u64>, std::sync::Arc<Policy>)>;
+pub(crate) type CachedPolicy = Option<(Option<u64>, Arc<Policy>)>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
@@ -85,7 +86,11 @@ struct Grant {
 pub(crate) struct Policy {
     version: u32,
     grants: Vec<Grant>,
+    #[serde(skip)]
+    by_account: BTreeMap<String, BTreeMap<String, Arc<GrantSet>>>,
 }
+
+type GrantSet = BTreeSet<(Scope, Permission)>;
 
 pub(crate) fn valid_subject(subject: &str) -> bool {
     subject.len() == 32 && subject.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -94,12 +99,12 @@ pub(crate) fn valid_subject(subject: &str) -> bool {
 impl Policy {
     pub(crate) fn load(system: &Engine) -> Result<Self> {
         let Some((value, _)) = system.get(POLICY_KEY)? else {
-            return Ok(Self { version: 1, grants: Vec::new() });
+            return Ok(Self { version: 1, grants: Vec::new(), by_account: BTreeMap::new() });
         };
         let Value::Doc(document) = value else {
             return Err(KivaError::Corrupted("hierarchy grants are not a document".into()));
         };
-        let policy: Self = serde_json::from_value(document)
+        let mut policy: Self = serde_json::from_value(document)
             .map_err(|error| KivaError::Corrupted(format!("invalid hierarchy grants: {error}")))?;
         if policy.version != 1 {
             return Err(KivaError::Format(format!("unsupported hierarchy grants version {}", policy.version)));
@@ -110,6 +115,22 @@ impl Policy {
         }) {
             return Err(KivaError::Corrupted("invalid or duplicate hierarchy grant".into()));
         }
+        let mut by_account = BTreeMap::<String, BTreeMap<String, GrantSet>>::new();
+        for grant in &policy.grants {
+            by_account
+                .entry(grant.account.clone())
+                .or_default()
+                .entry(grant.subject.clone())
+                .or_default()
+                .insert((grant.scope, grant.permission));
+        }
+        policy.by_account = by_account
+            .into_iter()
+            .map(|(name, subjects)| {
+                let subjects = subjects.into_iter().map(|(subject, grants)| (subject, Arc::new(grants))).collect();
+                (name, subjects)
+            })
+            .collect();
         Ok(policy)
     }
 
@@ -153,19 +174,14 @@ impl Policy {
     pub(crate) fn for_user(&self, user: &User) -> Access {
         Access {
             role: user.role,
-            grants: self
-                .grants
-                .iter()
-                .filter(|g| g.account == user.name && g.subject == user.hierarchy_subject)
-                .map(|g| (g.scope, g.permission))
-                .collect(),
+            grants: self.by_account.get(&user.name).and_then(|subjects| subjects.get(&user.hierarchy_subject)).cloned(),
         }
     }
 }
 
 pub(crate) struct Access {
     role: Role,
-    grants: Vec<(Scope, Permission)>,
+    grants: Option<Arc<GrantSet>>,
 }
 
 impl Access {
@@ -180,11 +196,11 @@ impl Access {
                 Some((Scope::Collection(alias.id), permission))
             })
             .collect();
-        Self { role: user.role, grants }
+        Self { role: user.role, grants: Some(Arc::new(grants)) }
     }
 
     pub(crate) fn administrator() -> Self {
-        Self { role: Role::Admin, grants: Vec::new() }
+        Self { role: Role::Admin, grants: None }
     }
 
     pub(crate) fn role(&self) -> Role {
@@ -201,10 +217,17 @@ impl Access {
         if self.role == Role::Viewer && permission != Permission::Read {
             return false;
         }
-        self.grants.iter().any(|&(scope, grant)| {
-            (grant == permission || (grant == Permission::Write && permission == Permission::Read))
-                && scope.includes(target, catalog)
-        })
+        let Some(grants) = &self.grants else { return false };
+        let mut scope = target;
+        loop {
+            if grants.contains(&(scope, permission))
+                || (permission == Permission::Read && grants.contains(&(scope, Permission::Write)))
+            {
+                return true;
+            }
+            let Some(parent) = scope.parent(catalog) else { return false };
+            scope = parent;
+        }
     }
 
     pub(crate) fn visible(&self, catalog: &Catalog, target: Scope) -> bool {
@@ -212,7 +235,7 @@ impl Access {
             return false;
         }
         self.role == Role::Admin
-            || self.grants.iter().any(|&(scope, permission)| {
+            || self.grants.iter().flat_map(|grants| grants.iter()).any(|&(scope, permission)| {
                 (self.role != Role::Viewer || permission != Permission::Manage)
                     && (scope.includes(target, catalog) || target.includes(scope, catalog))
             })

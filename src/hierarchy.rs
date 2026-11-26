@@ -5,6 +5,8 @@
 //! Administrative metadata preview. Collection identities are never passed to
 //! the historical storage engine or its authorization and replication paths.
 
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
+
 use crate::auth::{self, Role, User};
 use crate::catalog::{Catalog, CatalogStore, CollectionId, ProjectId, WorkspaceId};
 use crate::error::{KivaError, Result};
@@ -254,6 +256,11 @@ fn navigate(catalog: &Catalog, mut current: Context, command: &str, args: &[Toke
     Ok(Context { workspace, project: Some(project), collection: Some(id), managed: current.managed })
 }
 
+enum LayoutGuard<'a> {
+    Shared(#[allow(dead_code)] RwLockReadGuard<'a, ()>),
+    Exclusive(#[allow(dead_code)] RwLockWriteGuard<'a, ()>),
+}
+
 impl Session {
     fn hierarchy_user(&self) -> Result<User> {
         let ctx =
@@ -287,25 +294,29 @@ impl Session {
 
     pub(crate) fn hierarchy_location(&self) -> Result<Option<([String; 3], Role)>> {
         let Some(mut context) = self.hierarchy else { return Ok(None) };
+        let _guard = lock_layout(&self.inst, context.managed, false)?;
         let user = self.hierarchy_user()?;
-        let _guard = self.hierarchy_lock(context.managed)?;
         let catalog = self.context_catalog(context.managed)?;
         let access = self.hierarchy_access(&user, context.managed)?;
         context.normalize(&catalog);
         Ok(Some((context.visible_names(&catalog, &access), access.role())))
     }
+}
 
-    fn hierarchy_lock(&self, managed: bool) -> Result<Option<std::sync::MutexGuard<'_, ()>>> {
-        managed
-            .then(|| {
-                self.inst
-                    .managed_layout_lock
-                    .lock()
-                    .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))
-            })
-            .transpose()
+fn lock_layout(inst: &crate::instance::Instance, managed: bool, exclusive: bool) -> Result<Option<LayoutGuard<'_>>> {
+    if !managed {
+        return Ok(None);
     }
+    let lock = &inst.managed_layout_lock;
+    let guard = if exclusive {
+        lock.write().map(LayoutGuard::Exclusive).map_err(|_| ())
+    } else {
+        lock.read().map(LayoutGuard::Shared).map_err(|_| ())
+    };
+    guard.map(Some).map_err(|_| KivaError::Other("managed layout lock poisoned".into()))
+}
 
+impl Session {
     pub(crate) fn execute_hierarchy(
         &mut self,
         command: &str,
@@ -316,14 +327,19 @@ impl Session {
     }
 
     fn hierarchy_command(&mut self, command: &str, args: &[Token], out: &mut Out) -> Result<()> {
-        let inst = self.inst.clone();
         let managed = self.hierarchy.is_some_and(|context| context.managed)
             || command == "hierarchy" && args.first().is_some_and(|mode| mode.is_kw("storage") || mode.is_kw("data"));
-        let _guard = if managed {
-            Some(inst.managed_layout_lock.lock().map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?)
+        let exclusive = if command == "hierarchy" {
+            args.first()
+                .is_some_and(|token| ["storage", "data", "grant", "revoke"].iter().any(|word| token.is_kw(word)))
         } else {
-            None
+            matches!(command, "workspace" | "project" | "collection" | "collections")
+                && args.first().is_some_and(|token| {
+                    ["create", "rename", "drop"].iter().any(|word| token.text.eq_ignore_ascii_case(word))
+                })
         };
+        let lock_session = self.inst.clone();
+        let _guard = lock_layout(&lock_session, managed, exclusive)?;
         let user = self.hierarchy_user()?;
         if self.txn.is_some() {
             return Err(KivaError::Invalid("hierarchy preview is unavailable during a transaction".into()));
@@ -342,24 +358,26 @@ impl Session {
                 [mode] if mode.is_kw("storage") || mode.is_kw("data") => {
                     self.check_managed_access()?;
                     let inst = self.inst.clone();
-                    Policy::load(&inst.system)?;
-                    let catalog =
-                        if let Some(catalog) = crate::managed_layout::open(&inst.home, &inst.engine_options())? {
-                            catalog
-                        } else {
-                            if user.role != Role::Admin {
-                                return Err(hidden());
-                            }
-                            crate::managed_layout::edit(&inst.home, &inst.engine_options(), |_| Ok(()))?
-                        };
+                    Policy::load_cached(&inst)?;
+                    let mut cache = inst
+                        .managed_catalog
+                        .lock()
+                        .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
+                    let catalog = if let Some(catalog) = cache.as_ref() {
+                        catalog.clone()
+                    } else if let Some(catalog) = crate::managed_layout::open(&inst.home, &inst.engine_options())? {
+                        Arc::new(catalog)
+                    } else {
+                        if user.role != Role::Admin {
+                            return Err(hidden());
+                        }
+                        Arc::new(crate::managed_layout::edit(&inst.home, &inst.engine_options(), |_| Ok(()))?)
+                    };
                     self.drop_subscriptions();
                     self.unwatch();
                     self.hierarchy =
                         Some(Context::workspace(catalog.workspace("default").expect("validated default"), true));
-                    *inst
-                        .managed_catalog
-                        .lock()
-                        .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))? = Some(catalog);
+                    *cache = Some(catalog);
                     self.hierarchy_data = mode.is_kw("data");
                     out.say(if self.hierarchy_data {
                         "Local managed data mode enabled."
@@ -379,6 +397,17 @@ impl Session {
                         access.allows(&catalog, scope, Permission::Write),
                         access.allows(&catalog, scope, Permission::Manage)
                     ));
+                }
+                [mode] if mode.is_kw("engines") => {
+                    if !self.hierarchy.is_some_and(|context| context.managed) || user.role != Role::Admin {
+                        return Err(hidden());
+                    }
+                    let registry = self
+                        .inst
+                        .managed_engines
+                        .lock()
+                        .map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
+                    out.say(registry.summary());
                 }
                 [mode] if mode.is_kw("off") => {
                     self.hierarchy = None;
@@ -574,9 +603,9 @@ impl Session {
         Ok(())
     }
 
-    fn context_catalog(&self, managed: bool) -> Result<Catalog> {
+    fn context_catalog(&self, managed: bool) -> Result<Arc<Catalog>> {
         if !managed {
-            return self.preview_catalog();
+            return self.preview_catalog().map(Arc::new);
         }
         self.check_local_managed()?;
         let mut cache =
@@ -587,6 +616,7 @@ impl Session {
         self.inst.check_managed_layout_home()?;
         let catalog = crate::managed_layout::open(&self.inst.home, &self.inst.engine_options())?
             .ok_or_else(|| KivaError::Corrupted("missing managed layout".into()))?;
+        let catalog = Arc::new(catalog);
         *cache = Some(catalog.clone());
         Ok(catalog)
     }
@@ -601,7 +631,7 @@ impl Session {
         execute: impl FnOnce(&mut Self) -> std::result::Result<(), String>,
     ) -> std::result::Result<(), String> {
         let inst = self.inst.clone();
-        let _guard = inst.managed_layout_lock.lock().map_err(|_| "managed layout lock poisoned".to_owned())?;
+        let _guard = lock_layout(&inst, true, command == "compact").map_err(|error| error.to_string())?;
         if command == "rollback" && need == Need::None {
             return execute(self);
         }
@@ -631,23 +661,12 @@ impl Session {
             }
             let mut engines =
                 inst.managed_engines.lock().map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
-            const MAX_OPEN_MANAGED_ENGINES: usize = 32;
-            if !engines.contains_key(&id) && engines.len() >= MAX_OPEN_MANAGED_ENGINES {
-                let idle = engines
-                    .iter()
-                    .find(|(_, engine)| std::sync::Arc::strong_count(engine) == 1)
-                    .map(|(id, _)| *id)
-                    .ok_or_else(|| {
-                        KivaError::Invalid("managed engine limit reached with active transactions".into())
-                    })?;
-                engines.remove(&idle);
+            if command == "compact" && engines.pinned(id) {
+                return Err(KivaError::Invalid("compaction is blocked during a collection transaction".into()));
             }
-            let engine = match engines.entry(id) {
-                std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
-                std::collections::hash_map::Entry::Vacant(entry) => entry
-                    .insert(crate::managed_layout::open_collection(&inst.home, &catalog, id, inst.engine_options())?)
-                    .clone(),
-            };
+            let engine = engines.get_or_open(id, || {
+                crate::managed_layout::open_collection(&inst.home, &catalog, id, inst.engine_options())
+            })?;
             if self
                 .managed_txn_engine
                 .as_ref()
@@ -655,7 +674,7 @@ impl Session {
             {
                 return Err(KivaError::Conflict("managed transaction engine changed".into()));
             }
-            Ok((id, engine, write, manage, selected.path(&catalog, &access)))
+            Ok((id, engine, write, manage, selected.names(&catalog).join(".")))
         })();
         let (id, engine, write, manage, label) = match route {
             Ok(route) => route,
@@ -681,6 +700,12 @@ impl Session {
         result
     }
 
+    pub(crate) fn compact_managed(&self) -> Result<crate::engine::CompactReport> {
+        let id = self.hierarchy.and_then(|context| context.collection).ok_or_else(hidden)?;
+        let catalog = self.context_catalog(true)?;
+        crate::managed_layout::compact_collection(&self.inst.home, &catalog, id, &self.engine)
+    }
+
     fn preview_catalog(&self) -> Result<Catalog> {
         match self.inst.workspace_catalog()? {
             Some(catalog) => Ok(catalog),
@@ -696,7 +721,7 @@ impl Session {
                 .managed_engines
                 .lock()
                 .map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
-            if engines.values().any(|engine| std::sync::Arc::strong_count(engine) > 1) {
+            if engines.any_pinned() {
                 return Err(KivaError::Invalid(
                     "a managed transaction is active; finish it before a layout change".into(),
                 ));
@@ -710,12 +735,83 @@ impl Session {
                 .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
             cache.take();
             let catalog = crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit)?;
-            *cache = Some(catalog);
+            *cache = Some(Arc::new(catalog));
             return Ok(());
         }
         if self.inst.workspace_catalog()?.is_some() || self.inst.repl.is_replica() {
             return Err(KivaError::ReadOnly("a staged migration or replica catalog is read-only".into()));
         }
         CatalogStore::preview(&self.inst.system).edit_preview(edit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn run(session: &mut Session, command: &str) {
+        let result = session.execute(command);
+        assert!(!result.has_err(), "{command}: {:?}", result.lines);
+    }
+
+    #[test]
+    fn active_data_commands_share_admission_but_exclude_layout_and_grant_writers() {
+        let path =
+            std::env::temp_dir().join(format!("kiva-managed-concurrency-{:016x}", crate::util::random_u64().unwrap()));
+        let inst = crate::Instance::open(&path, crate::Options::default()).unwrap();
+        let mut held = Session::new(inst.clone(), true, None);
+        for command in [
+            "hierarchy data",
+            "workspace create first second",
+            "switch first",
+            "project create app",
+            "use app",
+            "collection create data",
+            "switch second",
+            "project create app",
+            "use app",
+            "collection create data",
+            "use collection first.app.data",
+            "set first 1",
+        ] {
+            run(&mut held, command);
+        }
+        let mut same = Session::new(inst.clone(), true, None);
+        let mut other = Session::new(inst.clone(), true, None);
+        for (session, collection) in [(&mut same, "first.app.data"), (&mut other, "second.app.data")] {
+            run(session, "hierarchy data");
+            run(session, &format!("use collection {collection}"));
+        }
+        std::thread::scope(|scope| {
+            let (active, admitted) = mpsc::channel();
+            let (release, wait) = mpsc::channel();
+            let handle = scope.spawn(move || {
+                held.with_managed_engine("get", Need::Read, |_| {
+                    active.send(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+            });
+            admitted.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(matches!(inst.managed_layout_lock.try_write(), Err(std::sync::TryLockError::WouldBlock)));
+            let (done, completed) = mpsc::channel();
+            scope.spawn(move || {
+                run(&mut same, "get first");
+                run(&mut other, "begin");
+                run(&mut other, "set second 2");
+                run(&mut other, "commit");
+                done.send(()).unwrap();
+            });
+            let completed_while_held = completed.recv_timeout(Duration::from_secs(5));
+            release.send(()).unwrap();
+            handle.join().unwrap();
+            completed_while_held.expect("active operation must admit commands in both stores");
+        });
+        inst.shutdown();
+        drop(inst);
+        let _ = std::fs::remove_dir_all(path);
     }
 }

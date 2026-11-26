@@ -200,3 +200,23 @@ variation in synchronous write times makes this run unsuitable for claiming
 a throughput improvement. Managed operations serialize on the layout lock.
 These measurements cover a small local workload and exclude network,
 large data sets and backup/restore.
+
+
+## Phase 6B managed engine hardening
+
+**NOT READY for production.** Managed routing remains local and requires
+explicit activation with the listener disabled.
+
+- The admission test holds an authorized command open and verifies that
+  commands in the same and a different workspace can complete while
+  layout writers are excluded. Revocation, retirement and transaction tests
+  verify visibility and write publication through existing sessions.
+- The registry test sets the capacity to two engines and exercises saturation,
+  transaction pins, LRU eviction, and reopening an evicted store.
+- The compaction test interrupts ten prepare, copy, sync, swap, publication
+  and cleanup boundaries with and without encryption. It verifies actual
+  stored values, tombstones, TTL-visible values, index plans, vector results,
+  schema metadata, change journal history and generation recovery.
+- The platform failure model is process interruption. Power-cut tests,
+  protocol adapters, driver integration, managed backup, restore, replication,
+  doctor and migration cutover remain open.

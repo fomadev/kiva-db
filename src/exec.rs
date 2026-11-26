@@ -1439,7 +1439,7 @@ impl Session {
                 || (matches!(cmd.as_str(), "create" | "drop" | "modify")
                     && tokens.get(1).is_some_and(|token| token.is_kw("user")))
                 || (cmd == "config" && tokens.get(1).is_some_and(|token| token.is_kw("set")));
-            let _account_guard = changes_account.then(|| inst.managed_layout_lock.lock());
+            let _account_guard = changes_account.then(|| inst.managed_layout_lock.write());
             if _account_guard.as_ref().is_some_and(|guard| guard.is_err()) {
                 out.err("Error: managed authorization lock poisoned.");
                 return out;
@@ -2967,7 +2967,7 @@ fn managed_command(command: &str, args: &[Token]) -> Option<Need> {
         "changes" if ["enable", "disable", "forget"].into_iter().any(sub) => Need::Owner,
         "create" if ["index", "unique", "vector"].into_iter().any(sub) => Need::Owner,
         "drop" if ["index", "vector"].into_iter().any(sub) => Need::Owner,
-        "check" if args.is_empty() => Need::Owner,
+        "compact" | "check" if args.is_empty() => Need::Owner,
         _ => return None,
     })
 }

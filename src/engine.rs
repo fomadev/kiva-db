@@ -3487,6 +3487,19 @@ impl Engine {
     /// keep flowing while the bulk of the copy happens; with `recompress`,
     /// every value is re-encoded with the given algorithm.
     pub fn compact_with(&self, recompress: Option<Compression>) -> Result<CompactReport> {
+        self.compact_with_install(recompress, None)
+    }
+
+    /// Record the replacement identity durably before the physical swap.
+    pub(crate) fn compact_managed(&self, prepare: &dyn Fn(u64, u64) -> Result<()>) -> Result<CompactReport> {
+        self.compact_with_install(None, Some(prepare))
+    }
+
+    fn compact_with_install(
+        &self,
+        recompress: Option<Compression>,
+        prepare: Option<&dyn Fn(u64, u64) -> Result<()>>,
+    ) -> Result<CompactReport> {
         if self.compacting.swap(true, Ordering::SeqCst) {
             return Err(KivaError::Other("a compaction or a backup is already running".into()));
         }
@@ -3498,14 +3511,19 @@ impl Engine {
         }
         let _clear = Clear(&self.compacting);
         let tmp_path = sidecar(&self.path, "compact");
-        let res = self.compact_impl(recompress, &tmp_path);
+        let res = self.compact_impl(recompress, &tmp_path, prepare);
         if !matches!(&res, Ok(r) if !r.aborted) {
             let _ = fs::remove_file(&tmp_path);
         }
         res
     }
 
-    fn compact_impl(&self, recompress: Option<Compression>, tmp_path: &Path) -> Result<CompactReport> {
+    fn compact_impl(
+        &self,
+        recompress: Option<Compression>,
+        tmp_path: &Path,
+        prepare: Option<&dyn Fn(u64, u64) -> Result<()>>,
+    ) -> Result<CompactReport> {
         // Phase 1 (locked): freeze a view of the index.
         let (snapshot, snap_len, old_id) = {
             let mut inner = self.lock();
@@ -3527,6 +3545,9 @@ impl Engine {
         let mut reader = File::open(&self.path)?;
         let mut out = BufWriter::with_capacity(1 << 20, File::create(tmp_path)?);
         out.write_all(&file_header(new_id, FORMAT_V1))?;
+        if prepare.is_some() {
+            crate::crash_point!("managed_compact.during_copy");
+        }
         let mut pos = FILE_HEADER_LEN;
         let mut moved: HashMap<String, (u64, Entry)> = HashMap::with_capacity(snapshot.len());
         let mut dropped = 0usize;
@@ -3588,6 +3609,9 @@ impl Engine {
         if inner.file_id != old_id || inner.closed {
             return Ok(CompactReport { before_bytes, after_bytes: before_bytes, aborted: true, ..Default::default() });
         }
+        if prepare.is_some() && dropped > 0 {
+            return Err(KivaError::Corrupted("managed compaction encountered unreadable records".into()));
+        }
         // Damaged records are not carried over: the old file is kept whole
         // first, so that what they hold is not lost with it.
         if dropped > 0 {
@@ -3607,6 +3631,10 @@ impl Engine {
             tmp_file.write_all(&inner.format.to_le_bytes())?;
         }
         tmp_file.sync_all()?;
+        if let Some(prepare) = prepare {
+            crate::crash_point!("managed_compact.after_sync");
+            prepare(old_id, new_id)?;
+        }
         // The journal names data files: every change so far on disk, then
         // where the new file ends, before it replaces the old one. A crash
         // in between leaves the old file, which the journal still names.
@@ -3634,23 +3662,36 @@ impl Engine {
             }
         }
 
+        if prepare.is_some() {
+            crate::crash_point!("managed_compact.before_replace");
+        }
         // Close our handle on the old file before replacing it (required on Windows).
         let new_handle = OpenOptions::new().read(true).write(true).open(tmp_path)?;
         let old_handle = std::mem::replace(&mut inner.file, new_handle);
         drop(old_handle);
-        let mut renamed = fs::rename(tmp_path, &self.path);
+        let replace = || {
+            if prepare.is_some() {
+                crate::managed_layout::replace_compaction_file(tmp_path, &self.path)
+            } else {
+                fs::rename(tmp_path, &self.path)
+            }
+        };
+        let mut renamed = replace();
         for _ in 0..20 {
             if renamed.is_ok() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
-            renamed = fs::rename(tmp_path, &self.path);
+            renamed = replace();
         }
         if let Err(e) = renamed {
             inner.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
             return Err(e.into());
         }
 
+        if prepare.is_some() {
+            crate::crash_point!("managed_compact.after_replace");
+        }
         for k in &lost {
             inner.idx_remove(k);
         }
