@@ -10,7 +10,7 @@
 //! served in plain-text mode instead (one command per line), which keeps the
 //! server usable from telnet or netcat.
 
-use std::io::{self, Read, Write};
+use std::io::{self, IoSlice, Read, Write};
 
 // Requests
 pub const CMD_HELLO: u16 = 1;
@@ -67,6 +67,24 @@ pub fn write_frame(w: &mut impl Write, code: u16, payload: &[u8]) -> io::Result<
     w.flush()
 }
 
+/// Write a native reply without copying its payload into a second buffer.
+pub(crate) fn write_native_frame(w: &mut impl Write, code: u16, payload: &[u8]) -> io::Result<()> {
+    let mut header = [0; 6];
+    header[..4].copy_from_slice(&((payload.len() + 2) as u32).to_be_bytes());
+    header[4..].copy_from_slice(&code.to_be_bytes());
+    let mut buffers = [IoSlice::new(&header), IoSlice::new(payload)];
+    let mut pending = &mut buffers[..if payload.is_empty() { 1 } else { 2 }];
+    while !pending.is_empty() {
+        match w.write_vectored(pending) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => IoSlice::advance_slices(&mut pending, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    w.flush()
+}
+
 /// Like `read_exact`, but a read timeout does not lose the bytes already
 /// received: the read resumes for as long as `keep_going` allows.
 pub fn read_full(r: &mut impl Read, buf: &mut [u8], keep_going: &dyn Fn() -> bool) -> io::Result<()> {
@@ -96,6 +114,17 @@ pub(crate) fn read_frame_bounded(
     maximum: usize,
     keep_going: &dyn Fn() -> bool,
 ) -> io::Result<(u16, Vec<u8>)> {
+    let mut payload = Vec::new();
+    let code = read_frame_into(r, maximum, keep_going, &mut payload)?;
+    Ok((code, payload))
+}
+
+pub(crate) fn read_frame_into(
+    r: &mut impl Read,
+    maximum: usize,
+    keep_going: &dyn Fn() -> bool,
+    payload: &mut Vec<u8>,
+) -> io::Result<u16> {
     let mut head = [0u8; 6];
     read_full(r, &mut head, keep_going)?;
     let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
@@ -103,9 +132,9 @@ pub(crate) fn read_frame_bounded(
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid frame length"));
     }
     let code = u16::from_be_bytes([head[4], head[5]]);
-    let mut payload = vec![0u8; len - 2];
-    read_full(r, &mut payload, keep_going)?;
-    Ok((code, payload))
+    payload.resize(len - 2, 0);
+    read_full(r, payload, keep_going)?;
+    Ok(code)
 }
 
 pub fn read_frame(r: &mut impl Read) -> io::Result<(u16, Vec<u8>)> {
@@ -178,5 +207,35 @@ impl<'a> Reader<'a> {
         let s = &self.buf[self.pos..];
         self.pos = self.buf.len();
         s
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn vectored_reply_handles_partial_writes_through_header_and_body() {
+        #[derive(Default)]
+        struct Partial(Vec<u8>);
+
+        impl Write for Partial {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let n = buf.len().min(2);
+                self.0.extend_from_slice(&buf[..n]);
+                Ok(n)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut sink = Partial::default();
+        write_native_frame(&mut sink, ST_OK, b"payload").unwrap();
+        assert_eq!(read_frame(&mut sink.0.as_slice()).unwrap(), (ST_OK, b"payload".to_vec()));
+        let mut sink = Partial::default();
+        write_native_frame(&mut sink, ST_NOT_FOUND, b"").unwrap();
+        assert_eq!(read_frame(&mut sink.0.as_slice()).unwrap(), (ST_NOT_FOUND, Vec::new()));
     }
 }

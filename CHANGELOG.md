@@ -4,6 +4,12 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 ## [Unreleased]
 
+- Splits hierarchical TCP reads, data work, authentication and control
+  into bounded FIFO admission lanes. Full lanes return an explicit
+  pre-execution busy error.
+- Reuses native frame buffers, sends replies without a payload copy and
+  adds optional aggregate request timings.
+
 - Adds explicit `hierarchy/1` negotiation for authenticated native TCP
   sessions and typed Rust collection handles. This mode uses the managed
   catalog and grants for framed commands, binary keys and structured data

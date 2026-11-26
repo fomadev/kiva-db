@@ -495,3 +495,309 @@ exclude transport, and these runs used separate scratch homes.
 | 128 | 8,288.27 / 11,852.31 / 11,852.31 | 5.18 / 8.07 / 72.32 | 5.64 / 7.08 / 64.75 | 4,786.47 / 8,196.51 / 8,196.51 |
 | 1,000 | 89,361.10 / 153,232.72 / 153,232.72 | 8.69 / 63.79 / 122.60 | 9.02 / 12.56 / 146.40 | 7,019.87 / 10,681.81 / 10,681.81 |
 | 10,000 | 396,202.28 / 883,187.58 / 883,187.58 | 11.39 / 25.88 / 93.16 | 5.75 / 6.13 / 17.99 | 6,204.11 / 10,769.45 / 10,769.45 |
+
+## Phase 7A.2 native admission
+
+**NOT READY for production.** Native admission changes retain the
+authentication, TLS, authorization and durable-write contract of Phase 7A.
+
+The path is socket read and frame validation, payload decode, FIFO lane
+admission, shared or exclusive layout guard, account and catalog resolution,
+permission check, registry lookup, engine dispatch and synchronous
+publication. Encoding and socket write follow dispatch. System account
+and policy changes and topology operations retain exclusive admission.
+Compaction still blocks data across collections.
+
+The FIFO unit test verifies direct handoff, queue saturation and independent
+lanes. The native socket test saturates the data lane and checks the explicit
+refusal, continued reads, rollback and revocation. Native end-to-end coverage
+retains TLS, slow connections, malformed frames, account and collection
+replacement, restart, compaction, transaction pins, lost commit replies and
+historical transport isolation. The framing test forces partial writes of the
+header and payload.
+
+The seven existing ignored tests remain opt-in workloads.
+
+| Test | Reason |
+| --- | --- |
+| `hnsw_speed` | Large HNSW comparison reports hardware-dependent speed |
+| `hnsw_filter_speed` | Repeats vector searches across filter selectivities for timing |
+| `hnsw_sq8_speed` | Measures scalar-quantization performance in Release |
+| `query_speed` | Uses a large corpus to compare query timing |
+| `group_commit_speed` | Measures disk-dependent batching throughput |
+| `invalidation_speed` | Times semantic-cache updates at benchmark scale |
+| `managed_routing_component_costs` | Requires a separately provisioned Release benchmark home |
+
+CI still runs the functional assertions for those areas.
+
+### Release diagnosis and comparison
+
+The included [TCP benchmark](../../examples/hierarchy_tcp_bench.rs) was run
+on Linux with five visible Intel Xeon Platinum 8573C CPUs, an overlay
+filesystem and synchronous writes on both routes. It ran the Phase 7A
+reference from `f882b0b` and this branch from the same workspace. The
+instrumented reference keeps the shared semaphore and adds only timing
+probes. Probe runs are separate from the timed comparisons. System load
+and fsync variance affect repeatability on this runner.
+
+#### Phase 7A replay
+
+Each cohort performs the original eight cycles per client. A cycle has
+binary GET, durable binary SET, indexed EXEC and a transaction. These are
+sample percentiles of that replay, before or after the change. The legacy
+column gives the contemporaneous reference throughput.
+
+| Clients | Placement | Legacy ops/s | Shared-slot ops/s | FIFO lanes ops/s | Shared-slot GET p50/p95/p99 (µs) | FIFO lanes GET p50/p95/p99 (µs) |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | concentrated | 2,869.42 | 2,507.44 | 1,112.63 | 64.44 / 320.48 / 320.48 | 83.96 / 423.28 / 423.28 |
+| 1 | spread | 2,680.90 | 1,009.42 | 3,164.23 | 74.28 / 213.68 / 213.68 | 33.11 / 40.64 / 40.64 |
+| 8 | concentrated | 11,750.72 | 2,469.63 | 7,725.57 | 142.53 / 811.59 / 4,487.08 | 54.24 / 296.18 / 309.17 |
+| 8 | spread | 9,075.43 | 2,348.17 | 3,527.87 | 143.19 / 2,471.84 / 2,621.90 | 102.07 / 896.21 / 1,429.33 |
+| 32 | concentrated | 15,900.08 | 3,163.42 | 2,855.10 | 919.63 / 12,003.94 / 26,090.81 | 214.70 / 1,020.72 / 2,644.75 |
+| 32 | spread | 12,703.14 | 3,881.74 | 3,342.20 | 2,762.48 / 14,743.52 / 41,049.31 | 171.19 / 1,107.24 / 2,844.28 |
+| 128 | concentrated | 13,116.69 | 3,711.21 | 3,134.35 | 7,654.48 / 61,237.83 / 99,144.05 | 167.50 / 1,812.61 / 4,897.48 |
+| 128 | spread | 13,603.16 | 5,024.01 | 4,538.13 | 10,112.87 / 47,408.88 / 95,697.61 | 157.96 / 1,198.94 / 3,216.87 |
+
+At 128 spread clients the paired replay reduced GET p50 from 10.11 ms
+to 0.158 ms and p99 from 95.70 ms to 3.22 ms. Replay throughput fell from
+5,024 to 4,538 operations/s. The sustained mixed workload below improved
+from 3,356 to 3,875 operations/s at that placement. The all-read, indexed
+and transaction-only profiles lost throughput there. A single global
+speed-up would misrepresent these results.
+
+At 128 clients, the baseline instrumented replay attributes most GET
+latency to slot wait. The baseline GET averages were 6,540.64 µs in the
+slot queue and 16.59 µs in execution. SET spent 7,650.98 µs in the queue
+and 1,316.31 µs in group sync for the operations that synced. GET account
+resolution averaged 57.08 µs and registry acquisition averaged 13.15 µs.
+These are wall-clock means under load. They include scheduling delays.
+The frame-read timer includes time waiting for the next client frame and
+cannot be added to the request latency. Stage times overlap where execution
+includes group sync or group sync includes disk time.
+
+| Operation | Stage | Baseline samples | Baseline mean (µs) | Optimized samples | Optimized mean (µs) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| auth | authentication | 274 | 21,290.32 | 274 | 21,924.51 |
+| auth | frame_read | 274 | 1,350.37 | 274 | 1,278.42 |
+| auth | frame_write | 274 | 407.87 | 274 | 138.50 |
+| auth | layout | 274 | 0.23 | 274 | 0.27 |
+| auth | queue | 274 | 126,731.94 | 274 | 341,365.97 |
+| exec | account | 6451 | 49.24 | 6454 | 76.73 |
+| exec | collection | 6145 | 0.67 | 6146 | 0.53 |
+| exec | decode | 6451 | 4.34 | 6454 | 2.98 |
+| exec | disk | — | — | 841 | 991.54 |
+| exec | execute | 6145 | 477.89 | 6146 | 707.01 |
+| exec | frame_read | 6451 | 231.02 | 6454 | 298.44 |
+| exec | frame_write | 6451 | 28.76 | 6454 | 33.18 |
+| exec | layout | 6451 | 0.17 | 6454 | 0.55 |
+| exec | permission | 6145 | 12.07 | 6146 | 21.47 |
+| exec | queue | 6451 | 9,356.57 | 6454 | 14,004.92 |
+| exec | registry | 6145 | 2.25 | 6146 | 2.19 |
+| exec | sync | 2048 | 1,329.97 | 2048 | 2,004.45 |
+| get | account | 2176 | 57.08 | 2304 | 74.58 |
+| get | collection | 2176 | 0.81 | 2304 | 0.98 |
+| get | decode | — | — | 2304 | 0.58 |
+| get | encode | 2176 | 0.78 | 2304 | 0.48 |
+| get | execute | 2176 | 16.59 | 2304 | 18.93 |
+| get | frame_read | 2176 | 13,780.56 | 2304 | 45,767.71 |
+| get | frame_write | 2176 | 25.31 | 2304 | 25.18 |
+| get | layout | 2176 | 3.28 | 2304 | 13.08 |
+| get | permission | 2176 | 14.23 | 2304 | 19.46 |
+| get | queue | 2176 | 6,540.64 | 2304 | 221.16 |
+| get | registry | 2176 | 13.15 | 2304 | 10.54 |
+| set | account | 4112 | 46.09 | 4112 | 65.68 |
+| set | collection | 4112 | 1.22 | 4112 | 1.05 |
+| set | decode | 4096 | 1.58 | 4096 | 1.29 |
+| set | disk | — | — | 846 | 969.64 |
+| set | execute | 4096 | 676.28 | 4096 | 949.94 |
+| set | frame_read | 4112 | 110.49 | 4112 | 160.32 |
+| set | frame_write | 4112 | 28.04 | 4112 | 30.50 |
+| set | layout | 4112 | 0.12 | 4112 | 0.52 |
+| set | permission | 4112 | 13.23 | 4112 | 14.24 |
+| set | queue | 4112 | 7,650.98 | 4112 | 16,314.84 |
+| set | registry | 4096 | 2.78 | 4096 | 4.94 |
+| set | sync | 2048 | 1,316.31 | 2048 | 1,856.82 |
+
+#### Slot sweep
+
+Each row uses the original 128-client spread workload with the indicated
+`server.threads`. The baseline shares the slots. This branch applies the
+same setting independently to reads and data work and reserves control and
+authentication admission. This table measures the routes as implemented,
+including those capacity differences.
+
+| Slots | Shared-slot ops/s | FIFO lanes ops/s | Shared-slot GET p50/p95/p99 (µs) | FIFO lanes GET p50/p95/p99 (µs) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 705.50 | 613.06 | 83,040.24 / 347,851.76 / 619,689.45 | 119.28 / 11,813.89 / 12,993.86 |
+| 4 | 3,631.45 | 1,850.01 | 13,037.62 / 63,911.92 / 94,028.09 | 162.22 / 1,797.81 / 8,211.94 |
+| 8 | 8,396.95 | 2,838.22 | 6,736.28 / 27,010.30 / 38,961.96 | 213.32 / 26,916.92 / 28,106.66 |
+| 16 | 11,506.32 | 7,408.47 | 4,711.91 / 18,240.02 / 26,833.42 | 264.47 / 5,107.19 / 8,304.55 |
+| 32 | 14,791.80 | 9,784.99 | 3,042.17 / 12,226.47 / 18,661.97 | 284.28 / 3,586.34 / 11,027.89 |
+| 64 | 12,625.73 | 12,489.39 | 3,164.57 / 14,671.68 / 20,130.73 | 983.53 / 8,270.36 / 15,403.44 |
+
+#### Sustained profiles and TLS
+
+Each store contains 512 seeded 256-byte keys plus an indexed document.
+Clients warm up for 150 ms, then synchronize and measure for 1 second.
+Each row summarizes two independent scratch-home runs. Values are the
+median of the two run-level measurements. Percentiles are summarized by
+run and do not pool individual samples. The benchmark reports counts of
+completed operations and stopped workers. A failed write is counted and
+is never retried by the harness. CPU means Linux process user and system
+time, for both server and clients, divided by wall time. RSS and open
+descriptors are sampled after warmup and before load starts. The TLS cases
+pin the localhost server certificate. There was no remote WAN test. The
+existing 128-socket ceiling excluded 256-client runs.
+
+Use `KIVADB_BENCH_PROFILE=mixed KIVADB_BENCH_MS=1000` with
+`cargo run --release --example hierarchy_tcp_bench -- <new-home> 1 8 32 128`.
+Other profiles are `read`, `write`, `95read`, `50read`, `index` and `txn`.
+`KIVADB_BENCH_TLS=1` enables loopback TLS for profiled runs.
+`KIVADB_BENCH_SLOTS` overrides the slot count for a new benchmark home.
+`KIVADB_BENCH_NATIVE_METRICS=1` enables stage probes.
+
+| Clients | Benchmark | Placement | Ops/s shared → FIFO lanes | CPU cores shared → FIFO lanes | RSS KiB shared → FIFO lanes | FDs shared → FIFO lanes | Error rate shared → FIFO lanes (%) |
+| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 128 | read | concentrated | 21,490.26 → 14,923.67 | 2.02 → 1.47 | 19,472.00 → 20,010.00 | 271.00 → 271.00 | 0.00 → 0.00 |
+| 128 | read | spread | 23,110.34 → 16,887.84 | 2.05 → 1.65 | 19,802.00 → 20,282.00 | 277.00 → 277.00 | 0.00 → 0.00 |
+| 128 | write | concentrated | 1,592.29 → 2,563.01 | 0.41 → 0.55 | 18,912.00 → 18,206.00 | 272.00 → 272.00 | 0.00 → 0.00 |
+| 128 | write | spread | 1,602.20 → 2,560.42 | 0.48 → 0.51 | 19,088.00 → 18,412.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 128 | 95read | concentrated | 15,043.26 → 18,576.22 | 1.52 → 1.93 | 20,848.00 → 21,630.00 | 272.00 → 272.00 | 0.00 → 0.00 |
+| 128 | 95read | spread | 14,563.22 → 15,022.42 | 1.65 → 1.75 | 20,894.00 → 22,010.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 128 | 50read | concentrated | 1,903.49 → 5,516.33 | 0.51 → 0.70 | 19,950.00 → 19,050.00 | 272.00 → 272.00 | 0.00 → 0.00 |
+| 128 | 50read | spread | 1,595.14 → 5,802.61 | 0.59 → 0.84 | 20,274.00 → 19,054.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 128 | index | concentrated | 16,022.15 → 16,553.85 | 1.81 → 1.85 | 19,420.00 → 19,384.00 | 271.00 → 271.00 | 0.00 → 0.00 |
+| 128 | index | spread | 18,461.82 → 16,421.31 | 2.02 → 1.81 | 19,548.00 → 19,664.00 | 277.00 → 277.00 | 0.00 → 0.00 |
+| 128 | txn | concentrated | 1,024.69 → 1,128.22 | 0.59 → 0.51 | 18,312.00 → 17,900.00 | 272.00 → 272.00 | 0.00 → 0.00 |
+| 128 | txn | spread | 1,611.72 → 1,393.66 | 0.94 → 0.69 | 18,678.00 → 18,398.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 1 | mixed | concentrated | 1,192.83 → 397.78 | 0.21 → 0.08 | 15,156.00 → 15,754.00 | 18.00 → 18.00 | 0.00 → 0.00 |
+| 1 | mixed | spread | 1,614.21 → 1,136.23 | 0.20 → 0.19 | 15,164.00 → 15,770.00 | 18.00 → 18.00 | 0.00 → 0.00 |
+| 8 | mixed | concentrated | 5,134.05 → 4,265.48 | 0.83 → 0.55 | 15,300.00 → 15,906.00 | 32.00 → 32.00 | 0.00 → 0.00 |
+| 8 | mixed | spread | 4,925.61 → 1,822.39 | 0.85 → 0.42 | 15,426.00 → 15,740.00 | 41.00 → 41.00 | 0.00 → 0.00 |
+| 32 | mixed | concentrated | 4,704.09 → 851.82 | 0.92 → 0.25 | 16,322.00 → 16,588.00 | 89.00 → 89.00 | 0.00 → 0.00 |
+| 32 | mixed | spread | 4,675.74 → 2,385.71 | 1.06 → 0.66 | 16,194.00 → 16,452.00 | 89.00 → 89.00 | 0.00 → 0.00 |
+| 128 | mixed | concentrated | 4,177.66 → 4,795.74 | 1.04 → 0.93 | 19,348.00 → 19,612.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 128 | mixed | spread | 3,356.39 → 3,874.74 | 1.12 → 0.81 | 19,706.00 → 20,398.00 | 281.00 → 281.00 | 0.00 → 0.00 |
+| 8 | tls | concentrated | 2,499.79 → 4,513.84 | 0.78 → 1.25 | 19,324.00 → 19,802.00 | 112.00 → 112.00 | 0.00 → 0.00 |
+| 8 | tls | spread | 2,780.58 → 3,438.86 | 0.90 → 1.22 | 18,768.00 → 18,944.00 | 121.00 → 121.00 | 0.00 → 0.00 |
+| 32 | tls | concentrated | 3,115.57 → 5,740.76 | 1.12 → 1.80 | 20,834.00 → 21,040.00 | 409.00 → 409.00 | 0.00 → 0.00 |
+| 32 | tls | spread | 3,072.43 → 4,575.24 | 1.17 → 1.82 | 21,062.00 → 21,090.00 | 409.00 → 409.00 | 0.00 → 0.00 |
+
+The following latency comparison includes all selected profile operations.
+Units are microseconds, shown as p50/p95/p99.
+
+| Clients | Benchmark | Placement | Operation | Shared slots | FIFO lanes |
+| ---: | --- | --- | --- | ---: | ---: |
+| 128 | read | concentrated | get | 2,868.19 / 24,170.68 / 38,014.44 | 4,851.12 / 28,658.85 / 39,253.84 |
+| 128 | read | spread | get | 2,682.07 / 20,551.62 / 34,245.20 | 4,472.46 / 21,060.71 / 57,699.18 |
+| 128 | write | concentrated | set | 77,399.71 / 212,090.14 / 310,263.58 | 67,553.24 / 104,224.41 / 113,555.28 |
+| 128 | write | spread | set | 78,505.92 / 207,847.25 / 297,823.79 | 71,979.65 / 105,075.10 / 111,487.34 |
+| 128 | 95read | concentrated | get | 3,612.28 / 33,370.11 / 51,635.04 | 4,115.77 / 16,669.58 / 28,281.74 |
+| 128 | 95read | concentrated | set | 9,718.58 / 42,966.42 / 64,720.93 | 37,801.68 / 54,710.11 / 60,800.12 |
+| 128 | 95read | spread | get | 3,863.01 / 33,049.06 / 51,123.83 | 4,371.07 / 19,312.38 / 31,791.25 |
+| 128 | 95read | spread | set | 9,221.11 / 40,302.12 / 56,917.78 | 42,433.47 / 69,685.14 / 91,482.09 |
+| 128 | 50read | concentrated | get | 39,493.12 / 187,588.66 / 286,591.92 | 231.20 / 2,485.02 / 4,908.44 |
+| 128 | 50read | concentrated | set | 54,630.26 / 204,089.44 / 313,858.32 | 78,908.89 / 110,752.78 / 116,343.35 |
+| 128 | 50read | spread | get | 55,333.79 / 262,268.57 / 413,723.92 | 191.87 / 1,967.50 / 3,614.98 |
+| 128 | 50read | spread | set | 74,341.18 / 278,742.69 / 431,054.25 | 63,857.09 / 81,073.96 / 87,601.26 |
+| 128 | index | concentrated | indexed | 3,458.37 / 29,894.60 / 48,662.46 | 5,486.88 / 20,826.48 / 26,263.49 |
+| 128 | index | spread | indexed | 3,023.11 / 28,853.24 / 46,993.84 | 5,459.24 / 21,684.77 / 31,657.25 |
+| 128 | txn | concentrated | transaction | 101,791.16 / 255,198.99 / 348,698.84 | 137,153.03 / 230,547.53 / 236,276.75 |
+| 128 | txn | spread | transaction | 66,649.92 / 184,819.80 / 254,190.91 | 86,234.23 / 233,583.57 / 247,763.10 |
+| 1 | mixed | concentrated | auth | 12,421.16 / 12,421.16 / 12,421.16 | 11,944.53 / 11,944.53 / 11,944.53 |
+| 1 | mixed | concentrated | selection | 2,639.58 / 2,639.58 / 2,639.58 | 1,814.14 / 1,814.14 / 1,814.14 |
+| 1 | mixed | concentrated | get | 100.93 / 296.24 / 2,557.36 | 73.03 / 3,047.06 / 6,951.49 |
+| 1 | mixed | concentrated | set | 2,135.74 / 4,874.66 / 16,541.07 | 2,800.22 / 17,753.99 / 26,285.01 |
+| 1 | mixed | concentrated | indexed | 120.44 / 382.35 / 12,440.32 | 103.29 / 1,979.93 / 5,954.46 |
+| 1 | mixed | concentrated | transaction | 2,285.84 / 13,633.70 / 19,704.75 | 3,355.20 / 16,694.15 / 36,863.72 |
+| 1 | mixed | spread | auth | 14,198.42 / 14,198.42 / 14,198.42 | 17,501.14 / 17,501.14 / 17,501.14 |
+| 1 | mixed | spread | selection | 4,177.82 / 4,177.82 / 4,177.82 | 135.82 / 135.82 / 135.82 |
+| 1 | mixed | spread | get | 92.20 / 240.35 / 417.65 | 75.53 / 1,270.18 / 4,594.35 |
+| 1 | mixed | spread | set | 2,119.23 / 10,136.60 / 14,100.13 | 908.12 / 6,597.31 / 14,939.05 |
+| 1 | mixed | spread | indexed | 116.75 / 272.59 / 2,666.82 | 97.78 / 1,308.93 / 2,572.57 |
+| 1 | mixed | spread | transaction | 2,176.98 / 5,992.51 / 14,528.31 | 889.71 / 12,197.16 / 16,962.74 |
+| 8 | mixed | concentrated | auth | 22,591.84 / 49,052.33 / 49,052.33 | 54,620.84 / 87,245.36 / 87,245.36 |
+| 8 | mixed | concentrated | selection | 823.72 / 18,484.61 / 18,484.61 | 960.16 / 7,170.45 / 7,170.45 |
+| 8 | mixed | concentrated | get | 167.77 / 2,062.27 / 5,261.25 | 102.78 / 2,299.41 / 13,982.05 |
+| 8 | mixed | concentrated | set | 4,094.52 / 16,471.24 / 21,039.19 | 3,374.18 / 28,800.74 / 47,845.51 |
+| 8 | mixed | concentrated | indexed | 199.81 / 3,205.57 / 12,078.70 | 149.59 / 2,457.39 / 10,962.31 |
+| 8 | mixed | concentrated | transaction | 4,647.44 / 16,731.17 / 23,008.60 | 3,816.68 / 38,936.67 / 52,863.28 |
+| 8 | mixed | spread | auth | 22,318.65 / 29,936.96 / 29,936.96 | 78,324.76 / 96,757.73 / 96,757.73 |
+| 8 | mixed | spread | selection | 1,559.70 / 11,018.21 / 11,018.21 | 2,068.59 / 6,914.65 / 6,914.65 |
+| 8 | mixed | spread | get | 147.09 / 1,883.02 / 3,117.89 | 151.47 / 2,642.41 / 5,267.93 |
+| 8 | mixed | spread | set | 2,639.45 / 10,321.47 / 19,213.35 | 3,651.22 / 24,892.27 / 66,765.13 |
+| 8 | mixed | spread | indexed | 175.37 / 1,839.44 / 3,199.15 | 193.00 / 3,262.81 / 18,164.23 |
+| 8 | mixed | spread | transaction | 3,154.53 / 14,048.10 / 20,842.36 | 4,595.84 / 43,135.92 / 116,055.26 |
+| 32 | mixed | concentrated | auth | 77,779.32 / 139,620.20 / 143,177.51 | 160,656.40 / 275,349.34 / 297,875.20 |
+| 32 | mixed | concentrated | selection | 13,638.21 / 84,786.55 / 99,321.43 | 1,555.54 / 26,787.38 / 31,191.91 |
+| 32 | mixed | concentrated | get | 1,613.60 / 17,384.97 / 26,419.49 | 227.82 / 6,373.56 / 22,152.76 |
+| 32 | mixed | concentrated | set | 7,060.42 / 24,438.07 / 37,678.67 | 29,040.79 / 112,115.33 / 159,539.64 |
+| 32 | mixed | concentrated | indexed | 1,750.23 / 17,437.53 / 27,032.63 | 10,656.63 / 90,198.17 / 136,366.05 |
+| 32 | mixed | concentrated | transaction | 17,420.11 / 42,435.67 / 52,366.84 | 95,748.21 / 205,479.42 / 263,636.72 |
+| 32 | mixed | spread | auth | 62,179.06 / 117,481.26 / 136,367.94 | 162,475.94 / 289,758.58 / 291,520.45 |
+| 32 | mixed | spread | selection | 17,739.19 / 63,035.83 / 73,326.05 | 1,166.26 / 10,464.34 / 15,346.51 |
+| 32 | mixed | spread | get | 2,477.89 / 16,579.44 / 25,512.67 | 203.00 / 2,581.67 / 10,973.84 |
+| 32 | mixed | spread | set | 6,579.97 / 23,461.16 / 31,714.10 | 9,773.92 / 46,256.68 / 64,382.93 |
+| 32 | mixed | spread | indexed | 2,392.82 / 16,722.52 / 27,202.40 | 5,230.47 / 32,508.47 / 46,889.62 |
+| 32 | mixed | spread | transaction | 14,954.60 / 38,190.12 / 52,041.21 | 21,024.12 / 74,519.20 / 98,460.33 |
+| 128 | mixed | concentrated | auth | 243,507.01 / 589,652.77 / 629,658.74 | 544,309.84 / 1,060,673.19 / 1,079,990.41 |
+| 128 | mixed | concentrated | selection | 93,570.11 / 361,729.09 / 524,088.42 | 972.29 / 10,537.12 / 39,664.15 |
+| 128 | mixed | concentrated | get | 15,299.23 / 84,076.56 / 132,061.55 | 182.17 / 1,315.64 / 3,058.53 |
+| 128 | mixed | concentrated | set | 23,492.66 / 83,647.02 / 135,594.71 | 27,906.92 / 53,700.81 / 59,347.32 |
+| 128 | mixed | concentrated | indexed | 14,757.35 / 79,172.88 / 126,934.09 | 20,952.87 / 47,079.86 / 54,900.65 |
+| 128 | mixed | concentrated | transaction | 72,395.98 / 201,263.13 / 262,468.03 | 59,994.44 / 101,260.14 / 118,020.72 |
+| 128 | mixed | spread | auth | 261,373.75 / 566,782.97 / 610,253.78 | 548,957.25 / 1,044,852.25 / 1,075,115.54 |
+| 128 | mixed | spread | selection | 84,511.71 / 362,818.09 / 414,563.93 | 1,325.04 / 15,288.08 / 19,482.74 |
+| 128 | mixed | spread | get | 14,596.04 / 98,313.98 / 156,424.68 | 167.09 / 1,391.66 / 3,843.30 |
+| 128 | mixed | spread | set | 20,594.09 / 92,074.35 / 146,922.89 | 33,997.22 / 56,941.42 / 131,538.33 |
+| 128 | mixed | spread | indexed | 14,990.02 / 90,791.21 / 140,428.29 | 22,996.50 / 45,951.49 / 96,782.24 |
+| 128 | mixed | spread | transaction | 71,261.24 / 200,308.88 / 255,805.54 | 61,687.58 / 150,919.83 / 175,984.89 |
+| 8 | tls | concentrated | auth | 22,954.15 / 36,230.87 / 36,230.87 | 26,920.89 / 40,259.26 / 40,259.26 |
+| 8 | tls | concentrated | selection | 811.32 / 8,407.76 / 8,407.76 | 342.17 / 8,245.66 / 8,245.66 |
+| 8 | tls | concentrated | get | 430.24 / 2,787.07 / 11,807.02 | 318.88 / 1,902.95 / 3,262.41 |
+| 8 | tls | concentrated | set | 3,608.17 / 15,033.05 / 26,686.79 | 2,814.45 / 14,925.44 / 17,839.37 |
+| 8 | tls | concentrated | indexed | 449.32 / 2,867.43 / 14,191.76 | 346.23 / 1,988.19 / 3,537.95 |
+| 8 | tls | concentrated | transaction | 4,600.61 / 16,447.73 / 27,261.10 | 3,510.39 / 14,308.66 / 19,101.38 |
+| 8 | tls | spread | auth | 38,403.45 / 71,661.89 / 71,661.89 | 39,895.50 / 51,037.85 / 51,037.85 |
+| 8 | tls | spread | selection | 2,350.44 / 23,775.77 / 23,775.77 | 1,690.65 / 18,837.10 / 18,837.10 |
+| 8 | tls | spread | get | 473.75 / 3,083.07 / 10,248.10 | 416.94 / 2,401.04 / 9,803.70 |
+| 8 | tls | spread | set | 2,880.03 / 10,367.74 / 22,840.74 | 2,685.10 / 6,910.89 / 17,453.65 |
+| 8 | tls | spread | indexed | 504.07 / 3,540.44 / 17,034.28 | 455.34 / 2,687.60 / 11,496.91 |
+| 8 | tls | spread | transaction | 4,398.48 / 16,533.47 / 29,128.63 | 3,886.98 / 14,443.15 / 22,915.23 |
+| 32 | tls | concentrated | auth | 78,038.14 / 119,224.20 / 128,543.80 | 71,400.07 / 131,185.37 / 133,622.57 |
+| 32 | tls | concentrated | selection | 18,462.30 / 68,953.27 / 72,940.07 | 1,416.55 / 12,187.16 / 15,111.33 |
+| 32 | tls | concentrated | get | 3,878.64 / 21,540.23 / 31,170.20 | 413.65 / 1,431.59 / 7,350.74 |
+| 32 | tls | concentrated | set | 9,613.24 / 29,452.51 / 38,717.88 | 5,006.01 / 12,772.31 / 17,514.10 |
+| 32 | tls | concentrated | indexed | 4,277.23 / 19,995.20 / 31,018.08 | 2,958.64 / 5,910.73 / 14,906.48 |
+| 32 | tls | concentrated | transaction | 23,486.47 / 50,663.16 / 61,049.29 | 11,130.22 / 21,459.35 / 25,252.77 |
+| 32 | tls | spread | auth | 62,632.40 / 123,805.99 / 152,917.27 | 107,966.41 / 187,420.44 / 205,350.71 |
+| 32 | tls | spread | selection | 22,646.40 / 81,923.35 / 88,022.76 | 1,824.26 / 10,978.26 / 21,763.53 |
+| 32 | tls | spread | get | 3,883.38 / 18,837.49 / 29,309.33 | 548.33 / 2,519.91 / 8,804.92 |
+| 32 | tls | spread | set | 8,102.47 / 27,776.58 / 38,370.21 | 5,986.54 / 17,472.38 / 25,004.13 |
+| 32 | tls | spread | indexed | 3,731.03 / 20,802.50 / 28,722.39 | 3,608.80 / 8,422.62 / 19,593.79 |
+| 32 | tls | spread | transaction | 19,229.85 / 43,833.64 / 55,413.56 | 13,049.27 / 28,621.37 / 48,355.27 |
+
+#### Revocation and compaction
+
+The 128-client mixed profiles also time 16 grant revocation replies plus
+one compaction with a concurrent reader in the same collection and one
+with a reader in another workspace. These are post-load maintenance
+tests. A median can conceal the single stall while the layout barrier is
+held. The isolated compaction command still takes the instance barrier.
+
+| Metric | Shared-slot p50/p95/p99 (µs) | FIFO lanes p50/p95/p99 (µs) |
+| --- | ---: | ---: |
+| revoke | 726.98 / 1,399.38 / 1,399.38 | 1,378.64 / 4,703.84 / 4,703.84 |
+| compact-same | 34,283.74 / 34,283.74 / 34,283.74 | 24,948.57 / 24,948.57 / 24,948.57 |
+| get-during-compact-same | 35.33 / 396.69 / 1,229.94 | 55.80 / 155.25 / 3,544.54 |
+| compact-other | 6,460.60 / 6,460.60 / 6,460.60 | 35,660.96 / 35,660.96 / 35,660.96 |
+| get-during-compact-other | 35.40 / 144.15 / 265.09 | 56.62 / 203.57 / 4,168.41 |
+
+The local Release example rerun checks the shared routing path without TCP.
+
+| Collections | GET p50/p95/p99 (µs) | Startup and shutdown p50/p95/p99 (µs) |
+| ---: | ---: | ---: |
+| 1 | 7.89 / 8.76 / 50.66 | 3,391.36 / 4,342.77 / 4,342.77 |
+| 32 | 5.61 / 8.03 / 19.60 | 3,845.47 / 4,640.84 / 4,640.84 |
+| 128 | 5.58 / 8.21 / 192.18 | 7,152.99 / 9,060.31 / 9,060.31 |
+| 1,000 | 5.71 / 6.16 / 34.38 | 59,774.71 / 80,152.13 / 80,152.13 |

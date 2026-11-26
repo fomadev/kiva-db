@@ -2777,6 +2777,7 @@ impl Engine {
     }
 
     fn sync_to(&self, (file_id, end): (u64, u64)) -> Result<()> {
+        let _sync = crate::native_timing::span(crate::native_timing::Stage::Sync);
         let covered = |d: &Durable| d.file_id == file_id && d.len >= end;
         let mut d = self.durable.lock().unwrap_or_else(|e| e.into_inner());
         loop {
@@ -2837,7 +2838,10 @@ impl Engine {
             };
             (file, inner.file_len)
         };
-        file.sync_data()?;
+        {
+            let _disk = crate::native_timing::span(crate::native_timing::Stage::Disk);
+            file.sync_data()?;
+        }
         self.disk_syncs.fetch_add(1, Ordering::Relaxed);
         Ok(Some(len))
     }

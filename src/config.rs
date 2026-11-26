@@ -41,6 +41,8 @@ pub const KNOWN: &[(&str, &str, &str, &str)] = &[
         "How the shell writes and reads datetimes: iso (2026-10-27 14:30:00 +01:00) or a format such as DD/MM/YYYY HH:mm",
     ),
     ("server", "threads", "8", "Commands executed in parallel"),
+    ("server", "native_queue", "128", "Waiting requests per hierarchical TCP admission lane"),
+    ("server", "native_metrics", "false", "Collect aggregate hierarchy TCP timings on restart"),
     ("server", "max_clients", "1000", "Maximum simultaneous connections"),
     ("http", "enabled", "true", "Expose the REST API when serving"),
     ("http", "stream", "true", "Offer key changes as Server-Sent Events on /v1/stream"),
@@ -125,7 +127,7 @@ fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
     let int_in = |lo: u64, hi: u64| value.parse::<u64>().map(|n| n >= lo && n <= hi).unwrap_or(false);
     let ok = match key {
         "auto_compact" | "sync_writes" | "auth_required" | "enabled" | "cors" | "cache_values" | "stream"
-        | "required" | "master_tls" | "auto" => is_bool(),
+        | "required" | "master_tls" | "native_metrics" | "auto" => is_bool(),
         "heartbeat_ms" => int_in(50, 60_000),
         "cache.enabled" => is_bool(),
         "cache.threshold" => value.parse::<f64>().is_ok_and(|t| t > 0.0 && t <= 1.0),
@@ -143,6 +145,7 @@ fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         "compact_threshold" => int_in(1, 99),
         "compression" => matches!(value, "none" | "lz4" | "zlib"),
         "port" | "master_port" => int_in(1, 65535),
+        "native_queue" => int_in(0, 128),
         "threads" | "managed_open_engines" => int_in(1, 1024),
         "max_clients" => int_in(1, 1_000_000),
         "rate_limit" | "min_slaves_ack" => int_in(0, 1_000_000),
