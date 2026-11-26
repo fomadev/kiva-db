@@ -468,6 +468,7 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
     if cmd == CMD_EXEC {
         let line = native_text(payload, 65_536)?;
         let out = sess.execute(line);
+        let _encode = span(Stage::Encode);
         let status = match out.action {
             Action::Exit => ST_BYE,
             _ if out.has_err() => ST_ERR,
@@ -604,7 +605,21 @@ mod native_tests {
         assert_eq!(reader.get("sample").unwrap(), Some(Value::Num("42".into())));
         assert!(reader.exec("hierarchy timings").is_err());
         assert!(admin.exec("rollback").is_ok());
-        admin.exec("hierarchy revoke reader read instance").unwrap();
+        // Model an operation already admitted by the shared guard. The
+        // remote revoke takes the turnstile before waiting for that operation.
+        let admitted = inst.managed_layout_lock.read().unwrap();
+        std::thread::scope(|scope| {
+            let revoke = scope.spawn(|| admin.exec("hierarchy revoke reader read instance"));
+            let until = Instant::now() + Duration::from_secs(5);
+            while inst.managed_layout_turnstile.try_lock().is_ok() {
+                assert!(Instant::now() < until, "revocation did not reach the turnstile");
+                std::thread::yield_now();
+            }
+            let late_read = scope.spawn(|| reader.get("sample"));
+            drop(admitted);
+            revoke.join().unwrap().unwrap();
+            assert!(late_read.join().unwrap().is_err());
+        });
         assert!(reader.get("sample").is_err());
         drop(held);
         assert_eq!(admin.get("refused").unwrap(), None);
