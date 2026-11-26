@@ -283,6 +283,10 @@ pub struct Instance {
     pub home: PathBuf,
     staged_migration: bool,
     pub(crate) managed_layout_lock: Mutex<()>,
+    pub(crate) managed_engines: Mutex<HashMap<crate::catalog::CollectionId, Arc<Engine>>>,
+    pub(crate) managed_catalog: Mutex<Option<Catalog>>,
+    pub(crate) managed_policy: Mutex<crate::hierarchy_auth::CachedPolicy>,
+
     pub config: RwLock<Config>,
     /// Hidden database holding users, stored scripts and triggers.
     pub system: Arc<Engine>,
@@ -367,6 +371,10 @@ impl Instance {
             home: home.to_path_buf(),
             staged_migration,
             managed_layout_lock: Mutex::new(()),
+            managed_engines: Mutex::default(),
+            managed_catalog: Mutex::default(),
+            managed_policy: Mutex::default(),
+
             config: RwLock::new(config),
             system,
             nowhere,
@@ -1041,6 +1049,13 @@ impl Instance {
         self.repl.stop_replica();
         for (_, e) in self.open_engines() {
             e.close();
+        }
+        {
+            let _layout = self.managed_layout_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let mut engines = self.managed_engines.lock().unwrap_or_else(|e| e.into_inner());
+            for (_, engine) in engines.drain() {
+                engine.close();
+            }
         }
         self.system.close();
         let _ = fs::remove_file(self.home.join("instance.port"));

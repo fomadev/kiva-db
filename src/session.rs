@@ -72,6 +72,10 @@ pub struct Session {
     pub project: Option<String>,
     pub txn: Option<Txn>,
     pub(crate) hierarchy: Option<crate::hierarchy::Context>,
+    pub(crate) hierarchy_data: bool,
+    pub(crate) managed_dispatch: Option<(bool, bool)>,
+    pub(crate) managed_txn_engine: Option<(crate::catalog::CollectionId, Arc<Engine>)>,
+
     pub(crate) hierarchy_subject: Option<String>,
     /// True for the local shell; remote sessions cannot log in with an empty password.
     pub local: bool,
@@ -103,6 +107,9 @@ impl Session {
             project: None,
             txn: None,
             hierarchy: None,
+            hierarchy_data: false,
+            managed_dispatch: None,
+            managed_txn_engine: None,
             hierarchy_subject: None,
             local,
             events,
@@ -212,6 +219,7 @@ impl Session {
             self.rollback();
         }
         self.hierarchy = None;
+        self.hierarchy_data = false;
         self.hierarchy_subject = Some(user.hierarchy_subject.clone());
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
@@ -342,6 +350,14 @@ impl Session {
     }
 
     pub fn check(&self, need: Need) -> Result<()> {
+        if let Some((write, manage)) = self.managed_dispatch {
+            return match need {
+                Need::None | Need::Login | Need::Read => Ok(()),
+                Need::Write if write => Ok(()),
+                Need::Owner if write && manage => Ok(()),
+                _ => Err(KivaError::Denied("insufficient permission on managed collection".into())),
+            };
+        }
         if self.hierarchy.is_some() && matches!(need, Need::Read | Need::Write | Need::Owner | Need::Admin) {
             return Err(KivaError::Denied(
                 "data operations and server administration are disabled in hierarchy preview".into(),
@@ -607,6 +623,10 @@ impl Session {
 
     /// Commits the open transaction. Returns the number of keys written.
     pub fn commit(&mut self) -> Result<usize> {
+        if self.managed_txn_engine.is_some() && self.managed_dispatch.is_none() {
+            self.rollback();
+            return Err(KivaError::Denied("managed commits require an authorized local command".into()));
+        }
         let txn = self.txn.take().ok_or_else(|| KivaError::Invalid("no active transaction".into()))?;
         let n = txn.writes.len();
         let ops: Vec<BatchOp> = txn
@@ -632,6 +652,7 @@ impl Session {
             Err(e) => Err(e),
         };
         self.engine.txn_end();
+        self.managed_txn_engine = None;
         res?;
         self.wrote = n > 0;
         // Committed, the client not answered yet.
@@ -643,7 +664,11 @@ impl Session {
     pub fn rollback(&mut self) -> bool {
         match self.txn.take() {
             Some(_) => {
-                self.engine.txn_end();
+                if let Some((_, engine)) = self.managed_txn_engine.take() {
+                    engine.txn_end();
+                } else {
+                    self.engine.txn_end();
+                }
                 true
             }
             None => false,
@@ -681,6 +706,9 @@ impl Session {
     /// Watches `keys` of the current workspace (Redis `WATCH`); the next
     /// commit fails as a conflict if one of them changes meanwhile.
     pub fn watch(&mut self, keys: &[String]) {
+        if self.hierarchy.is_some() {
+            return;
+        }
         match &mut self.watch {
             Some((e, w)) if Arc::ptr_eq(e, &self.engine) => {
                 // Already watching here: the engine holds one watch already.

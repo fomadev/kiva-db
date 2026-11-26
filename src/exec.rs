@@ -1425,11 +1425,25 @@ impl Session {
         let cmd = if tokens[0].is_bare() { tokens[0].text.to_ascii_lowercase() } else { String::new() };
 
         self.wrote = false;
-        let res = if cmd == "hierarchy"
+        let managed_need = self.hierarchy_data.then(|| managed_command(&cmd, &tokens[1..])).flatten();
+        let res = if let Some(need) = managed_need {
+            self.with_managed_engine(&cmd, need, |session| session.dispatch(&cmd, &tokens, line, &mut out))
+        } else if cmd == "hierarchy"
             || (self.hierarchy.is_some() && !matches!(cmd.as_str(), "quit" | "exit" | "auth" | "login"))
         {
             self.execute_hierarchy(&cmd, &tokens[1..], &mut out)
         } else {
+            // Serialize local account mutations with the managed data
+            // authorization check and commit.
+            let changes_account = matches!(cmd.as_str(), "grant" | "revoke")
+                || (matches!(cmd.as_str(), "create" | "drop" | "modify")
+                    && tokens.get(1).is_some_and(|token| token.is_kw("user")))
+                || (cmd == "config" && tokens.get(1).is_some_and(|token| token.is_kw("set")));
+            let _account_guard = changes_account.then(|| inst.managed_layout_lock.lock());
+            if _account_guard.as_ref().is_some_and(|guard| guard.is_err()) {
+                out.err("Error: managed authorization lock poisoned.");
+                return out;
+            }
             match self.check(required(&cmd, &tokens)) {
                 Ok(()) => self.dispatch(&cmd, &tokens, line, &mut out),
                 Err(e) => Err(e.to_string()),
@@ -2894,6 +2908,10 @@ impl Session {
         } else {
             out.say(" > Value Cache          : off (values are read from disk)");
         }
+        if self.managed_dispatch.is_some() {
+            out.say(" > Mode                 : local managed data");
+            return Ok(());
+        }
         let repl = &self.inst.repl;
         if repl.is_replica() {
             let l = repl.link();
@@ -2927,6 +2945,31 @@ impl Session {
         out.say(format!("{}\n", "=".repeat(58)));
         Ok(())
     }
+}
+
+/// An allowlist of commands audited for engine-local behavior. No unknown
+/// command or legacy administration command can enter the managed engine.
+fn managed_command(command: &str, args: &[Token]) -> Option<Need> {
+    let sub = |word| args.first().is_some_and(|token| token.is_kw(word));
+    Some(match command {
+        "get" | "has" | "typeof" | "scan" | "keys" | "range" | "count" | "sum" | "avg" | "min" | "max" | "explain"
+        | "indexes" | "stats" => Need::Read,
+        "set" | "update" | "del" | "change" | "bump" | "add" | "begin" | "commit" | "savepoint" => Need::Write,
+        "rollback" if args.is_empty() => Need::None,
+        "rollback" | "transaction" => Need::Write,
+        "json" if ["get", "type", "len", "keys"].into_iter().any(sub) => Need::Read,
+        "json" => Need::Write,
+        "schema" | "schemas" if args.is_empty() || ["list", "show", "check"].into_iter().any(sub) => Need::Read,
+        "schema" | "schemas" if sub("set") || sub("drop") => Need::Owner,
+        "changes" if sub("status") => Need::Read,
+        "changes" if sub("read") && !args.iter().any(|token| token.is_kw("as")) => Need::Read,
+        "changes" if sub("read") => Need::Write,
+        "changes" if ["enable", "disable", "forget"].into_iter().any(sub) => Need::Owner,
+        "create" if ["index", "unique", "vector"].into_iter().any(sub) => Need::Owner,
+        "drop" if ["index", "vector"].into_iter().any(sub) => Need::Owner,
+        "check" if args.is_empty() => Need::Owner,
+        _ => return None,
+    })
 }
 
 /// The privilege a command needs before it is even parsed further.

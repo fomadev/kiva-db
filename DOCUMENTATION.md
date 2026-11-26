@@ -6526,3 +6526,18 @@ a snapshot of the verified backup under the managed paths. The target must
 be outside the source home and not exist. The exported tree is an offline
 artifact and cannot be used as a serving home. See the
 [architecture notes](docs/architecture/WORKSPACE_HIERARCHY.md#physical-layout-export).
+
+
+### Local managed collection data
+
+In an unstaged home, start `kivadb --home <home> --no-listen` and enter
+`hierarchy data`. Use `switch <workspace>`, `use <project>` and
+`use collection <collection>` or select an authorized collection by its full
+name. The shell can then read and write that collection. An administrator can
+assign Read, Write or Manage with `hierarchy grant`. Manage covers collection
+definitions, and data access needs Read or Write. A transaction stays bound to
+its original collection and is discarded if commit authorization fails.
+
+Network access, replication, scripts, compaction and managed backup/restore remain
+unavailable in this mode. See the
+[managed data architecture](docs/architecture/WORKSPACE_HIERARCHY.md#local-managed-data-routing).

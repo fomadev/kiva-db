@@ -4,6 +4,11 @@ Every version of KivaDB, newest first. Version numbers follow [Semantic Versioni
 
 ## [Unreleased]
 
+- Adds the opt-in local `hierarchy data` mode for data and transactions in
+  managed collections. Collection engines follow stable identities and pending
+  transactions recheck current grants at commit. Network and migration cutover
+  remain pending.
+
 - Adds verified offline export of staged collections into the proposed
   physical workspace layout. Exports retain their source backup and cannot be
   opened as serving homes.

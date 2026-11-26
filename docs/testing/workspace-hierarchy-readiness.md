@@ -128,8 +128,7 @@ subsequent integration.
 
 **NOT READY for hierarchical serving.** The authorization model governs
 managed metadata. Staged historical grants are projected onto exact
-collection identities in the read-only view. No hierarchy mode can route
-data requests or operate backups. The architecture document records the
+collection identities in the read-only view. In Phase 5, hierarchy modes could only manage metadata. The architecture document records the
 before/after migration matrix.
 
 | Area | Verification |
@@ -140,3 +139,64 @@ before/after migration matrix.
 | Recovery | Policy persists after restart and crash tests distinguish precommit and committed revocation |
 | Corruption | Unsupported or malformed grant records prevent startup |
 | Remaining | Permanent authorization cutover, data-engine enforcement, backup and all protocol adapters |
+
+## Phase 6 local data routing
+
+**NOT READY for production.** `hierarchy data` enables local collection data
+commands in standard, unstaged homes with listeners disabled.
+
+| Area | Verification |
+| --- | --- |
+| DATA01–DATA09, DATA11 | Collection reads and writes, missing selection, homonymous resources, restart, documents and native dates, index and schema isolation, TTL, vector search, transactions, change journal and integrity checks |
+| DATA12 | Compaction is refused pending crash-safe publication of the replacement store identity |
+| AUTH01–AUTH06, AUTH08 | Read, Write and Manage decisions, qualified selection, revoke during a session and before commit, and fresh resource identities |
+| AUTH07 | Account identity and recreation tests in `hierarchy_grants` |
+| LIFE01–LIFE04 | Rename, retirement, stale selection and empty recreation. Active transactions prevent concurrent topology changes |
+| DATA10, CRASH01–CRASH02 | Encrypted managed writes with implicit and explicit commits. Recovery covers incomplete and complete batch records |
+| CRASH03 | Managed administration recovery suite covers layout and policy changes |
+| CONC01–CONC03 | Concurrent local data calls and grant changes, with completion checks |
+
+The test suite simulates process crashes. Managed backup, restoration,
+replication, doctor, protocol integration, drivers, staged cutover and
+dedicated power-loss validation remain open.
+
+### Release routing measurements
+
+The Release library was exercised through `Session::execute` on Linux in a
+shared overlay filesystem, with 5 visible Intel Xeon Platinum 8573C CPUs.
+Both routes used synchronous writes. The benchmark used an authenticated
+editor, with one legacy instance-wide Write grant or one managed Write grant
+per collection. Each catalog had one project and 1, 32 or 128 collections.
+Only one collection contained the workload, with six keys, one indexed
+document and a 2D vector. File caches were warm, and instance restarts
+reopened the stores. The startup measurement includes `Instance::open`.
+Selection and first GET are timed together to include lazy engine opening
+on either route. Later selections rotate through collection names.
+Concurrent samples use two reader sessions and two writer sessions on the
+same collection with disjoint write keys.
+
+Values are median / p95 in µs. There were 15 starts and first accesses per
+configuration, 100 repetitions per serial measurement and 400 per concurrent
+measurement. The p95 is the nearest-rank percentile.
+
+| Operation | Legacy 1 | Managed 1 | Legacy 32 | Managed 32 | Legacy 128 | Managed 128 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Instance startup | 1,269.6 / 6,470.6 | 1,039.2 / 6,288.8 | 1,046.2 / 19,918.5 | 2,996.1 / 29,416.6 | 1,230.1 / 26,736.6 | 16,450.5 / 39,375.2 |
+| Select + first GET | 261.6 / 4,438.0 | 194.5 / 342.7 | 212.2 / 300.7 | 366.7 / 4,604.1 | 309.5 / 691.2 | 712.5 / 4,945.2 |
+| Select | 8.2 / 9.0 | 8.1 / 9.2 | 4.9 / 5,684.5 | 13.1 / 20.7 | 2,146.3 / 12,501.0 | 22.0 / 72.7 |
+| GET | 3.0 / 3.8 | 9.2 / 10.8 | 2.0 / 2.1 | 12.0 / 12.6 | 3.4 / 3.5 | 18.0 / 32.4 |
+| Indexed query | 7.6 / 8.4 | 13.5 / 44.4 | 4.6 / 5.9 | 16.3 / 17.6 | 7.5 / 8.6 | 23.5 / 51.8 |
+| Vector search | 8.3 / 9.9 | 14.7 / 24.9 | 4.8 / 5.1 | 16.6 / 18.8 | 8.0 / 10.9 | 23.0 / 26.3 |
+| Update | 3,987.9 / 26,720.9 | 2,971.1 / 12,170.4 | 3,118.0 / 7,974.2 | 502.9 / 5,276.2 | 621.0 / 5,980.1 | 3,765.4 / 9,308.0 |
+| Begin + update + commit | 3,849.5 / 15,085.2 | 2,174.3 / 9,636.6 | 3,532.3 / 12,495.6 | 3,715.3 / 13,102.6 | 3,620.8 / 7,361.4 | 3,596.8 / 6,455.1 |
+| Report selected permissions | — | 7.5 / 8.4 | — | 10.1 / 10.8 | — | 16.3 / 33.4 |
+| Concurrent read/write mix | 428.5 / 10,937.6 | 321.7 / 4,906.7 | 148.7 / 3,991.3 | 399.8 / 6,422.2 | 389.4 / 5,854.8 | 428.9 / 8,312.2 |
+
+At 32 collections, process RSS was 8,264 KiB on the legacy route and 8,304
+KiB on the managed route in a single process. The permissions row includes
+command handling and current account, catalog and versioned policy checks.
+The legacy route has no equivalent permission-report command. The high
+variation in synchronous write times makes this run unsuitable for claiming
+a throughput improvement. Managed operations serialize on the layout lock.
+These measurements cover a small local workload and exclude network,
+large data sets and backup/restore.

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 const POLICY_KEY: &str = "catalog:hierarchy-grants";
+pub(crate) type CachedPolicy = Option<(Option<u64>, std::sync::Arc<Policy>)>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
@@ -112,6 +113,20 @@ impl Policy {
         Ok(policy)
     }
 
+    pub(crate) fn load_cached(inst: &crate::instance::Instance) -> Result<std::sync::Arc<Self>> {
+        let version = inst.system.meta(POLICY_KEY).map(|entry| entry.version);
+        let mut cache =
+            inst.managed_policy.lock().map_err(|_| KivaError::Other("managed policy lock poisoned".into()))?;
+        if let Some((stored, policy)) = &*cache {
+            if *stored == version {
+                return Ok(policy.clone());
+            }
+        }
+        let policy = std::sync::Arc::new(Self::load(&inst.system)?);
+        *cache = Some((version, policy.clone()));
+        Ok(policy)
+    }
+
     /// The caller holds the instance's managed catalog lock.
     pub(crate) fn edit(system: &Engine, user: &User, scope: Scope, permission: Permission, add: bool) -> Result<()> {
         let mut policy = Self::load(system)?;
@@ -135,12 +150,12 @@ impl Policy {
         Ok(())
     }
 
-    pub(crate) fn for_user(self, user: &User) -> Access {
+    pub(crate) fn for_user(&self, user: &User) -> Access {
         Access {
             role: user.role,
             grants: self
                 .grants
-                .into_iter()
+                .iter()
                 .filter(|g| g.account == user.name && g.subject == user.hierarchy_subject)
                 .map(|g| (g.scope, g.permission))
                 .collect(),

@@ -316,7 +316,7 @@ permits metadata administration only. Creation and rename require management
 of the namespace where a name is registered. Drop requires management of the
 target. Viewers remain read-only. Only account administrators can edit policy.
 `hierarchy permissions` reports policy decisions on the selected resource.
-Actual data access and backup remain disabled within these hierarchy modes.
+Managed data access requires the separate opt-in described below.
 
 The policy is one versioned system-engine record, encrypted when the home
 uses encryption. Policy updates and managed metadata commands share the
@@ -344,3 +344,44 @@ Unknown policy versions and malformed grants stop startup. Historical
 wildcards are never converted into broad workspace or project management
 rights. A future active routing cutover must persist or reevaluate these exact
 collection decisions and check them before opening engines.
+
+## Local managed data routing
+
+Start the local shell with `kivadb --home <home> --no-listen` and enter
+`hierarchy data` in a standard, unstaged home. Select a workspace, a project
+and a collection, or resolve an authorized fully qualified name with
+`use collection Fordima.app.users`. `hierarchy off` leaves this session mode.
+`hierarchy storage` continues to provide metadata administration.
+
+Each admitted command resolves the current selection to a collection ID under
+the managed layout lock before acquiring catalog, registry or engine locks.
+In-flight commands finish before a revoke takes the layout lock. It refreshes the account and reads the policy record's
+version. The instance reuses the parsed policy at the same version and evaluates
+the current account and resource IDs for every request. A confirmed revoke
+takes effect for subsequent operations, including commits in established
+sessions. Reads and queries require Read, mutations require Write, and index,
+vector, schema and journal definitions require Write and Manage. Integrity checks use the same permissions. Named journal cursors require Write.
+
+The instance holds up to 32 collection engines keyed by stable collection ID.
+On a cache miss, it verifies the layout and store identities and opens the
+existing engine with the home's storage and encryption settings. Idle handles
+can be evicted. Rename and retirement release cached handles under the layout
+lock. Retirement preserves the old store and recreation allocates fresh IDs
+and storage. The registry closes and reopens engines after topology changes,
+including after recovery.
+
+A transaction pins its engine. Topology changes are refused until active
+managed transactions release their handles. Commit repeats authorization while
+holding the same lock as writes and policy updates. A denied commit discards
+pending changes. The existing engine provides batch recovery and encryption.
+
+The local allowlist covers key and document commands, native types, queries,
+index/schema/vector operations, transactions, change journal and integrity
+checks. TTL uses on-access expiry. Managed engines sync writes before acknowledgment
+because their background maintenance is disabled. Compaction is blocked
+until managed storage can safely publish the replacement file identity.
+Scripts, trigger and subscription entry points, network listeners, protocol
+adapters, staged migration, replication and backup/restore of the managed
+layout remain outside this mode. The managed layout continues to carry its
+own catalog and store identity markers. See
+[readiness and measurements](../testing/workspace-hierarchy-readiness.md).

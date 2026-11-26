@@ -390,3 +390,26 @@ pub(crate) fn edit(
     crate::crash_point!("managed_layout.after_intent");
     finish(home, state, options)
 }
+
+/// Resolve and verify a collection before opening its engine. The caller
+/// holds the layout lock and has already checked the account's grants.
+pub(crate) fn open_collection(
+    home: &Path,
+    catalog: &Catalog,
+    id: crate::catalog::CollectionId,
+    mut options: EngineOptions,
+) -> Result<std::sync::Arc<Engine>> {
+    let (numeric, relative) = catalog.managed_collection(id)?;
+    let directory = checked_path(home, &relative)?;
+    validate_identity(&directory, numeric, true)?;
+    let store = directory.join("store.kiva");
+    let legacy = home.join("data/store.kiva");
+    if checked_meta(&legacy, false)? && same_file::is_same_file(&store, &legacy)? {
+        return Err(KivaError::Corrupted("managed collection shares the legacy store".into()));
+    }
+    // The local pilot has no periodic flush worker. Make each acknowledged
+    // write durable, while expiry and compaction are handled on demand.
+    options.background = false;
+    options.sync_writes = true;
+    Engine::open(store, options)
+}
