@@ -31,6 +31,12 @@ fn provision(home: &Path, managed: bool) {
     let inst = Instance::open(home, Options::default()).unwrap();
     let mut s = Session::new(inst.clone(), true, None);
     local(&mut s, "config set storage.sync_writes true");
+    if std::env::var_os("KIVADB_BENCH_NATIVE_METRICS").is_some() {
+        local(&mut s, "config set server.native_metrics true");
+    }
+    if let Ok(slots) = std::env::var("KIVADB_BENCH_SLOTS") {
+        local(&mut s, &format!("config set server.threads {slots}"));
+    }
     local(&mut s, "modify user kiva password bench-password");
     local(&mut s, "create user editor identified by bench-password role editor");
     local(&mut s, "config set auth_required true");
@@ -211,6 +217,15 @@ fn main() {
             }
         }
         maintenance(port, managed);
+        for row in instance.native_timings().into_iter().filter(|row| row.samples != 0) {
+            println!(
+                "timing {} {} {} {:.2}",
+                row.operation,
+                row.stage,
+                row.samples,
+                row.nanos as f64 / row.samples as f64 / 1000.0
+            );
+        }
         instance.shutdown();
         let _ = TcpStream::connect(("127.0.0.1", port));
     }

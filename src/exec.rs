@@ -1409,6 +1409,7 @@ impl Session {
         if line.is_empty() || line.starts_with('#') || line.starts_with("--") {
             return out;
         }
+        let decode = crate::native_timing::span(crate::native_timing::Stage::Decode);
         let tokens = match tokenize(line) {
             Ok(t) => t,
             Err(e) => {
@@ -1420,7 +1421,10 @@ impl Session {
             return out;
         }
         let inst = self.inst.clone();
+        drop(decode);
+        let wait = crate::native_timing::span(crate::native_timing::Stage::Queue);
         let _slot = inst.exec_slots.acquire();
+        drop(wait);
         let started = Instant::now();
         let cmd = if tokens[0].is_bare() { tokens[0].text.to_ascii_lowercase() } else { String::new() };
 

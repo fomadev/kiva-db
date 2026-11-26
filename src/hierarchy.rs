@@ -271,6 +271,7 @@ pub(crate) struct HierarchyLocation {
 
 impl Session {
     fn hierarchy_user(&self) -> Result<User> {
+        let _account = crate::native_timing::span(crate::native_timing::Stage::Account);
         let ctx =
             self.user.as_ref().ok_or_else(|| KivaError::Denied("hierarchy preview requires authentication".into()))?;
         if !self.local && !self.inst.auth_required() {
@@ -326,6 +327,7 @@ fn lock_layout(inst: &crate::instance::Instance, managed: bool, exclusive: bool)
     if !managed {
         return Ok(None);
     }
+    let _layout = crate::native_timing::span(crate::native_timing::Stage::Layout);
     let lock = &inst.managed_layout_lock;
     let guard = if exclusive {
         lock.write().map(LayoutGuard::Exclusive).map_err(|_| ())
@@ -717,6 +719,8 @@ impl Session {
             return execute(self);
         }
         let route = (|| -> Result<_> {
+            use crate::native_timing::{span, Stage};
+            let collection = span(Stage::Collection);
             self.check_managed_session()?;
             let context = self.hierarchy.filter(|context| context.managed).ok_or_else(hidden)?;
             let mut selected = context;
@@ -728,7 +732,9 @@ impl Session {
             if selected.collection != Some(id) {
                 return Err(hidden());
             }
+            drop(collection);
             let user = self.hierarchy_user()?;
+            let permission = span(Stage::Permission);
             let access = self.hierarchy_access(&user, true)?;
             let scope = Scope::Collection(id);
             let read = access.allows(&catalog, scope, Permission::Read);
@@ -740,6 +746,8 @@ impl Session {
             if need == Need::Owner && self.txn.is_some() {
                 return Err(KivaError::Invalid("collection maintenance is blocked during a transaction".into()));
             }
+            drop(permission);
+            let _registry = span(Stage::Registry);
             let mut engines =
                 inst.managed_engines.lock().map_err(|_| KivaError::Other("managed engine registry poisoned".into()))?;
             if command == "compact" && engines.pinned(id) {
@@ -770,7 +778,9 @@ impl Session {
         let old_engine = std::mem::replace(&mut self.engine, engine.clone());
         let old_label = std::mem::replace(&mut self.ws, label);
         self.managed_dispatch = Some((write, manage));
+        let execute_span = crate::native_timing::span(crate::native_timing::Stage::Execute);
         let result = execute(self);
+        drop(execute_span);
         self.managed_dispatch = None;
         self.engine = old_engine;
         self.ws = old_label;

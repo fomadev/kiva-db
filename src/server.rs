@@ -8,6 +8,8 @@
 use crate::error::{KivaError, Result};
 use crate::exec::{validate_key_name, Action};
 use crate::instance::{Instance, VERSION};
+pub use crate::native_timing::NativeTiming;
+use crate::native_timing::{span, Stage};
 use crate::proto::*;
 use crate::repl;
 use crate::session::{Need, Session};
@@ -285,6 +287,7 @@ fn binary_loop(
 
 /// Payload: `type u8 | ttl u32 | key_len u16 | key | value bytes`.
 fn binary_set(sess: &mut Session, payload: &[u8]) -> Result<()> {
+    let decode = span(Stage::Decode);
     let mut r = Reader::new(payload);
     let ty = Type::from_u8(r.u8()?).ok_or_else(|| KivaError::Invalid("unknown type tag".into()))?;
     let ttl = r.u32()? as i64;
@@ -293,6 +296,7 @@ fn binary_set(sess: &mut Session, payload: &[u8]) -> Result<()> {
     let value = decode_value(ty, r.rest(), sess.native_hierarchy)
         .map_err(|e| KivaError::Invalid(format!("value does not match its type: {e}")))?;
     let expires_at = crate::util::deadline_in(ttl);
+    drop(decode);
     sess.kv_put(&key, value, expires_at, false)
 }
 
@@ -343,8 +347,14 @@ fn hierarchy_loop(inst: &Arc<Instance>, mut stream: TcpStream) {
     let mut session = Session::new_native(inst.clone(), false, None);
     let mut negotiated = false;
     while !inst.shutting_down.load(Ordering::Acquire) {
-        let mut input = Deadline::new(&mut stream);
-        let Ok((cmd, payload)) = read_frame_bounded(&mut input, NATIVE_REQUEST_MAX, &|| false) else { break };
+        if let Some(metrics) = &inst.native_metrics {
+            metrics.begin();
+        }
+        let input = {
+            let _read = span(Stage::FrameRead);
+            read_frame_bounded(&mut Deadline::new(&mut stream), NATIVE_REQUEST_MAX, &|| false)
+        };
+        let Ok((cmd, payload)) = input else { break };
         let response = hierarchy_request(&mut session, &mut negotiated, cmd, &payload);
         let (status, bytes) = match response {
             Ok(reply) => reply,
@@ -372,7 +382,14 @@ fn hierarchy_loop(inst: &Arc<Instance>, mut stream: TcpStream) {
             (status, bytes.as_slice())
         };
         // Session dispatch has released all admission and storage guards.
-        if write_frame(&mut Deadline::new(&mut stream), status, body).is_err() || status == ST_BYE {
+        let output = {
+            let _write = span(Stage::FrameWrite);
+            write_frame(&mut Deadline::new(&mut stream), status, body)
+        };
+        if let Some(metrics) = &inst.native_metrics {
+            metrics.finish(cmd);
+        }
+        if output.is_err() || status == ST_BYE {
             break;
         }
     }
@@ -399,7 +416,10 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
     }
     if cmd == CMD_AUTH {
         let inst = sess.inst.clone();
+        let wait = span(Stage::Queue);
         let _login = inst.exec_slots.acquire();
+        drop(wait);
+        let _authentication = span(Stage::Authentication);
         let credentials = native_text(payload, 4096)?;
         let (user, password) = credentials
             .split_once('\0')
@@ -428,7 +448,9 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
         return Ok((status, body.into_bytes()));
     }
     let inst = sess.inst.clone();
+    let wait = span(Stage::Queue);
     let _slot = inst.exec_slots.acquire();
+    drop(wait);
     let response = match cmd {
         CMD_GET => {
             let key = native_text(payload, crate::format::MAX_KEY_LEN)?;
@@ -436,6 +458,7 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
                 let Some((value, _)) = sess.kv_get(key)? else {
                     return Ok((ST_NOT_FOUND, Vec::new()));
                 };
+                let _encode = span(Stage::Encode);
                 let mut bytes = vec![value.ty() as u8];
                 bytes.extend_from_slice(&value.encode_stored(false)?.0);
                 ok(bytes)
@@ -452,8 +475,11 @@ fn hierarchy_request(sess: &mut Session, negotiated: &mut bool, cmd: u16, payloa
             })
         }
         CMD_API => {
+            let decode = span(Stage::Decode);
             let request = crate::num::from_slice(payload).map_err(KivaError::Invalid)?;
+            drop(decode);
             let result = crate::api::handle_native_hierarchy(sess, &request)?;
+            let _encode = span(Stage::Encode);
             ok(result.to_string().into_bytes())
         }
         _ => Err(KivaError::Denied("command unavailable in hierarchical TCP mode".into())),

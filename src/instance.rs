@@ -308,6 +308,7 @@ pub struct Instance {
     pub clients: AtomicUsize,
     pub started: Instant,
     pub exec_slots: Semaphore,
+    pub(crate) native_metrics: Option<crate::native_timing::NativeMetrics>,
     pub shutting_down: AtomicBool,
     /// Set by the `shutdown` command; the process hosting the instance exits.
     pub stop_requested: AtomicBool,
@@ -406,6 +407,7 @@ impl Instance {
             managed_catalog: Mutex::default(),
             managed_policy: Mutex::default(),
 
+            native_metrics: (hierarchical_tcp && config.get_bool("server", "native_metrics")).then(Default::default),
             config: RwLock::new(config),
             system,
             nowhere,
@@ -476,6 +478,11 @@ impl Instance {
     /// (`None`) when it is not set or not valid.
     pub fn format(&self, kind: crate::time::FormatKind) -> Option<crate::time::Pattern> {
         crate::time::parse_format(kind, &self.cfg().get("time", kind.config_key())).ok().flatten()
+    }
+
+    /// Returns process-local aggregate timings when native metrics are enabled.
+    pub fn native_timings(&self) -> Vec<crate::server::NativeTiming> {
+        self.native_metrics.as_ref().map_or_else(Vec::new, |metrics| metrics.snapshot())
     }
 
     pub fn auth_required(&self) -> bool {
