@@ -411,7 +411,10 @@ fn compaction_recovers_values_and_identity_at_each_durable_boundary() {
         assert!(ok(&mut s, "schemas").contains("doc:"));
         assert!(ok(&mut s, "changes read from beginning").contains("secret"));
         let identity = std::fs::read(store.join(".managed-identity")).unwrap();
-        assert_eq!(identity != snapshot, installed, "{point}");
+        let previous_marker: serde_json::Value = serde_json::from_slice(&snapshot).unwrap();
+        let recovered_marker: serde_json::Value = serde_json::from_slice(&identity).unwrap();
+        assert_eq!(previous_marker["id"], recovered_marker["id"], "{point}");
+        assert_eq!(previous_marker["file_id"] != recovered_marker["file_id"], installed, "{point}");
         assert!(!store.join(".managed-compaction").exists());
         assert!(!store.join(".managed-compaction.pending").exists());
         assert!(!store.join(".managed-identity.pending").exists());

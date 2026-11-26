@@ -3685,7 +3685,17 @@ impl Engine {
             renamed = replace();
         }
         if let Err(e) = renamed {
-            inner.file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+            match OpenOptions::new().read(true).write(true).open(&self.path) {
+                Ok(file) => inner.file = file,
+                Err(reopen) => {
+                    // The replacement handle cannot represent the original
+                    // engine index. Prevent further I/O through this handle.
+                    if prepare.is_some() {
+                        inner.closed = true;
+                    }
+                    return Err(reopen.into());
+                }
+            }
             return Err(e.into());
         }
 

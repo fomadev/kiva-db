@@ -596,6 +596,10 @@ impl EngineRegistry {
         self.entries.get(&id).is_some_and(|(engine, _)| std::sync::Arc::strong_count(engine) > 1)
     }
 
+    pub(crate) fn discard(&mut self, id: crate::catalog::CollectionId) {
+        self.entries.remove(&id);
+    }
+
     pub(crate) fn any_pinned(&self) -> bool {
         self.entries.values().any(|(engine, _)| std::sync::Arc::strong_count(engine) > 1)
     }

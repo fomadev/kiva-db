@@ -692,6 +692,11 @@ impl Session {
         self.managed_dispatch = None;
         self.engine = old_engine;
         self.ws = old_label;
+        if command == "compact" && result.is_err() {
+            // Force validation and intent recovery before admitting another
+            // command after an uncertain replacement or publication failure.
+            inst.managed_engines.lock().map_err(|_| "managed engine registry poisoned".to_owned())?.discard(id);
+        }
         if self.txn.is_some() && self.managed_txn_engine.is_none() {
             self.managed_txn_engine = Some((id, engine));
         }
@@ -754,6 +759,65 @@ mod tests {
     fn run(session: &mut Session, command: &str) {
         let result = session.execute(command);
         assert!(!result.has_err(), "{command}: {:?}", result.lines);
+    }
+
+    #[test]
+    #[ignore = "requires KIVADB_HIERARCHY_BENCH_HOME provisioned by the Release example"]
+    fn managed_routing_component_costs() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let Some(path) = std::env::var_os("KIVADB_HIERARCHY_BENCH_HOME") else { return };
+        let home = std::path::Path::new(&path);
+        let inst = crate::Instance::open(home, crate::Options::default()).unwrap();
+        let mut session = Session::new(inst.clone(), true, None);
+        session.login("editor0", "bench-test").unwrap();
+        run(&mut session, "hierarchy data");
+        run(&mut session, "use collection w0.p0.c0");
+        let catalog = session.context_catalog(true).unwrap();
+        let target = session.hierarchy.unwrap().scope();
+        let user = session.hierarchy_user().unwrap();
+        let access = session.hierarchy_access(&user, true).unwrap();
+
+        fn measure(label: &str, samples: usize, mut operation: impl FnMut()) {
+            let mut values = (0..samples)
+                .map(|_| {
+                    let start = Instant::now();
+                    operation();
+                    start.elapsed().as_nanos()
+                })
+                .collect::<Vec<_>>();
+            values.sort_unstable();
+            let percentile = |rank: usize| values[(samples * rank).div_ceil(100) - 1];
+            println!("{label}: n={samples} p50={} p95={} p99={} ns", percentile(50), percentile(95), percentile(99));
+        }
+
+        measure("validated catalog load", 16, || {
+            black_box(crate::managed_layout::open(home, &inst.engine_options()).unwrap());
+        });
+        measure("policy load and index", 128, || {
+            black_box(Policy::load(&inst.system).unwrap());
+        });
+        measure("catalog Arc lookup", 2048, || {
+            black_box(session.context_catalog(true).unwrap());
+        });
+        measure("collection ID and parent resolution", 2048, || {
+            black_box(catalog.resolve_collection("w0", "p0", "c0").unwrap());
+        });
+        measure("current account validation", 2048, || {
+            black_box(session.hierarchy_user().unwrap());
+        });
+        measure("versioned policy and account lookup", 2048, || {
+            black_box(session.hierarchy_access(&user, true).unwrap());
+        });
+        measure("inherited permission", 2048, || {
+            assert!(black_box(access.allows(&catalog, target, Permission::Write)));
+        });
+        measure("uncontended layout guard", 2048, || {
+            drop(black_box(lock_layout(&inst, true, false).unwrap()));
+        });
+        drop(session);
+        inst.shutdown();
     }
 
     #[test]
