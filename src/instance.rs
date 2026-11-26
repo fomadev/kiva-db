@@ -347,6 +347,7 @@ impl Instance {
         // Validate staged metadata before account migration and administrative recovery.
         // An absent record keeps a historical home on the existing storage layout.
         let embedded = CatalogStore::new(&system).load()?;
+        crate::hierarchy_auth::Policy::load(&system)?;
         let staged_migration = crate::migration::staged_catalog(home)?.is_some();
         if staged_migration && embedded.is_some() {
             return Err(KivaError::Corrupted("multiple staged workspace catalogs".into()));

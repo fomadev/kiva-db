@@ -81,6 +81,7 @@ pub struct User {
     /// The date formats of this user, by kind (`date` -> `DD-MM-YYYY`).
     pub formats: BTreeMap<String, String>,
     pub created: i64,
+    pub(crate) hierarchy_subject: String,
     salt: Vec<u8>,
     hash: Vec<u8>,
     iterations: u32,
@@ -116,6 +117,7 @@ impl User {
             timezone: None,
             formats: BTreeMap::new(),
             created: now_secs(),
+            hierarchy_subject: hex_encode(&random_bytes(16)?),
             salt,
             hash,
             iterations: ITERATIONS,
@@ -200,6 +202,7 @@ impl User {
             "default_workspace": self.default_workspace,
             "timezone": self.timezone,
             "created": self.created,
+            "hierarchy_subject": self.hierarchy_subject,
             "model": MODEL,
         });
         // Only when set: an account without formats stays as 2.0 wrote it.
@@ -221,6 +224,21 @@ impl User {
                 grants.insert(k.clone(), p);
             }
         }
+        let salt = hex_decode(j["salt"].as_str()?)?;
+        let hierarchy_subject = match j.get("hierarchy_subject") {
+            Some(subject) => {
+                let subject = subject.as_str()?;
+                if !crate::hierarchy_auth::valid_subject(subject) {
+                    return None;
+                }
+                subject.to_owned()
+            }
+            None => {
+                use sha2::Digest;
+                let digest = Sha256::digest(&salt);
+                hex_encode(&digest[..16])
+            }
+        };
         Some(User {
             name: name.to_string(),
             role: Role::from_name(j["role"].as_str()?)?,
@@ -232,7 +250,8 @@ impl User {
                 .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
                 .unwrap_or_default(),
             created: j["created"].as_i64().unwrap_or(0),
-            salt: hex_decode(j["salt"].as_str()?)?,
+            salt,
+            hierarchy_subject,
             hash: hex_decode(j["hash"].as_str()?)?,
             iterations: j["iterations"].as_u64()? as u32,
         })
@@ -241,7 +260,14 @@ impl User {
 
 pub fn get_user(sys: &Engine, name: &str) -> Result<Option<User>> {
     match sys.get(&user_key(name))? {
-        Some((Value::Doc(j), _)) => Ok(User::from_json(name, &j)),
+        Some((Value::Doc(j), _)) => {
+            if j.get("hierarchy_subject")
+                .is_some_and(|value| !value.as_str().is_some_and(crate::hierarchy_auth::valid_subject))
+            {
+                return Err(KivaError::Corrupted(format!("invalid hierarchy identity for account '{name}'")));
+            }
+            Ok(User::from_json(name, &j))
+        }
         _ => Ok(None),
     }
 }

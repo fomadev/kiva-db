@@ -5,10 +5,11 @@
 //! Administrative metadata preview. Collection identities are never passed to
 //! the historical storage engine or its authorization and replication paths.
 
-use crate::auth::{self, Role};
+use crate::auth::{self, Role, User};
 use crate::catalog::{Catalog, CatalogStore, CollectionId, ProjectId, WorkspaceId};
 use crate::error::{KivaError, Result};
 use crate::exec::Out;
+use crate::hierarchy_auth::{Access, Permission, Policy, Scope};
 use crate::lexer::Token;
 use crate::session::Session;
 
@@ -43,8 +44,31 @@ impl Context {
         ]
     }
 
-    fn path(self, catalog: &Catalog) -> String {
-        self.names(catalog).into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join(".")
+    fn scope(self) -> Scope {
+        self.collection
+            .map(Scope::Collection)
+            .or_else(|| self.project.map(Scope::Project))
+            .unwrap_or(Scope::Workspace(self.workspace))
+    }
+
+    fn visible_names(self, catalog: &Catalog, access: &Access) -> [String; 3] {
+        let scopes = [
+            Some(Scope::Workspace(self.workspace)),
+            self.project.map(Scope::Project),
+            self.collection.map(Scope::Collection),
+        ];
+        let names = self.names(catalog);
+        std::array::from_fn(|i| {
+            if scopes[i].is_some_and(|scope| access.visible(catalog, scope)) {
+                names[i].to_owned()
+            } else {
+                String::new()
+            }
+        })
+    }
+
+    fn path(self, catalog: &Catalog, access: &Access) -> String {
+        self.visible_names(catalog, access).into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join(".")
     }
 }
 
@@ -71,6 +95,14 @@ impl Parent {
                 KivaError::Invalid("ERR_NO_PROJECT_SELECTED: select a project first with use <project>".into())
             }),
             _ => Err(KivaError::Denied("only hierarchy metadata commands are available in preview".into())),
+        }
+    }
+
+    fn scope(self) -> Scope {
+        match self {
+            Self::Root => Scope::Instance,
+            Self::Workspace(id) => Scope::Workspace(id),
+            Self::Project(id) => Scope::Project(id),
         }
     }
 
@@ -103,6 +135,14 @@ impl Parent {
 }
 
 impl Target {
+    fn scope(self) -> Scope {
+        match self {
+            Self::Workspace(id) => Scope::Workspace(id),
+            Self::Project(id) => Scope::Project(id),
+            Self::Collection(id) => Scope::Collection(id),
+        }
+    }
+
     fn rename(self, catalog: &mut Catalog, name: &str) -> Result<()> {
         crate::hierarchy_layout::segment(name)?;
         match self {
@@ -139,6 +179,33 @@ impl Target {
             Self::Collection(id) => format!("Collection {} (metadata only)", catalog.collection_name(id).unwrap()),
         }
     }
+}
+
+fn hidden() -> KivaError {
+    KivaError::Denied("hierarchy resource or operation is unavailable".into())
+}
+
+fn grant_scope(catalog: &Catalog, kind: &Token, args: &[Token]) -> Result<Scope> {
+    if kind.is_kw("instance") && args.is_empty() {
+        return Ok(Scope::Instance);
+    }
+    if let [path] = args {
+        let parts: Vec<_> = path.text.split('.').collect();
+        match parts.as_slice() {
+            [name] if kind.is_kw("workspace") => {
+                return Ok(Scope::Workspace(lookup(catalog.workspace(name), "workspace", name)?))
+            }
+            [workspace, project] if kind.is_kw("project") => {
+                let workspace = lookup(catalog.workspace(workspace), "workspace", workspace)?;
+                return Ok(Scope::Project(lookup(catalog.project(workspace, project), "project", project)?));
+            }
+            [workspace, project, collection] if kind.is_kw("collection") => {
+                return Ok(Scope::Collection(catalog.resolve_collection(workspace, project, collection)?));
+            }
+            _ => {}
+        }
+    }
+    Err(KivaError::Invalid("expected instance, workspace <w>, project <w.p> or collection <w.p.c>".into()))
 }
 
 fn lookup<T>(found: Option<T>, kind: &str, name: &str) -> Result<T> {
@@ -188,24 +255,55 @@ fn navigate(catalog: &Catalog, mut current: Context, command: &str, args: &[Toke
 }
 
 impl Session {
-    fn check_hierarchy_admin(&self) -> Result<()> {
-        let user =
+    fn hierarchy_user(&self) -> Result<User> {
+        let ctx =
             self.user.as_ref().ok_or_else(|| KivaError::Denied("hierarchy preview requires authentication".into()))?;
-        if (!self.local && !self.inst.auth_required())
-            || user.role != Role::Admin
-            || !auth::get_user(&self.inst.system, &user.name)?.is_some_and(|account| account.role == Role::Admin)
-        {
-            return Err(KivaError::Denied("hierarchy preview requires an administrator and TCP authentication".into()));
+        if !self.local && !self.inst.auth_required() {
+            return Err(KivaError::Denied("hierarchy preview requires TCP authentication".into()));
         }
-        Ok(())
+        let user = auth::get_user(&self.inst.system, &ctx.name)?.ok_or_else(hidden)?;
+        let valid = self.hierarchy_subject.as_ref().map_or_else(
+            || ctx.role == Role::Admin && user.role == Role::Admin && !self.inst.auth_required(),
+            |subject| subject == &user.hierarchy_subject,
+        );
+        if !valid {
+            return Err(hidden());
+        }
+        Ok(user)
     }
 
-    pub(crate) fn hierarchy_location(&self) -> Result<Option<[String; 3]>> {
+    fn hierarchy_access(&self, user: &User, managed: bool) -> Result<Access> {
+        if managed {
+            return Ok(Policy::load(&self.inst.system)?.for_user(user));
+        }
+        if let Some(aliases) = crate::migration::staged_aliases(&self.inst.home)? {
+            return Ok(Access::legacy(user, &aliases));
+        }
+        if user.role == Role::Admin {
+            return Ok(Access::administrator());
+        }
+        Err(KivaError::Denied("the metadata-only preview requires an administrator".into()))
+    }
+
+    pub(crate) fn hierarchy_location(&self) -> Result<Option<([String; 3], Role)>> {
         let Some(mut context) = self.hierarchy else { return Ok(None) };
-        self.check_hierarchy_admin()?;
+        let user = self.hierarchy_user()?;
+        let _guard = self.hierarchy_lock(context.managed)?;
         let catalog = self.context_catalog(context.managed)?;
+        let access = self.hierarchy_access(&user, context.managed)?;
         context.normalize(&catalog);
-        Ok(Some(context.names(&catalog).map(str::to_owned)))
+        Ok(Some((context.visible_names(&catalog, &access), access.role())))
+    }
+
+    fn hierarchy_lock(&self, managed: bool) -> Result<Option<std::sync::MutexGuard<'_, ()>>> {
+        managed
+            .then(|| {
+                self.inst
+                    .managed_layout_lock
+                    .lock()
+                    .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))
+            })
+            .transpose()
     }
 
     pub(crate) fn execute_hierarchy(
@@ -218,13 +316,22 @@ impl Session {
     }
 
     fn hierarchy_command(&mut self, command: &str, args: &[Token], out: &mut Out) -> Result<()> {
-        self.check_hierarchy_admin()?;
+        let inst = self.inst.clone();
+        let managed = self.hierarchy.is_some_and(|context| context.managed)
+            || command == "hierarchy" && args.first().is_some_and(|mode| mode.is_kw("storage"));
+        let _guard = if managed {
+            Some(inst.managed_layout_lock.lock().map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?)
+        } else {
+            None
+        };
+        let user = self.hierarchy_user()?;
         if self.txn.is_some() {
             return Err(KivaError::Invalid("hierarchy preview is unavailable during a transaction".into()));
         }
         if command == "hierarchy" {
             match args {
                 [mode] if mode.is_kw("on") => {
+                    self.hierarchy_access(&user, false)?;
                     let catalog = self.preview_catalog()?;
                     self.drop_subscriptions();
                     self.hierarchy =
@@ -234,14 +341,14 @@ impl Session {
                 [mode] if mode.is_kw("storage") => {
                     self.check_managed_access()?;
                     let inst = self.inst.clone();
-                    let _guard = inst
-                        .managed_layout_lock
-                        .lock()
-                        .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
+                    Policy::load(&inst.system)?;
                     let catalog =
                         if let Some(catalog) = crate::managed_layout::open(&inst.home, &inst.engine_options())? {
                             catalog
                         } else {
+                            if user.role != Role::Admin {
+                                return Err(hidden());
+                            }
                             crate::managed_layout::edit(&inst.home, &inst.engine_options(), |_| Ok(()))?
                         };
                     self.drop_subscriptions();
@@ -249,20 +356,60 @@ impl Session {
                         Some(Context::workspace(catalog.workspace("default").expect("validated default"), true));
                     out.say("Managed storage administration enabled. Data operations are disabled.");
                 }
+                [mode] if mode.is_kw("permissions") => {
+                    let mut context = self.hierarchy.ok_or_else(hidden)?;
+                    let catalog = self.context_catalog(context.managed)?;
+                    context.normalize(&catalog);
+                    let access = self.hierarchy_access(&user, context.managed)?;
+                    let scope = context.scope();
+                    out.say(format!(
+                        "read={} write={} manage={}",
+                        access.allows(&catalog, scope, Permission::Read),
+                        access.allows(&catalog, scope, Permission::Write),
+                        access.allows(&catalog, scope, Permission::Manage)
+                    ));
+                }
                 [mode] if mode.is_kw("off") => {
                     self.hierarchy = None;
                     out.say("Hierarchy preview disabled.");
                 }
-                _ => return Err(KivaError::Invalid("use hierarchy on, hierarchy storage or hierarchy off".into())),
+                [action, account, permission, kind, target @ ..] if action.is_kw("grant") || action.is_kw("revoke") => {
+                    if !self.hierarchy.is_some_and(|context| context.managed) || user.role != Role::Admin {
+                        return Err(hidden());
+                    }
+                    let catalog = self.context_catalog(true)?;
+                    let scope = grant_scope(&catalog, kind, target)?;
+                    let subject = auth::get_user(&self.inst.system, &account.text)?
+                        .ok_or_else(|| KivaError::NotFound("account does not exist".into()))?;
+                    Policy::edit(
+                        &self.inst.system,
+                        &subject,
+                        scope,
+                        Permission::parse(&permission.text.to_ascii_lowercase())?,
+                        action.is_kw("grant"),
+                    )?;
+                    out.say("Hierarchy grants updated.");
+                }
+                _ => return Err(KivaError::Invalid("use hierarchy on, storage, off, grant or revoke".into())),
             }
             return Ok(());
         }
         let mut context = self.hierarchy.expect("preview dispatch");
         let catalog = self.context_catalog(context.managed)?;
+        let access = self.hierarchy_access(&user, context.managed)?;
         context.normalize(&catalog);
         if matches!(command, "switch" | "use") {
-            let next = navigate(&catalog, context, command, args)?;
-            out.say(format!("Using {}", next.path(&catalog)));
+            let next = navigate(&catalog, context, command, args).map_err(|error| {
+                if access.role() == Role::Admin {
+                    error
+                } else {
+                    hidden()
+                }
+            })?;
+            if !access.visible(&catalog, next.scope()) {
+                return Err(hidden());
+            }
+            out.say(format!("Using {}", next.path(&catalog, &access)));
             self.hierarchy = Some(next);
             return Ok(());
         }
@@ -273,7 +420,7 @@ impl Session {
             return Ok(());
         }
         if command == "whoami" && args.is_empty() {
-            out.say(format!("{} @ {} (hierarchy preview)", self.user_name(), context.path(&catalog)));
+            out.say(format!("{} @ {} (hierarchy preview)", self.user_name(), context.path(&catalog, &access)));
             return Ok(());
         }
         let command = if command == "collections" { "collection" } else { command };
@@ -299,40 +446,75 @@ impl Session {
             return Ok(());
         }
         if op == "current" && args.is_empty() {
-            let [workspace, project, collection] = context.names(&catalog);
+            let [workspace, project, collection] = context.visible_names(&catalog, &access);
             let name = match command {
                 "workspace" => workspace,
                 "project" => project,
                 _ => collection,
             };
-            out.say(if name.is_empty() { "none" } else { name });
+            out.say(if name.is_empty() { "none".to_owned() } else { name });
             return Ok(());
         }
         let parent = Parent::for_kind(command, context)?;
+        let visible =
+            |name: &str| parent.target(&catalog, name).filter(|target| access.visible(&catalog, target.scope()));
+        let visible_names =
+            || parent.names(&catalog).into_iter().filter(|name| visible(name).is_some()).collect::<Vec<_>>();
+        let require_manage = |catalog: &Catalog, scope: Scope| {
+            if access.allows(catalog, scope, Permission::Manage) {
+                Ok(())
+            } else {
+                Err(hidden())
+            }
+        };
         match (op.as_str(), args) {
-            ("list", []) => out.say(parent.names(&catalog).join("\n")),
+            ("list", []) => out.say(visible_names().join("\n")),
             ("list", [flag]) if command == "workspace" && flag.text == "--details" => {
+                if access.role() != Role::Admin {
+                    return Err(hidden());
+                }
                 out.say("WORKSPACE  PROJECTS  COLLECTIONS  PLANNED PATH");
-                for name in parent.names(&catalog) {
+                for name in visible_names() {
                     let id = catalog.workspace(name).expect("listed workspace");
-                    let projects: Vec<_> = catalog.project_names(id).collect();
+                    let projects: Vec<_> = catalog
+                        .project_names(id)
+                        .filter(|name| {
+                            access.visible(&catalog, Scope::Project(catalog.project(id, name).expect("listed project")))
+                        })
+                        .collect();
                     let collections: usize = projects
                         .iter()
                         .map(|name| {
                             let project = catalog.project(id, name).expect("listed project");
-                            catalog.collection_names(project).count()
+                            catalog
+                                .collection_names(project)
+                                .filter(|name| {
+                                    access.visible(
+                                        &catalog,
+                                        Scope::Collection(
+                                            catalog.collection(project, name).expect("listed collection"),
+                                        ),
+                                    )
+                                })
+                                .count()
                         })
                         .sum();
                     let path = crate::hierarchy_layout::workspace(&self.inst.home, name)?;
                     out.say(format!("{name}  {}  {collections}  {}", projects.len(), path.display()));
                 }
             }
-            ("exists", [name]) => out.say(parent.target(&catalog, &name.text).is_some().to_string()),
+            ("exists", [name]) => out.say(visible(&name.text).is_some().to_string()),
             ("info", [name]) => {
-                out.say(lookup(parent.target(&catalog, &name.text), command, &name.text)?.info(&catalog))
+                let target = visible(&name.text).ok_or_else(hidden)?;
+                if access.role() == Role::Admin {
+                    out.say(target.info(&catalog));
+                } else {
+                    out.say(name.text.clone());
+                }
             }
             ("create", [_, ..]) => {
                 self.edit_hierarchy(context.managed, |catalog| {
+                    require_manage(catalog, parent.scope())?;
                     for name in args {
                         parent.create(catalog, &name.text)?;
                     }
@@ -342,13 +524,19 @@ impl Session {
             }
             ("rename", [from, to] | [from, _, to]) if args.len() == 2 || args[1].is_kw("to") => {
                 self.edit_hierarchy(context.managed, |catalog| {
-                    lookup(parent.target(catalog, &from.text), command, &from.text)?.rename(catalog, &to.text)
+                    let target = parent.target(catalog, &from.text).ok_or_else(hidden)?;
+                    // Rename also writes into the parent's namespace. Requiring
+                    // that scope prevents probing hidden siblings by collision.
+                    require_manage(catalog, parent.scope())?;
+                    target.rename(catalog, &to.text)
                 })?;
                 out.say(format!("Renamed '{}' to '{}'", from.text, to.text));
             }
             ("drop", [name] | [name, _]) if args.len() == 1 || args[1].is_kw("cascade") => {
                 self.edit_hierarchy(context.managed, |catalog| {
-                    lookup(parent.target(catalog, &name.text), command, &name.text)?.drop_from(catalog, args.len() == 2)
+                    let target = parent.target(catalog, &name.text).ok_or_else(hidden)?;
+                    require_manage(catalog, target.scope())?;
+                    target.drop_from(catalog, args.len() == 2)
                 })?;
                 out.say(format!("Dropped '{}'", name.text));
             }
@@ -373,11 +561,6 @@ impl Session {
             return self.preview_catalog();
         }
         self.check_managed_access()?;
-        let _guard = self
-            .inst
-            .managed_layout_lock
-            .lock()
-            .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
         crate::managed_layout::open(&self.inst.home, &self.inst.engine_options())?
             .ok_or_else(|| KivaError::Corrupted("missing managed layout".into()))
     }
@@ -392,11 +575,6 @@ impl Session {
     fn edit_hierarchy(&self, managed: bool, edit: impl FnOnce(&mut Catalog) -> Result<()>) -> Result<()> {
         if managed {
             self.check_managed_access()?;
-            let _guard = self
-                .inst
-                .managed_layout_lock
-                .lock()
-                .map_err(|_| KivaError::Other("managed layout lock poisoned".into()))?;
             return crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit).map(|_| ());
         }
         if self.inst.workspace_catalog()?.is_some() || self.inst.repl.is_replica() {

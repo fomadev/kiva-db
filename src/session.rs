@@ -72,6 +72,7 @@ pub struct Session {
     pub project: Option<String>,
     pub txn: Option<Txn>,
     pub(crate) hierarchy: Option<crate::hierarchy::Context>,
+    pub(crate) hierarchy_subject: Option<String>,
     /// True for the local shell; remote sessions cannot log in with an empty password.
     pub local: bool,
     /// Where key-change notifications for this session are delivered.
@@ -102,6 +103,7 @@ impl Session {
             project: None,
             txn: None,
             hierarchy: None,
+            hierarchy_subject: None,
             local,
             events,
             subs: Vec::new(),
@@ -210,6 +212,7 @@ impl Session {
             self.rollback();
         }
         self.hierarchy = None;
+        self.hierarchy_subject = Some(user.hierarchy_subject.clone());
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
         self.take_account_formats(&user);

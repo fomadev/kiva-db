@@ -179,7 +179,7 @@ impl Backend for Local {
                 .hierarchy_location()
                 .ok()
                 .flatten()
-                .map(|names| names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join("."));
+                .map(|(names, _)| names.into_iter().filter(|name| !name.is_empty()).collect::<Vec<_>>().join("."));
             return (place, true);
         }
         (if s.ws_priv.is_some() { Some(s.ws.clone()) } else { s.project.clone() }, false)

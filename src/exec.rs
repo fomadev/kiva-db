@@ -1465,6 +1465,7 @@ impl Session {
             "create", "drop", "tune", "grant", "revoke", "modify", "del", "compact", "compress", "failover", "replica",
         ];
         let audited = AUDITED.contains(&cmd.as_str())
+            || (cmd == "hierarchy" && tokens.get(1).is_some_and(|t| t.is_kw("grant") || t.is_kw("revoke")))
             || (cmd == "config" && tokens.get(1).is_some_and(|t| t.is_kw("set")))
             || (matches!(cmd.as_str(), "workspace" | "collection" | "collections")
                 && tokens.get(1).is_some_and(|t| {
