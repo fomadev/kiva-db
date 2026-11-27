@@ -35,6 +35,7 @@ mod hierarchy_layout;
 pub mod hint;
 pub mod hnsw;
 pub mod http;
+mod http_sessions;
 pub mod instance;
 pub mod jsonpath;
 pub mod kva;

@@ -169,6 +169,7 @@ fn write_response(stream: &mut TcpStream, resp: &Response, cors: bool) {
 fn write_transport_response(w: &mut impl Write, resp: &Response, cors: bool, keep_alive: bool) -> std::io::Result<()> {
     let reason = match resp.status {
         200 => "OK",
+        201 => "Created",
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",

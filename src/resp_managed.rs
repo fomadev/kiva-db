@@ -276,7 +276,7 @@ impl Connection {
             return Err(Reply::Error("WRONGPASS invalid credentials".into()));
         }
         match transport::login(&mut self.sess, user, &pass) {
-            Ok(()) => Ok(Reply::ok()),
+            Ok(_) => Ok(Reply::ok()),
             Err(KivaError::Denied(_) | KivaError::NotFound(_)) => {
                 Err(Reply::Error("WRONGPASS invalid credentials".into()))
             }

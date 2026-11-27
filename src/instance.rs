@@ -310,6 +310,7 @@ pub struct Instance {
     pub started: Instant,
     pub exec_slots: Semaphore,
     pub(crate) native_admission: crate::native_admission::NativeAdmission,
+    pub(crate) http_sessions: crate::http_sessions::Registry,
     pub(crate) native_metrics: Option<crate::native_timing::NativeMetrics>,
     pub shutting_down: AtomicBool,
     /// Set by the `shutdown` command; the process hosting the instance exits.
@@ -413,6 +414,11 @@ impl Instance {
             native_admission: crate::native_admission::NativeAdmission::new(
                 threads,
                 config.get_u64("server", "native_queue").min(128) as usize,
+            ),
+            http_sessions: crate::http_sessions::Registry::new(
+                config.get_u64("http", "session_capacity").clamp(1, 65_536) as usize,
+                config.get_u64("http", "sessions_per_account").clamp(1, 4096) as usize,
+                std::time::Duration::from_secs(config.get_u64("http", "session_ttl_seconds").clamp(1, 86_400)),
             ),
             native_metrics: (hierarchical_tcp && config.get_bool("server", "native_metrics")).then(Default::default),
             config: RwLock::new(config),

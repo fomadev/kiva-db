@@ -74,6 +74,7 @@ pub struct Session {
     pub(crate) hierarchy: Option<crate::hierarchy::Context>,
     pub(crate) hierarchy_data: bool,
     pub(crate) native_hierarchy: bool,
+    pub(crate) http_lease: Option<Arc<crate::http_sessions::Lease>>,
     pub(crate) adapter_value_limit: Option<usize>,
     adapter_staged_bytes: usize,
     pub(crate) managed_dispatch: Option<(bool, bool)>,
@@ -112,6 +113,7 @@ impl Session {
             hierarchy: None,
             hierarchy_data: false,
             native_hierarchy: false,
+            http_lease: None,
             adapter_value_limit: None,
             adapter_staged_bytes: 0,
             managed_dispatch: None,
@@ -209,6 +211,7 @@ impl Session {
             self.hierarchy = None;
             self.hierarchy_data = false;
             self.hierarchy_subject = None;
+            self.http_lease = None;
             self.user = None;
             if password.is_empty() {
                 return Err(KivaError::Denied("invalid username or password".into()));
@@ -237,7 +240,11 @@ impl Session {
         let Some(user) = auth::get_user(&self.inst.system, name)? else {
             return Err(denied(&self.inst, "unknown user"));
         };
-        if !user.verify(password) {
+        let verified = {
+            let _password = crate::native_timing::span(crate::native_timing::Stage::Password);
+            user.verify(password)
+        };
+        if !verified {
             return Err(denied(&self.inst, "wrong password"));
         }
         if password.is_empty() && !self.local {
@@ -246,6 +253,26 @@ impl Session {
                 "accounts with an empty password can only log in from the local shell".into(),
             ));
         }
+        self.enter_authenticated_user(&user)?;
+        self.inst.audit.log(name, "login", true);
+        Ok(user)
+    }
+
+    /// Restore the account context of a verified, request-local HTTP lease.
+    pub(crate) fn resume_http(&mut self, lease: Arc<crate::http_sessions::Lease>) -> Result<()> {
+        if !self.native_hierarchy || !self.inst.auth_required() {
+            return Err(crate::http_sessions::invalid());
+        }
+        let user = auth::get_user(&self.inst.system, &lease.account)?.ok_or_else(crate::http_sessions::invalid)?;
+        if !lease.matches(&user) {
+            return Err(crate::http_sessions::invalid());
+        }
+        self.enter_authenticated_user(&user)?;
+        self.http_lease = Some(lease);
+        Ok(())
+    }
+
+    fn enter_authenticated_user(&mut self, user: &User) -> Result<()> {
         if self.txn.is_some() {
             self.rollback();
         }
@@ -254,7 +281,7 @@ impl Session {
         self.hierarchy_subject = Some(user.hierarchy_subject.clone());
         self.user = Some(UserCtx { name: user.name.clone(), role: user.role });
         self.tz = user.timezone.as_deref().and_then(|z| crate::time::Zone::parse(z).ok());
-        self.take_account_formats(&user);
+        self.take_account_formats(user);
         self.use_zone();
         if self.native_hierarchy {
             self.enter_native_hierarchy()?;
@@ -267,8 +294,7 @@ impl Session {
                 None => self.leave(),
             }
         }
-        self.inst.audit.log(name, "login", true);
-        Ok(user)
+        Ok(())
     }
 
     fn enter(&mut self, workspace: &str, level: Priv) -> Result<()> {
