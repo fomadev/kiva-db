@@ -809,8 +809,8 @@ covers startup, authorization, compatibility and operational limits.
 
 | Coverage | Regression checks |
 | --- | --- |
-| REST01–REST07 | Basic authentication, collection create and retire, homonyms, typed binary values, Viewer restrictions, indistinguishable missing and hidden resources, and revoked access |
-| REST08–REST12 | Invalid escape, oversized body, pinned TLS, concurrent writes from separate transports, and a rolled-back batch |
+| REST01–REST07 | Basic authentication, collection creation, rename and retirement, explicit cascade, default protection, homonyms, typed binary values, Viewer restrictions, indistinguishable missing and hidden resources, and revoked access |
+| REST08–REST12 | Invalid escape, duplicate framing headers, oversized body, pinned TLS, concurrent writes from separate transports, and a rolled-back batch |
 | RESP01–RESP10, RESP12 | AUTH, explicit selection, isolation, GET/SET/DEL, TTL, MULTI/EXEC, pipelines, revoked grants, malformed frames, and disconnect before EXEC |
 | RESP11 | Shared connection cap, queue capacity, lane isolation and removal of expired waiters |
 | CROSS01–CROSS06 | Shared data, grant revocation during an open RESP transaction, stale identity after re-creation, and persistence after restart |

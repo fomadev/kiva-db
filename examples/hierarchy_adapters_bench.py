@@ -12,6 +12,7 @@ import socket
 import ssl
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -23,10 +24,16 @@ AUTH = "Basic " + base64.b64encode(f"kiva:{PASSWORD}".encode()).decode()
 QUERY = b'{"op":"query","target":"doc:*.city","cmp":"=","value":"Paris","limit":10}'
 
 
+class Refused(RuntimeError):
+    """The server rejected the request before dispatch."""
+
+
 def tcp_request(sock, reader, code, payload):
     sock.sendall(struct.pack("!IH", len(payload) + 2, code) + payload)
     size, status = struct.unpack("!IH", reader.read(6))
     body = reader.read(size - 2)
+    if status and body.startswith(b"ERR_SERVER_BUSY:"):
+        raise Refused(body)
     if status or len(body) != size - 2:
         raise RuntimeError((status, body))
     return body
@@ -40,6 +47,8 @@ def resp_encode(*args):
 
 def resp_read(reader):
     line = reader.readline()
+    if line.startswith(b"-BUSYERR"):
+        raise Refused(line)
     if not line or line[:1] == b"-":
         raise RuntimeError(line)
     if line[:1] == b"$":
@@ -65,6 +74,8 @@ def workflow(protocol, port, worker, count, context, ready, mode):
             conn.request(method, PATH + path, data, {"Authorization": AUTH, "Content-Type": "application/json"})
             response = conn.getresponse()
             payload = response.read()
+            if response.status == 503:
+                raise Refused(payload)
             if response.status != 200:
                 raise RuntimeError((response.status, payload))
             return payload
@@ -119,11 +130,24 @@ def workflow(protocol, port, worker, count, context, ready, mode):
                 sock.sendall(
                     resp_encode(b"MULTI") + resp_encode(b"SET", key, b"benchmark") + resp_encode(b"EXEC")
                 )
-                return [resp_read(reader) for _ in range(3)]
+                resp_read(reader)
+                resp_read(reader)
+                try:
+                    return resp_read(reader)
+                except Refused:
+                    call(b"DISCARD")
+                    raise
 
             def pipeline():
                 sock.sendall(resp_encode(b"GET", key) * 8)
-                return [resp_read(reader) for _ in range(8)]
+                refused = None
+                for _ in range(8):
+                    try:
+                        resp_read(reader)
+                    except Refused as err:
+                        refused = err
+                if refused:
+                    raise refused
 
         auth = time.perf_counter_ns() - auth_start
         put()
@@ -135,11 +159,16 @@ def workflow(protocol, port, worker, count, context, ready, mode):
         ready.wait(timeout=120)
         started = time.perf_counter()
         latencies = []
+        refused = 0
         for _ in range(count):
             before = time.perf_counter_ns()
-            action()
-            latencies.append(time.perf_counter_ns() - before)
-        return started, time.perf_counter(), latencies, auth
+            try:
+                action()
+            except Refused:
+                refused += 1
+            else:
+                latencies.append(time.perf_counter_ns() - before)
+        return started, time.perf_counter(), latencies, auth, refused
     finally:
         close()
 
@@ -164,23 +193,63 @@ def resources(pid):
 
 
 def percentile(data, percent):
-    return sorted(data)[round((len(data) - 1) * percent)] / 1_000_000
+    return sorted(data)[round((len(data) - 1) * percent)] / 1_000_000 if data else float("nan")
+
+
+def probe_boundaries(ports, context):
+    with socket.create_connection(("127.0.0.1", ports[0]), timeout=15) as admin, admin.makefile("rb") as wire:
+        tcp_request(admin, wire, 9, b"hierarchy/1")
+        tcp_request(admin, wire, 2, f"kiva\0{PASSWORD}".encode())
+        redis = socket.create_connection(("127.0.0.1", ports[2]), timeout=15)
+        if context:
+            redis = context.wrap_socket(redis, server_hostname="127.0.0.1")
+        with redis, redis.makefile("rb") as replies:
+            for command in [(b"AUTH", b"reader", PASSWORD.encode()), (b"KIVA.USE", SELECT), (b"GET", b"key0")]:
+                redis.sendall(resp_encode(*command))
+                resp_read(replies)
+            before = time.perf_counter_ns()
+            tcp_request(admin, wire, 3, b"hierarchy revoke reader read collection " + SELECT)
+            revoked = time.perf_counter_ns()
+            redis.sendall(resp_encode(b"GET", b"key0"))
+            assert replies.readline().startswith(b"-NOPERM ")
+            print(f"revoke_ms={(revoked - before) / 1e6:.3f},deny_ms={(time.perf_counter_ns() - revoked) / 1e6:.3f}",
+                  file=sys.stderr)
+
+    # Claim each slot by exchanging a frame before opening the next socket.
+    # Probe the managed connection cap over loopback without a handshake.
+    sockets = []
+    try:
+        for _ in range(128):
+            sock = socket.create_connection(("127.0.0.1", ports[2]), timeout=15)
+            sockets.append(sock)
+            with sock.makefile("rb") as replies:
+                sock.sendall(resp_encode(b"PING"))
+                assert resp_read(replies) == b"PONG"
+        before = time.perf_counter_ns()
+        with socket.create_connection(("127.0.0.1", ports[2]), timeout=15) as sock, sock.makefile("rb") as replies:
+            assert replies.readline().startswith(b"-BUSYERR ")
+        print(f"connection_cap=128,refusal_ms={(time.perf_counter_ns() - before) / 1e6:.3f}", file=sys.stderr)
+    finally:
+        for sock in sockets:
+            sock.close()
 
 
 def run(binary, home, args):
     env = dict(os.environ, KIVADB_NO_UPDATE_CHECK="1")
     prefix = [binary, "--home", str(home)]
     bootstrap = [
-        f"modify user kiva password {PASSWORD}", "config set auth_required true",
+        f"modify user kiva password {PASSWORD}",
+        f"create user reader identified by {PASSWORD} role viewer", "config set auth_required true",
         "hierarchy data", "workspace create bench", "switch bench", "project create app",
         "use app", "collection create keys", "use collection bench.app.keys",
         'set doc:1 {"city":"Paris"}', "create index on doc:* (city)",
+        "hierarchy grant reader read collection bench.app.keys",
     ]
-    for login, commands in [([], bootstrap[:2]), (["-u", "kiva", "-p", PASSWORD], bootstrap[2:])]:
+    for login, commands in [([], bootstrap[:3]), (["-u", "kiva", "-p", PASSWORD], bootstrap[3:])]:
         out = subprocess.run(prefix + ["--no-listen"] + login +
                              [arg for command in commands for arg in ("-e", command)],
-                             env=env, capture_output=True, text=True, check=True)
-        if "[ERR]" in out.stdout + out.stderr:
+                             env=env, capture_output=True, text=True)
+        if out.returncode or "[ERR]" in out.stdout + out.stderr:
             raise RuntimeError(out.stdout + out.stderr)
     ports = free_ports()
     command = prefix + ["serve", "--hierarchical-tcp", "--hierarchical-http", "--hierarchical-resp"]
@@ -200,7 +269,7 @@ def run(binary, home, args):
             else:
                 raise RuntimeError("server startup timed out")
             context = ssl.create_default_context(cafile=str(home / "tls/cert.pem")) if args.tls else None
-            print("protocol,mode,tls,clients,ops_s,p50_ms,p95_ms,p99_ms,setup_p95_ms,cpu_s,active_rss_kib,active_fds", flush=True)
+            print("protocol,mode,tls,clients,ops_s,p50_ms,p95_ms,p99_ms,setup_p95_ms,cpu_s,active_rss_kib,active_fds,refused", flush=True)
             for protocol, port in zip(["tcp", "rest", "resp"], ports):
                 for n in args.clients:
                     for mode in args.modes:
@@ -219,8 +288,9 @@ def run(binary, home, args):
                         stats = [len(times) * factor / elapsed] + [percentile(times, p) for p in (0.5, 0.95, 0.99)]
                         stats += [percentile([row[3] for row in data], 0.95), resources(server.pid)[0] - cpu]
                         print(f"{protocol},{mode},{args.tls},{n}," + ",".join(f"{x:.3f}" for x in stats)
-                              + f",{active[1]},{active[2]}", flush=True)
-                        time.sleep(0.15)
+                              + f",{active[1]},{active[2]},{sum(row[4] for row in data)}", flush=True)
+                        time.sleep(0.25)
+            probe_boundaries(ports, context)
         finally:
             server.terminate()
             server.wait(timeout=30)

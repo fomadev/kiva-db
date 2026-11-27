@@ -66,8 +66,11 @@ pub(crate) fn line(reader: &mut impl BufRead, max: usize) -> io::Result<Option<V
     if count == 0 {
         return Ok(None);
     }
-    if count > max || !bytes.ends_with(b"\r\n") {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "line is too large or unterminated"));
+    if count > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "line is too large"));
+    }
+    if !bytes.ends_with(b"\r\n") {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "line requires CRLF"));
     }
     bytes.truncate(count - 2);
     Ok(Some(bytes))
@@ -94,9 +97,10 @@ pub(crate) fn name(value: &str) -> Result<&str> {
 }
 
 pub(crate) fn select(sess: &mut Session, path: &str) -> Result<()> {
-    let names: Vec<_> = path.split('.').collect();
-    if names.len() != 3 || names.iter().any(|part| name(part).is_err()) {
-        return Err(KivaError::Invalid("expected workspace.project.collection".into()));
+    let mut parts = path.splitn(3, '.');
+    for _ in 0..3 {
+        name(parts.next().unwrap_or_default())
+            .map_err(|_| KivaError::Invalid("expected workspace.project.collection".into()))?;
     }
     command(sess, &format!("use collection \"{path}\"")).map(|_| ())
 }

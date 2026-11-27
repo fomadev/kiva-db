@@ -163,6 +163,9 @@ fn check_arity(name: &str, n: usize) -> Res {
 
 impl Connection {
     fn handle(&mut self, args: Vec<Vec<u8>>) -> Res {
+        if args[0].len() > 32 {
+            return Err(Reply::err("invalid command name"));
+        }
         let name = text(&args[0])?.to_ascii_uppercase();
         let inst = self.sess.inst.clone();
         match (name.as_str(), args.as_slice()) {

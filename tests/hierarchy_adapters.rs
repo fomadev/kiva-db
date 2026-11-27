@@ -152,6 +152,12 @@ fn adapters_share_collection_data_permissions_and_stable_identities() {
     assert_eq!(resp(&mut redis, &["GET", "shared"]), "$4");
     assert_eq!(line(&mut redis), "rest");
     assert_eq!(http(&mut rest, "kiva", "GET", &format!("{B}/keys/shared"), Json::Null).0, 404);
+    let mut redis_other = connect(server.resp);
+    assert_eq!(resp(&mut redis_other, &["AUTH", "kiva", "test-pass"]), "+OK");
+    assert_eq!(resp(&mut redis_other, &["KIVA.USE", "Trading.app.users"]), "+OK");
+    assert_eq!(resp(&mut redis_other, &["GET", "shared"]), "$-1");
+    assert_eq!(resp(&mut redis_other, &["SET", "shared", "other"]), "+OK");
+    assert_eq!(http(&mut rest, "kiva", "GET", &format!("{B}/keys/shared"), Json::Null).1["value"], "other");
     assert_eq!(
         http(&mut rest, "editor", "GET", B, Json::Null),
         http(&mut rest, "editor", "GET", &B.replace("Trading", "Missing"), Json::Null)
@@ -182,6 +188,12 @@ fn adapters_share_collection_data_permissions_and_stable_identities() {
     assert_eq!(http(&mut rest, "kiva", "POST", parent, json!({"name":"users"})).0, 201);
     assert!(resp(&mut redis, &["GET", "shared"]).starts_with("-NOPERM"));
     assert_eq!(http(&mut rest, "kiva", "GET", &key, Json::Null).0, 404);
+
+    let parent = "/v2/workspaces/Trading";
+    assert_eq!(http(&mut rest, "kiva", "DELETE", parent, Json::Null).0, 400);
+    assert_eq!(http(&mut rest, "kiva", "DELETE", parent, json!({"cascade":true})).0, 200);
+    assert!(resp(&mut redis_other, &["GET", "shared"]).starts_with("-NOPERM"));
+    assert_eq!(http(&mut rest, "kiva", "DELETE", "/v2/workspaces/default", json!({"cascade":true})).0, 400);
 }
 
 #[test]
@@ -222,6 +234,13 @@ fn requests_and_transactions_are_bounded_and_fail_safely() {
     let mut oversized = connect(server.rest);
     oversized.get_mut().write_all(b"PUT /health HTTP/1.1\r\nHost: local\r\nContent-Length: 3000000\r\n\r\n").unwrap();
     assert_eq!(http_reply(&mut oversized).0, 413);
+
+    let mut ambiguous = connect(server.rest);
+    ambiguous
+        .get_mut()
+        .write_all(b"POST /health HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nContent-Length: 1\r\n\r\n")
+        .unwrap();
+    assert_eq!(http_reply(&mut ambiguous).0, 400);
 
     assert_eq!(resp(&mut redis, &["AUTH", "kiva", "test-pass"]), "+OK");
     assert_eq!(resp(&mut redis, &["KIVA.USE", "Fordima.app.users"]), "+OK");

@@ -107,7 +107,7 @@ fn decode_component(input: &str) -> Option<String> {
 
 fn read_request(reader: &mut impl BufRead) -> std::result::Result<Option<Request>, u16> {
     let get_line = |reader: &mut _, limit| {
-        transport::line(reader, limit).map_err(|e| if e.kind() == io::ErrorKind::InvalidData { 431u16 } else { 400 })
+        transport::line(reader, limit).map_err(|e| if e.kind() == io::ErrorKind::InvalidInput { 431u16 } else { 400 })
     };
     let Some(first) = get_line(reader, HEADER_MAX)? else { return Ok(None) };
     let mut remaining = HEADER_MAX - first.len() - 2;
@@ -117,20 +117,26 @@ fn read_request(reader: &mut impl BufRead) -> std::result::Result<Option<Request
     else {
         return Err(400);
     };
-    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+        || method.is_empty()
+        || !method.bytes().all(|b| b.is_ascii_uppercase())
+    {
         return Err(400);
     }
     let target = target.strip_prefix('/').filter(|p| !p.contains(['?', '#'])).ok_or(400u16)?;
     let path = target.split('/').map(decode_component).collect::<Option<Vec<_>>>().ok_or(400u16)?;
     let mut headers = HashMap::new();
     loop {
-        if remaining < 2 || headers.len() >= 64 {
+        if remaining < 2 {
             return Err(431);
         }
         let line = get_line(reader, remaining)?.ok_or(400u16)?;
         remaining -= line.len() + 2;
         if line.is_empty() {
             break;
+        }
+        if headers.len() >= 64 {
+            return Err(431);
         }
         let line = std::str::from_utf8(&line).map_err(|_| 400u16)?;
         let (name, value) = line.split_once(':').ok_or(400u16)?;
