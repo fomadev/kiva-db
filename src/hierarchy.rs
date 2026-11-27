@@ -353,7 +353,7 @@ impl Session {
         self.hierarchy_command(command, args, out).map_err(|error| error.to_string())
     }
 
-    fn hierarchy_command(&mut self, command: &str, args: &[Token], out: &mut Out) -> Result<()> {
+    pub(crate) fn hierarchy_command(&mut self, command: &str, args: &[Token], out: &mut Out) -> Result<()> {
         let managed = self.hierarchy.is_some_and(|context| context.managed)
             || command == "hierarchy" && args.first().is_some_and(|mode| mode.is_kw("storage") || mode.is_kw("data"));
         let native_account = self.native_hierarchy
@@ -886,8 +886,14 @@ impl Session {
                 .lock()
                 .map_err(|_| KivaError::Other("managed catalog cache poisoned".into()))?;
             cache.take();
-            let catalog = crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), edit)
-                .map_err(|e| self.managed_storage_error(e))?;
+            let mut rejection = None;
+            let catalog = crate::managed_layout::edit(&self.inst.home, &self.inst.engine_options(), |catalog| {
+                edit(catalog).map_err(|reason| {
+                    rejection = Some(reason);
+                    KivaError::Other("catalog edit refused".into())
+                })
+            });
+            let catalog = catalog.map_err(|e| rejection.unwrap_or_else(|| self.managed_storage_error(e)))?;
             *cache = Some(Arc::new(catalog));
             return Ok(());
         }

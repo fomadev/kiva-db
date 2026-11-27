@@ -29,6 +29,10 @@
 //! Publish/subscribe (`PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`, `PUBSUB`) is
 //! described in [`crate::pubsub`].
 
+#[path = "resp_managed.rs"]
+mod managed;
+pub use managed::start_hierarchical_resp;
+
 use crate::auth::Role;
 use crate::engine::BatchOp;
 use crate::error::{KivaError, Result};
@@ -648,19 +652,6 @@ impl Conn {
         )))
     }
 
-    /// The Redis type of a key: `hash` and `list` from the KivaDB type,
-    /// `set` and `zset` from the object's marker.
-    fn redis_type(&mut self, k: &str, ty: Type) -> std::result::Result<&'static str, Reply> {
-        Ok(match ty {
-            Type::Object => match self.get(k)? {
-                Some((Value::Doc(j), _)) => sets::marked(&j).unwrap_or("hash"),
-                _ => "hash",
-            },
-            Type::Array => "list",
-            _ => "string",
-        })
-    }
-
     /// `KIVA.SIMILAR <pattern>.<field> <vector as JSON> [FILTER <field> <op> <value>]... [LIMIT n]
     /// [METRIC cosine|dot|l2] [EF n] [EXACT]`: the closest documents, as
     /// `[key, score, document as JSON]` triples. Every FILTER must hold.
@@ -949,15 +940,7 @@ impl Conn {
             }
 
             // -- strings ----------------------------------------------------
-            "GET" => {
-                arity(args, 2)?;
-                let k = key(&args[1])?;
-                match self.get(&k)? {
-                    None => Ok(Reply::nil()),
-                    Some((v, _)) => bytes_of(&v).map(Reply::bulk).ok_or_else(Reply::wrong_type),
-                }
-            }
-            "SET" => self.set(args),
+            scalar if scalar_need(scalar).is_some() => Scalar { sess: &mut self.sess }.run(scalar, args),
             "SETNX" => {
                 arity(args, 3)?;
                 let k = key(&args[1])?;
@@ -1001,34 +984,6 @@ impl Conn {
                     }
                 }
             }
-            "MGET" => {
-                arity(args, 2)?;
-                let mut items = Vec::new();
-                for a in &args[1..] {
-                    let k = key(a)?;
-                    items.push(match self.get(&k)? {
-                        Some((v, _)) => Reply::Bulk(bytes_of(&v)),
-                        None => Reply::nil(),
-                    });
-                }
-                Ok(Reply::array(items))
-            }
-            "MSET" => {
-                if args.len() < 3 || args.len().is_multiple_of(2) {
-                    return Err(Reply::err("wrong number of arguments for 'mset' command"));
-                }
-                let mut ops = Vec::new();
-                for pair in args[1..].chunks(2) {
-                    ops.push(BatchOp::Put {
-                        key: key(&pair[0])?,
-                        value: value_of(&pair[1]),
-                        expires_at: 0,
-                        msgpack: false,
-                    });
-                }
-                self.sess.apply(ops)?;
-                Ok(Reply::ok())
-            }
             "APPEND" => {
                 arity(args, 3)?;
                 let k = key(&args[1])?;
@@ -1048,20 +1003,6 @@ impl Conn {
                     None => Ok(Reply::Int(0)),
                     Some((v, _)) => Ok(Reply::Int(bytes_of(&v).ok_or_else(Reply::wrong_type)?.len() as i64)),
                 }
-            }
-            "INCR" | "DECR" | "INCRBY" | "DECRBY" => {
-                arity(args, if name.ends_with("BY") { 3 } else { 2 })?;
-                let k = key(&args[1])?;
-                let step = match name {
-                    "INCR" => 1,
-                    "DECR" => -1,
-                    "INCRBY" => int(&args[2])?,
-                    _ => int(&args[2])?.checked_neg().ok_or_else(|| Reply::err("decrement would overflow"))?,
-                };
-                let (cur, exp) = self.counter(&k)?;
-                let next = cur.checked_add(step).ok_or_else(|| Reply::err("increment or decrement would overflow"))?;
-                self.put(&k, Value::Num(next.to_string()), exp)?;
-                Ok(Reply::Int(next))
             }
             "INCRBYFLOAT" => {
                 arity(args, 3)?;
@@ -1096,43 +1037,6 @@ impl Conn {
             }
 
             // -- keys -------------------------------------------------------
-            "DEL" | "UNLINK" => {
-                arity(args, 2)?;
-                let mut n = 0;
-                for a in &args[1..] {
-                    if self.sess.kv_del(&key(a)?)? {
-                        n += 1;
-                    }
-                }
-                Ok(Reply::Int(n))
-            }
-            "EXISTS" => {
-                arity(args, 2)?;
-                let mut n = 0;
-                for a in &args[1..] {
-                    if self.sess.kv_exists(&key(a)?)? {
-                        n += 1;
-                    }
-                }
-                Ok(Reply::Int(n))
-            }
-            "TYPE" => {
-                arity(args, 2)?;
-                let k = key(&args[1])?;
-                let t = match self.sess.kv_type(&k)? {
-                    None => "none",
-                    Some(ty) => self.redis_type(&k, ty)?,
-                };
-                Ok(Reply::Simple(t.into()))
-            }
-            "KEYS" => {
-                arity(args, 2)?;
-                self.sess.check(Need::Read)?;
-                let pattern = text(&args[1])?;
-                let keys = self.sess.engine.keys_matching(&pattern, 0);
-                Ok(Reply::array(keys.into_iter().map(|(k, _)| Reply::bulk(k)).collect()))
-            }
-            "SCAN" => self.scan(args),
             "RENAME" => {
                 arity(args, 3)?;
                 let (from, to) = (key(&args[1])?, key(&args[2])?);
@@ -1146,63 +1050,6 @@ impl Conn {
                     ])?;
                 }
                 Ok(Reply::ok())
-            }
-            "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => {
-                arity(args, 3)?;
-                let k = key(&args[1])?;
-                let n = int(&args[2])?;
-                let (mut nx, mut xx, mut gt, mut lt) = (false, false, false, false);
-                for opt in &args[3..] {
-                    match String::from_utf8_lossy(opt).to_ascii_uppercase().as_str() {
-                        "NX" => nx = true,
-                        "XX" => xx = true,
-                        "GT" => gt = true,
-                        "LT" => lt = true,
-                        other => return Err(Reply::err(format!("Unsupported option {other}"))),
-                    }
-                }
-                if (nx && (xx || gt || lt)) || (gt && lt) {
-                    return Err(Reply::err("NX and XX, GT or LT options at the same time are not compatible"));
-                }
-                let exp = deadline(name, n).expect("an expiry command");
-                let Some((v, m)) = self.get(&k)? else { return Ok(Reply::Int(0)) };
-                // 0 means "no expiry", which counts as infinitely far for GT and LT.
-                let cur = m.expires_at;
-                let allowed = if nx {
-                    cur == 0
-                } else {
-                    (!xx || cur != 0) && (!gt || (cur != 0 && exp > cur)) && (!lt || cur == 0 || exp < cur)
-                };
-                if !allowed {
-                    return Ok(Reply::Int(0));
-                }
-                if exp <= now_ms() {
-                    self.sess.kv_del(&k)?;
-                } else {
-                    self.sess.kv_put(&k, v, exp, m.msgpack)?;
-                }
-                Ok(Reply::Int(1))
-            }
-            "PERSIST" => {
-                arity(args, 2)?;
-                let k = key(&args[1])?;
-                match self.get(&k)? {
-                    Some((v, m)) if m.expires_at > 0 => {
-                        self.sess.kv_put(&k, v, 0, m.msgpack)?;
-                        Ok(Reply::Int(1))
-                    }
-                    _ => Ok(Reply::Int(0)),
-                }
-            }
-            "EXPIRETIME" | "PEXPIRETIME" => {
-                arity(args, 2)?;
-                let k = key(&args[1])?;
-                Ok(Reply::Int(match self.get(&k)? {
-                    None => -2,
-                    Some((_, m)) if m.expires_at == 0 => -1,
-                    Some((_, m)) if name == "EXPIRETIME" => m.expires_at / 1000,
-                    Some((_, m)) => m.expires_at,
-                }))
             }
             "GETEX" => {
                 arity(args, 2)?;
@@ -1226,24 +1073,6 @@ impl Conn {
                 }
                 Ok(Reply::bulk(bytes))
             }
-            "TTL" | "PTTL" => {
-                arity(args, 2)?;
-                let k = key(&args[1])?;
-                Ok(Reply::Int(match self.get(&k)? {
-                    None => -2,
-                    Some((_, m)) if m.expires_at == 0 => -1,
-                    Some((_, m)) => {
-                        let ms = (m.expires_at - now_ms()).max(0);
-                        // Rounded to the nearest second, as Redis does.
-                        if name == "TTL" {
-                            (ms + 500) / 1000
-                        } else {
-                            ms
-                        }
-                    }
-                }))
-            }
-
             // -- hashes (KivaDB objects) ------------------------------------
             "HSET" | "HMSET" => {
                 if args.len() < 4 || !args.len().is_multiple_of(2) {
@@ -1661,110 +1490,6 @@ impl Conn {
         out.map_err(script_error)
     }
 
-    /// The integer held by `key` (0 when absent) and its expiry.
-    fn counter(&mut self, k: &str) -> std::result::Result<(i64, i64), Reply> {
-        match self.get(k)? {
-            None => Ok((0, 0)),
-            // `decimal "5"` stays a decimal: INCR would write it back as an int.
-            Some((Value::Decimal(_), _)) => {
-                Err(Reply::err("value is a decimal: use INCRBYFLOAT, which adds to it exactly"))
-            }
-            Some((v, m)) => {
-                let b = bytes_of(&v).ok_or_else(Reply::wrong_type)?;
-                let s = std::str::from_utf8(&b).map_err(|_| Reply::err("value is not an integer or out of range"))?;
-                let n = s.parse::<i64>().map_err(|_| Reply::err("value is not an integer or out of range"))?;
-                Ok((n, m.expires_at))
-            }
-        }
-    }
-
-    fn set(&mut self, args: &[Vec<u8>]) -> Res {
-        arity(args, 3)?;
-        let k = key(&args[1])?;
-        let value = value_of(&args[2]);
-        let (mut nx, mut xx, mut keep, mut get) = (false, false, false, false);
-        let mut exp: Option<i64> = None;
-        let mut i = 3;
-        while i < args.len() {
-            let opt = String::from_utf8_lossy(&args[i]).to_ascii_uppercase();
-            let next = |i: usize| args.get(i + 1).ok_or_else(|| Reply::err("syntax error"));
-            match opt.as_str() {
-                "NX" => nx = true,
-                "XX" => xx = true,
-                "KEEPTTL" => keep = true,
-                "GET" => get = true,
-                "EX" | "PX" | "EXAT" | "PXAT" => {
-                    let n = int(next(i)?)?;
-                    if n <= 0 {
-                        return Err(Reply::err("invalid expire time in 'set' command"));
-                    }
-                    exp = deadline(&opt, n);
-                    i += 1;
-                }
-                _ => return Err(Reply::err("syntax error")),
-            }
-            i += 1;
-        }
-        if (nx && xx) || (keep && exp.is_some()) {
-            return Err(Reply::err("syntax error"));
-        }
-        let old = self.get(&k)?;
-        let old_bytes = match (&old, get) {
-            (Some((v, _)), true) => Some(bytes_of(v).ok_or_else(Reply::wrong_type)?),
-            _ => None,
-        };
-        let skip = (nx && old.is_some()) || (xx && old.is_none());
-        if !skip {
-            let expires_at = match (exp, keep, &old) {
-                (Some(e), _, _) => e,
-                (None, true, Some((_, m))) => m.expires_at,
-                _ => 0,
-            };
-            self.put(&k, value, expires_at)?;
-        }
-        Ok(match (get, skip) {
-            (true, _) => Reply::Bulk(old_bytes),
-            (false, true) => Reply::nil(),
-            (false, false) => Reply::ok(),
-        })
-    }
-
-    fn scan(&mut self, args: &[Vec<u8>]) -> Res {
-        arity(args, 2)?;
-        self.sess.check(Need::Read)?;
-        let cursor = usize::try_from(int(&args[1])?).map_err(|_| Reply::err("invalid cursor"))?;
-        let (mut pattern, mut count, mut kind) = ("*".to_string(), 10usize, None::<String>);
-        let mut i = 2;
-        while i + 1 < args.len() {
-            match String::from_utf8_lossy(&args[i]).to_ascii_uppercase().as_str() {
-                "MATCH" => pattern = text(&args[i + 1])?,
-                "COUNT" => count = int(&args[i + 1])?.clamp(1, 100_000) as usize,
-                "TYPE" => kind = Some(text(&args[i + 1])?.to_ascii_lowercase()),
-                _ => return Err(Reply::err("syntax error")),
-            }
-            i += 2;
-        }
-        // The cursor is a position in the sorted key list.
-        let all = self.sess.engine.range(None, None, false, 0);
-        let end = (cursor + count).min(all.len());
-        let mut keys = Vec::new();
-        for (k, e) in all.get(cursor..end).unwrap_or(&[]) {
-            if !glob_match(&pattern, k) {
-                continue;
-            }
-            // Telling a set from a hash means reading the value: only with TYPE.
-            let wanted = match &kind {
-                None => true,
-                Some(w) => self.redis_type(k, e.ty)? == w.as_str(),
-            };
-            if wanted {
-                keys.push(Reply::bulk(k.clone()));
-            }
-        }
-        let next = if end >= all.len() { 0 } else { end };
-        Ok(Reply::array(vec![Reply::bulk(next.to_string()), Reply::array(keys)]))
-    }
-
     fn exec(&mut self) -> Res {
         let Some(queued) = self.queued.take() else {
             return Err(Reply::err("EXEC without MULTI"));
@@ -1954,5 +1679,343 @@ fn script_error(e: mlua::Error) -> Reply {
         Reply::Error(text)
     } else {
         Reply::Error(format!("ERR Error running script: {text}"))
+    }
+}
+
+fn scalar_need(name: &str) -> Option<Need> {
+    Some(match name {
+        "GET" | "MGET" | "EXISTS" | "TYPE" | "KEYS" | "SCAN" | "TTL" | "PTTL" | "EXPIRETIME" | "PEXPIRETIME" => {
+            Need::Read
+        }
+        "SET" | "MSET" | "DEL" | "UNLINK" | "INCR" | "DECR" | "INCRBY" | "DECRBY" | "EXPIRE" | "PEXPIRE"
+        | "EXPIREAT" | "PEXPIREAT" | "PERSIST" => Need::Write,
+        _ => return None,
+    })
+}
+
+struct Scalar<'a> {
+    sess: &'a mut Session,
+}
+
+impl Scalar<'_> {
+    fn get(&mut self, key: &str) -> std::result::Result<Option<(Value, Meta)>, Reply> {
+        self.sess.kv_get(key).map_err(|e| scalar_error(self.sess.native_hierarchy, e))
+    }
+
+    fn put(&mut self, key: &str, value: Value, expires_at: i64) -> std::result::Result<(), Reply> {
+        self.sess.kv_put(key, value, expires_at, false).map_err(|e| scalar_error(self.sess.native_hierarchy, e))
+    }
+
+    fn run(&mut self, name: &str, args: &[Vec<u8>]) -> Res {
+        let managed = self.sess.native_hierarchy;
+        let on_error = |e| scalar_error(managed, e);
+        match name {
+            "GET" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                match self.get(&k)? {
+                    None => Ok(Reply::nil()),
+                    Some((v, _)) => bytes_of(&v).map(Reply::bulk).ok_or_else(Reply::wrong_type),
+                }
+            }
+            "SET" => self.set(args),
+            "MGET" => {
+                arity(args, 2)?;
+                let mut items = Vec::new();
+                let mut budget = crate::managed_transport::REPLY_MAX;
+                for a in &args[1..] {
+                    let k = key(a)?;
+                    let item = match self.get(&k)? {
+                        Some((v, _)) => Reply::Bulk(bytes_of(&v)),
+                        None => Reply::nil(),
+                    };
+                    if managed {
+                        managed::charge(&mut budget, &item)?;
+                    }
+                    items.push(item);
+                }
+                Ok(Reply::array(items))
+            }
+            "MSET" => {
+                if args.len() < 3 || args.len().is_multiple_of(2) {
+                    return Err(Reply::err("wrong number of arguments for 'mset' command"));
+                }
+                let mut ops = Vec::new();
+                for pair in args[1..].chunks(2) {
+                    ops.push(BatchOp::Put {
+                        key: key(&pair[0])?,
+                        value: value_of(&pair[1]),
+                        expires_at: 0,
+                        msgpack: false,
+                    });
+                }
+                self.sess.apply(ops).map_err(on_error)?;
+                Ok(Reply::ok())
+            }
+            "INCR" | "DECR" | "INCRBY" | "DECRBY" => {
+                arity(args, if name.ends_with("BY") { 3 } else { 2 })?;
+                let k = key(&args[1])?;
+                let step = match name {
+                    "INCR" => 1,
+                    "DECR" => -1,
+                    "INCRBY" => int(&args[2])?,
+                    _ => int(&args[2])?.checked_neg().ok_or_else(|| Reply::err("decrement would overflow"))?,
+                };
+                let (cur, exp) = self.counter(&k)?;
+                let next = cur.checked_add(step).ok_or_else(|| Reply::err("increment or decrement would overflow"))?;
+                self.put(&k, Value::Num(next.to_string()), exp)?;
+                Ok(Reply::Int(next))
+            }
+            "DEL" | "UNLINK" => {
+                arity(args, 2)?;
+                let mut n = 0;
+                for a in &args[1..] {
+                    if self.sess.kv_del(&key(a)?).map_err(on_error)? {
+                        n += 1;
+                    }
+                }
+                Ok(Reply::Int(n))
+            }
+            "EXISTS" => {
+                arity(args, 2)?;
+                let mut n = 0;
+                for a in &args[1..] {
+                    if self.sess.kv_exists(&key(a)?).map_err(on_error)? {
+                        n += 1;
+                    }
+                }
+                Ok(Reply::Int(n))
+            }
+            "TYPE" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                let t = match self.sess.kv_type(&k).map_err(on_error)? {
+                    None => "none",
+                    Some(ty) => self.redis_type(&k, ty)?,
+                };
+                Ok(Reply::Simple(t.into()))
+            }
+            "KEYS" => {
+                arity(args, 2)?;
+                self.sess.check(Need::Read).map_err(on_error)?;
+                let pattern = text(&args[1])?;
+                let limit = if self.sess.native_hierarchy { 1001 } else { 0 };
+                let keys = self.sess.engine.keys_matching(&pattern, limit);
+                if limit != 0 && keys.len() == limit {
+                    return Err(Reply::err("too many keys; use SCAN"));
+                }
+                Ok(Reply::array(keys.into_iter().map(|(k, _)| Reply::bulk(k)).collect()))
+            }
+            "SCAN" => self.scan(args),
+            "EXPIRE" | "PEXPIRE" | "EXPIREAT" | "PEXPIREAT" => {
+                arity(args, 3)?;
+                let k = key(&args[1])?;
+                let n = int(&args[2])?;
+                let (mut nx, mut xx, mut gt, mut lt) = (false, false, false, false);
+                for opt in &args[3..] {
+                    match String::from_utf8_lossy(opt).to_ascii_uppercase().as_str() {
+                        "NX" => nx = true,
+                        "XX" => xx = true,
+                        "GT" => gt = true,
+                        "LT" => lt = true,
+                        other => return Err(Reply::err(format!("Unsupported option {other}"))),
+                    }
+                }
+                if (nx && (xx || gt || lt)) || (gt && lt) {
+                    return Err(Reply::err("NX and XX, GT or LT options at the same time are not compatible"));
+                }
+                let exp = deadline(name, n).expect("an expiry command");
+                let Some((v, m)) = self.get(&k)? else { return Ok(Reply::Int(0)) };
+                // 0 means "no expiry", which counts as infinitely far for GT and LT.
+                let cur = m.expires_at;
+                let allowed = if nx {
+                    cur == 0
+                } else {
+                    (!xx || cur != 0) && (!gt || (cur != 0 && exp > cur)) && (!lt || cur == 0 || exp < cur)
+                };
+                if !allowed {
+                    return Ok(Reply::Int(0));
+                }
+                if exp <= now_ms() {
+                    self.sess.kv_del(&k).map_err(on_error)?;
+                } else {
+                    self.sess.kv_put(&k, v, exp, m.msgpack).map_err(on_error)?;
+                }
+                Ok(Reply::Int(1))
+            }
+            "PERSIST" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                match self.get(&k)? {
+                    Some((v, m)) if m.expires_at > 0 => {
+                        self.sess.kv_put(&k, v, 0, m.msgpack).map_err(on_error)?;
+                        Ok(Reply::Int(1))
+                    }
+                    _ => Ok(Reply::Int(0)),
+                }
+            }
+            "EXPIRETIME" | "PEXPIRETIME" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                Ok(Reply::Int(match self.get(&k)? {
+                    None => -2,
+                    Some((_, m)) if m.expires_at == 0 => -1,
+                    Some((_, m)) if name == "EXPIRETIME" => m.expires_at / 1000,
+                    Some((_, m)) => m.expires_at,
+                }))
+            }
+            "TTL" | "PTTL" => {
+                arity(args, 2)?;
+                let k = key(&args[1])?;
+                Ok(Reply::Int(match self.get(&k)? {
+                    None => -2,
+                    Some((_, m)) if m.expires_at == 0 => -1,
+                    Some((_, m)) => {
+                        let ms = (m.expires_at - now_ms()).max(0);
+                        // Rounded to the nearest second, as Redis does.
+                        if name == "TTL" {
+                            (ms + 500) / 1000
+                        } else {
+                            ms
+                        }
+                    }
+                }))
+            }
+
+            _ => Err(Reply::err("unsupported scalar command")),
+        }
+    }
+
+    /// The integer held by `key` (0 when absent) and its expiry.
+    fn counter(&mut self, k: &str) -> std::result::Result<(i64, i64), Reply> {
+        match self.get(k)? {
+            None => Ok((0, 0)),
+            // `decimal "5"` stays a decimal: INCR would write it back as an int.
+            Some((Value::Decimal(_), _)) => {
+                Err(Reply::err("value is a decimal: use INCRBYFLOAT, which adds to it exactly"))
+            }
+            Some((v, m)) => {
+                let b = bytes_of(&v).ok_or_else(Reply::wrong_type)?;
+                let s = std::str::from_utf8(&b).map_err(|_| Reply::err("value is not an integer or out of range"))?;
+                let n = s.parse::<i64>().map_err(|_| Reply::err("value is not an integer or out of range"))?;
+                Ok((n, m.expires_at))
+            }
+        }
+    }
+
+    fn set(&mut self, args: &[Vec<u8>]) -> Res {
+        arity(args, 3)?;
+        let k = key(&args[1])?;
+        let value = value_of(&args[2]);
+        let (mut nx, mut xx, mut keep, mut get) = (false, false, false, false);
+        let mut exp: Option<i64> = None;
+        let mut i = 3;
+        while i < args.len() {
+            let opt = String::from_utf8_lossy(&args[i]).to_ascii_uppercase();
+            let next = |i: usize| args.get(i + 1).ok_or_else(|| Reply::err("syntax error"));
+            match opt.as_str() {
+                "NX" => nx = true,
+                "XX" => xx = true,
+                "KEEPTTL" => keep = true,
+                "GET" => get = true,
+                "EX" | "PX" | "EXAT" | "PXAT" => {
+                    let n = int(next(i)?)?;
+                    if n <= 0 {
+                        return Err(Reply::err("invalid expire time in 'set' command"));
+                    }
+                    exp = deadline(&opt, n);
+                    i += 1;
+                }
+                _ => return Err(Reply::err("syntax error")),
+            }
+            i += 1;
+        }
+        if (nx && xx) || (keep && exp.is_some()) {
+            return Err(Reply::err("syntax error"));
+        }
+        let old = self.get(&k)?;
+        let old_bytes = match (&old, get) {
+            (Some((v, _)), true) => Some(bytes_of(v).ok_or_else(Reply::wrong_type)?),
+            _ => None,
+        };
+        let skip = (nx && old.is_some()) || (xx && old.is_none());
+        if !skip {
+            let expires_at = match (exp, keep, &old) {
+                (Some(e), _, _) => e,
+                (None, true, Some((_, m))) => m.expires_at,
+                _ => 0,
+            };
+            self.put(&k, value, expires_at)?;
+        }
+        Ok(match (get, skip) {
+            (true, _) => Reply::Bulk(old_bytes),
+            (false, true) => Reply::nil(),
+            (false, false) => Reply::ok(),
+        })
+    }
+
+    fn scan(&mut self, args: &[Vec<u8>]) -> Res {
+        arity(args, 2)?;
+        self.sess.check(Need::Read)?;
+        let cursor = usize::try_from(int(&args[1])?).map_err(|_| Reply::err("invalid cursor"))?;
+        let (mut pattern, mut count, mut kind) = ("*".to_string(), 10usize, None::<String>);
+        let mut i = 2;
+        while i + 1 < args.len() {
+            match String::from_utf8_lossy(&args[i]).to_ascii_uppercase().as_str() {
+                "MATCH" => pattern = text(&args[i + 1])?,
+                "COUNT" => count = int(&args[i + 1])?.clamp(1, 100_000) as usize,
+                "TYPE" => kind = Some(text(&args[i + 1])?.to_ascii_lowercase()),
+                _ => return Err(Reply::err("syntax error")),
+            }
+            i += 2;
+        }
+        // The cursor is a position in the sorted key list.
+        let (page, next) = if self.sess.native_hierarchy {
+            if i != args.len() {
+                return Err(Reply::err("syntax error"));
+            }
+            self.sess.engine.scan_page(cursor, count.min(1000))
+        } else {
+            let all = self.sess.engine.range(None, None, false, 0);
+            let end = cursor.saturating_add(count).min(all.len());
+            let next = if end >= all.len() { 0 } else { end };
+            (all.get(cursor..end).unwrap_or(&[]).to_vec(), next)
+        };
+        let mut keys = Vec::new();
+        for (k, e) in &page {
+            if !glob_match(&pattern, k) {
+                continue;
+            }
+            // Telling a set from a hash means reading the value: only with TYPE.
+            let wanted = match &kind {
+                None => true,
+                Some(w) => self.redis_type(k, e.ty)? == w.as_str(),
+            };
+            if wanted {
+                keys.push(Reply::bulk(k.clone()));
+            }
+        }
+        Ok(Reply::array(vec![Reply::bulk(next.to_string()), Reply::array(keys)]))
+    }
+
+    /// The Redis type of a key: `hash` and `list` from the KivaDB type,
+    /// `set` and `zset` from the object's marker.
+    fn redis_type(&mut self, k: &str, ty: Type) -> std::result::Result<&'static str, Reply> {
+        Ok(match ty {
+            Type::Object => match self.get(k)? {
+                Some((Value::Doc(j), _)) => sets::marked(&j).unwrap_or("hash"),
+                _ => "hash",
+            },
+            Type::Array => "list",
+            _ => "string",
+        })
+    }
+}
+
+fn scalar_error(managed: bool, error: KivaError) -> Reply {
+    if managed {
+        managed::error(error)
+    } else {
+        Reply::from(error)
     }
 }

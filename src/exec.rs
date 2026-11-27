@@ -1403,6 +1403,15 @@ const HELP: &str = r#"
 impl Session {
     /// Runs one command line and returns what it printed.
     pub fn execute(&mut self, line: &str) -> Out {
+        self.execute_inner(line, false)
+    }
+
+    /// Adapter call under its existing admission permit.
+    pub(crate) fn execute_admitted(&mut self, line: &str) -> Out {
+        self.execute_inner(line, true)
+    }
+
+    fn execute_inner(&mut self, line: &str, admitted: bool) -> Out {
         self.use_zone();
         let mut out = Out::default();
         let line = line.trim();
@@ -1423,7 +1432,7 @@ impl Session {
         let inst = self.inst.clone();
         drop(decode);
         let cmd = if tokens[0].is_bare() { tokens[0].text.to_ascii_lowercase() } else { String::new() };
-        let _native = if self.native_hierarchy {
+        let _native = if self.native_hierarchy && !admitted {
             use crate::native_admission::Class;
             let class = match cmd.as_str() {
                 "auth" | "login" => Class::Authentication,
@@ -1443,7 +1452,7 @@ impl Session {
         } else {
             None
         };
-        let _slot = (!self.native_hierarchy).then(|| inst.exec_slots.acquire());
+        let _slot = (!self.native_hierarchy && !admitted).then(|| inst.exec_slots.acquire());
         let started = Instant::now();
 
         self.wrote = false;
@@ -2981,7 +2990,7 @@ impl Session {
 
 /// An allowlist of commands audited for engine-local behavior. No unknown
 /// command or legacy administration command can enter the managed engine.
-fn managed_command(command: &str, args: &[Token]) -> Option<Need> {
+pub(crate) fn managed_command(command: &str, args: &[Token]) -> Option<Need> {
     let sub = |word| args.first().is_some_and(|token| token.is_kw(word));
     Some(match command {
         "get" | "has" | "typeof" | "scan" | "keys" | "range" | "count" | "sum" | "avg" | "min" | "max" | "explain"
