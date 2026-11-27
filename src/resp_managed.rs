@@ -109,7 +109,7 @@ pub(super) fn error(e: KivaError) -> Reply {
         KivaError::Denied(_) | KivaError::NotFound(_) => {
             Reply::Error("NOPERM resource or operation unavailable".into())
         }
-        KivaError::Other(m) if m.starts_with("ERR_ADAPTER_LIMIT:") => limit(),
+        KivaError::Other(m) | KivaError::Invalid(m) if m.starts_with("ERR_ADAPTER_LIMIT:") => limit(),
         KivaError::Other(m) if m.starts_with("ERR_SERVER_BUSY:") => {
             Reply::Error("BUSYERR request refused before execution".into())
         }

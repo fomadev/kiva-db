@@ -58,7 +58,7 @@ fn public_error(err: KivaError) -> Response {
         KivaError::Denied(m) if m == "hierarchy resource or operation is unavailable" => missing(),
         KivaError::NotFound(_) => missing(),
         KivaError::Denied(_) => error(403, "forbidden", "operation is forbidden"),
-        KivaError::Other(m) if m.starts_with("ERR_ADAPTER_LIMIT:") => {
+        KivaError::Other(m) | KivaError::Invalid(m) if m.starts_with("ERR_ADAPTER_LIMIT:") => {
             error(422, "result_too_large", "operation exceeds the adapter value or result limit")
         }
         KivaError::Other(m) if m.starts_with("ERR_SERVER_BUSY:") => {

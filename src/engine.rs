@@ -4821,6 +4821,22 @@ impl Engine {
 
     /// The `limit` documents whose vector in `field` is closest to `vector`.
     pub fn similar(&self, q: &VectorQuery) -> Result<VectorResult> {
+        self.similar_limited(q, None)
+    }
+
+    pub(crate) fn similar_limited(&self, q: &VectorQuery, budget: Option<usize>) -> Result<VectorResult> {
+        // Charge document bytes before decoding, including candidates kept
+        // temporarily by filtered or approximate searches.
+        let budget = std::cell::Cell::new(budget);
+        let read_doc = |inner: &mut Inner, key: &str, entry: &Entry| {
+            if let Some(remaining) = budget.get() {
+                let remaining = remaining.checked_sub(entry.raw_size as usize).ok_or_else(|| {
+                    KivaError::Other("ERR_ADAPTER_LIMIT: vector search exceeded its document byte budget".into())
+                })?;
+                budget.set(Some(remaining));
+            }
+            inner.value_of(key, entry)
+        };
         if q.vector.is_empty() || q.vector.len() > vector::MAX_DIMS {
             return Err(KivaError::Invalid(format!("a query vector has 1 to {} numbers", vector::MAX_DIMS)));
         }
@@ -4888,7 +4904,7 @@ impl Engine {
                     continue;
                 }
                 let Some(e) = inner.live(&key, now) else { continue };
-                let doc = inner.value_of(&key, &e)?;
+                let doc = read_doc(&mut inner, &key, &e)?;
                 if !doc.ty().is_doc() {
                     continue;
                 }
@@ -4953,7 +4969,7 @@ impl Engine {
                         return true;
                     }
                     *read += 1;
-                    match inner.value_of(key, &e) {
+                    match read_doc(inner, key, &e) {
                         Ok(d) if d.ty().is_doc() => {
                             let ok = DocView::of(&d).is_some_and(|view| {
                                 rest.iter().all(|(p, c)| view.get(p).is_some_and(|v| c.test_leaf(v)))
@@ -4986,7 +5002,7 @@ impl Engine {
                 // check every condition once more on what is returned.
                 if (quantized || !filter.is_empty()) && !docs.contains_key(&key) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let d = inner.value_of(&key, &e)?;
+                    let d = read_doc(&mut inner, &key, &e)?;
                     if !d.ty().is_doc() {
                         continue;
                     }
@@ -5027,7 +5043,7 @@ impl Engine {
                 let mut chosen = Vec::new();
                 for (key, score) in vector::top_k(scored, n, &query) {
                     let Some(e) = inner.live(&key, now) else { continue };
-                    let doc = inner.value_of(&key, &e)?;
+                    let doc = read_doc(&mut inner, &key, &e)?;
                     read += 1;
                     if passes(&doc) {
                         docs.insert(key.clone(), doc);
@@ -5052,7 +5068,7 @@ impl Engine {
             let examined = candidates.len();
             let mut scored = Vec::new();
             for (k, e) in candidates {
-                let doc = inner.value_of(&k, &e)?;
+                let doc = read_doc(&mut inner, &k, &e)?;
                 if doc.ty().is_doc() {
                     if !passes(&doc) {
                         continue;
@@ -5073,7 +5089,7 @@ impl Engine {
                 continue;
             }
             let Some(e) = inner.live(&key, now) else { continue };
-            if let Some(doc) = inner.value_of(&key, &e)?.into_json_doc() {
+            if let Some(doc) = read_doc(&mut inner, &key, &e)?.into_json_doc() {
                 rows.push((key, score, doc));
             }
         }

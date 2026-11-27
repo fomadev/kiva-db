@@ -455,6 +455,12 @@ impl Session {
         q: &crate::engine::VectorQuery,
     ) -> Result<(crate::engine::VectorResult, Option<f32>)> {
         use crate::semantic_cache::{Lookup, Question, Settings};
+        // The historical cache is keyed by a display name. A renamed or
+        // recreated managed collection always reads its own engine.
+        if self.managed_dispatch.is_some() {
+            let budget = self.adapter_value_limit.map(|_| crate::managed_transport::REPLY_MAX);
+            return Ok((self.engine.similar_limited(q, budget)?, None));
+        }
         let s = Settings::of(&self.inst.cfg());
         if !s.enabled || q.exact {
             return Ok((self.engine.similar(q)?, None));

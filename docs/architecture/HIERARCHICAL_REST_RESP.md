@@ -110,9 +110,11 @@ ambiguous path components. It decodes paths once, limits the header to
 to 128 bulk strings with a 2 MiB payload budget and requires CRLF. A
 transaction retains at most 64 frames and 2 MiB of their payloads.
 Adapter values and staged writes have an additional 2 MiB budget. An
-individual response is capped at 4 MiB. Engine working sets still depend on
-engine configuration. Reserve plaintext for local access and keep credentials
-out of URLs and command histories.
+individual response is capped at 4 MiB. Vector search bounds decoded
+candidate bytes and reads the selected managed engine directly. Other
+engine working sets still depend on engine configuration. Reserve
+plaintext for local access and keep credentials out of URLs and command
+histories.
 
 ## Routing and permission audit
 

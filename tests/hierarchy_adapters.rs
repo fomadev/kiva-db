@@ -21,6 +21,7 @@ fn provision(dir: &TempDir, max_clients: usize) {
     ok(&mut admin, "create user editor identified by test-pass role editor");
     ok(&mut admin, "create user viewer identified by test-pass role viewer");
     ok(&mut admin, &format!("config set server.max_clients {max_clients}"));
+    ok(&mut admin, "config set semantic.cache.enabled true");
     ok(&mut admin, "config set auth_required true");
     admin.login("kiva", "test-pass").unwrap();
     ok(&mut admin, "hierarchy data");
@@ -158,6 +159,16 @@ fn adapters_share_collection_data_permissions_and_stable_identities() {
     assert_eq!(resp(&mut redis_other, &["GET", "shared"]), "$-1");
     assert_eq!(resp(&mut redis_other, &["SET", "shared", "other"]), "+OK");
     assert_eq!(http(&mut rest, "kiva", "GET", &format!("{B}/keys/shared"), Json::Null).1["value"], "other");
+    let vector = json!({"op":"similar","target":"doc:*.embedding","vector":[1,0]});
+    let api = format!("{A}/api");
+    native.exec(r#"set doc:1 {"embedding":[1,0]}"#).unwrap();
+    native.exec("create vector index on doc:* (embedding)").unwrap();
+    for _ in 0..2 {
+        let (status, result) = http(&mut rest, "kiva", "POST", &api, vector.clone());
+        assert_eq!(status, 200);
+        assert_eq!(result["results"][0]["key"], "doc:1");
+        assert_eq!(result["cached"], Json::Null);
+    }
     assert_eq!(
         http(&mut rest, "editor", "GET", B, Json::Null),
         http(&mut rest, "editor", "GET", &B.replace("Trading", "Missing"), Json::Null)
@@ -188,6 +199,13 @@ fn adapters_share_collection_data_permissions_and_stable_identities() {
     assert_eq!(http(&mut rest, "kiva", "POST", parent, json!({"name":"users"})).0, 201);
     assert!(resp(&mut redis, &["GET", "shared"]).starts_with("-NOPERM"));
     assert_eq!(http(&mut rest, "kiva", "GET", &key, Json::Null).0, 404);
+    assert_eq!(http(&mut rest, "kiva", "POST", &api, vector.clone()).1["results"], json!([]));
+    let large = Value::Doc(json!({"embedding":[1,0], "payload":"x".repeat(1536 * 1024)}));
+    let mut recreated = native.collection("Fordima", "app", "users").unwrap();
+    for i in 0..3 {
+        recreated.set(&format!("doc:{i}"), &large, 0).unwrap();
+    }
+    assert_eq!(http(&mut rest, "kiva", "POST", &api, vector).0, 422);
 
     let parent = "/v2/workspaces/Trading";
     assert_eq!(http(&mut rest, "kiva", "DELETE", parent, Json::Null).0, 400);
