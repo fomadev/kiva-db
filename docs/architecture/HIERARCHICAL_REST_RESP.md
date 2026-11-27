@@ -19,9 +19,10 @@ Use a verified local TLS endpoint with `https://` or `redis-cli --tls --cacert`.
 
 ## REST
 
-Clients send HTTP Basic credentials per request. `GET /health` is public
-and reports the listener mode. A request carries its full collection path
-and gets a fresh session even on a persistent connection.
+Clients can send HTTP Basic credentials on each request or exchange them
+for an opaque Bearer token. `GET /health` is public and reports the listener
+mode. Each request carries its full resource path and gets a fresh execution
+context, including on persistent connections and when reusing a token.
 
 | Route | Methods |
 | --- | --- |
@@ -54,6 +55,68 @@ schema or adapter result limits. 413 and 431 reject oversized requests and
 headers. 503 `server_busy` is a pre-execution refusal. On 500
 `outcome_unknown` or a broken connection after sending a write, verify
 the state before retrying a potentially non-idempotent operation.
+
+## REST authentication and sessions
+
+| Method and route | Authorization | Result |
+| --- | --- | --- |
+| POST `/v2/auth/login` | Basic | 201 with `access_token`, `token_type` and session metadata |
+| GET `/v2/auth/session` | Bearer | Name of the authenticated account and the creation and expiry times in Unix seconds |
+| POST `/v2/auth/logout` | Bearer | Revokes this token and returns 200 |
+| POST `/v2/auth/revoke` | Administrator via Basic or Bearer | Revokes an account's existing sessions using `{"account":"editor"}` and returns the count |
+| GET `/v2/auth/metrics` | Administrator via Basic or Bearer | Registry counters and opt-in timing aggregates |
+
+```sh
+server=https://localhost:8080
+cert=/path/to/kivadb-home/tls/cert.pem
+token=$(curl --silent --show-error --fail --cacert "$cert" -u editor \
+  -X POST "$server/v2/auth/login" | jq -er .access_token)
+printf 'Authorization: Bearer %s\n' "$token" |
+  curl --fail --cacert "$cert" -H @- "$server/v2/auth/session"
+printf 'Authorization: Bearer %s\n' "$token" |
+  curl --fail --cacert "$cert" -H @- -X POST "$server/v2/auth/logout"
+unset token
+```
+
+Tokens are 256 random bits from the system generator and are sent in the
+Authorization header. The process retains SHA-256 fingerprints, immutable
+account IDs, verifier generations and expiry metadata. A token carries no
+stored grant or collection selection. The adapter resolves the current
+account and hierarchy access on each request. An invalid, expired, logged
+out or stale token returns 401. Restart invalidates every token. Clients
+can log in again after expiry if their credentials still work.
+
+| Startup setting | Default | Accepted range |
+| --- | ---: | ---: |
+| `http.session_capacity` | 4,096 | 1–65,536 |
+| `http.sessions_per_account` | 256 | 1–4,096 |
+| `http.session_ttl_seconds` | 900 | 1–86,400 |
+
+The lifetime is absolute. Saturation returns 429 `session_capacity`. Existing
+sessions keep their lifetime. Expired entries are reclaimed on lookup,
+issuance and administrative metrics requests. An account's next successful
+login also removes its stale verifier and identity generations. The registry
+is process-local and bounded, including between cleanup passes. It stores
+only authorization leases. Basic authentication still verifies each request.
+
+Logout and administrative revocation take the exclusive managed layout
+barrier. Each data operation accesses its lease and live account under the
+shared barrier and holds that barrier through the write or batch commit.
+An admitted request can finish before the revocation obtains the barrier.
+Once revocation succeeds, queued or subsequent operations using that token
+fail. Grant changes use the same barrier. Password changes invalidate the
+verifier generation, and deleting and recreating a name changes the account
+ID. Administrative revoke clears existing sessions and leaves the account
+eligible to log in again. Audit entries and timing aggregates carry no
+Authorization header, password or token. Send tokens over verified TLS
+outside loopback.
+
+HTTP Basic and login requests share the bounded password lane with native
+authentication. Under saturation, clients may receive 503 before password
+verification or dispatch. Bearer lookup runs in memory and uses the same
+connection cap and Read, Data and Control lanes. Idle and slow connections
+still have a whole-frame deadline. The native TCP path retains its existing
+FIFO admission behavior. The managed REST and RESP adapters use timed waits.
 
 ## RESP
 

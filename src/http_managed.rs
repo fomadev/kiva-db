@@ -3,10 +3,13 @@
 // See the LICENSE file in the project root for full license information.
 
 use super::{write_transport_response, Response};
+use crate::auth::{Role, User};
 use crate::error::{KivaError, Result};
+use crate::http_sessions;
 use crate::instance::Instance;
 use crate::managed_transport as transport;
 use crate::native_admission::Class;
+use crate::native_timing::{span, Stage};
 use crate::server::Deadline;
 use crate::session::Session;
 use serde_json::{json, Value as Json};
@@ -48,13 +51,18 @@ fn error(status: u16, code: &str, message: &str) -> Response {
 }
 
 fn unauthorized() -> Response {
-    let mut response = error(401, "authentication_required", "valid HTTP Basic credentials are required");
+    let mut response = error(401, "authentication_required", "valid HTTP credentials are required");
     response.extra.push(("WWW-Authenticate".into(), "Basic realm=\"KivaDB hierarchy\"".into()));
+    response.extra.push(("WWW-Authenticate".into(), "Bearer realm=\"KivaDB hierarchy\"".into()));
     response
 }
 
 fn public_error(err: KivaError) -> Response {
     match err {
+        KivaError::Denied(m) if m == http_sessions::INVALID => unauthorized(),
+        KivaError::Other(m) if m.starts_with("ERR_SESSION_LIMIT:") => {
+            error(429, "session_capacity", "HTTP session capacity reached")
+        }
         KivaError::Denied(m) if m == "hierarchy resource or operation is unavailable" => missing(),
         KivaError::NotFound(_) => missing(),
         KivaError::Denied(_) => error(403, "forbidden", "operation is forbidden"),
@@ -110,6 +118,7 @@ fn read_request(reader: &mut impl BufRead) -> std::result::Result<Option<Request
         transport::line(reader, limit).map_err(|e| if e.kind() == io::ErrorKind::InvalidInput { 431u16 } else { 400 })
     };
     let Some(first) = get_line(reader, HEADER_MAX)? else { return Ok(None) };
+    let headers_timing = span(Stage::HttpHeaders);
     let mut remaining = HEADER_MAX - first.len() - 2;
     let first = std::str::from_utf8(&first).map_err(|_| 400u16)?;
     let mut words = first.split(' ');
@@ -162,6 +171,7 @@ fn read_request(reader: &mut impl BufRead) -> std::result::Result<Option<Request
     if len > transport::REQUEST_MAX {
         return Err(413);
     }
+    drop(headers_timing);
     let mut body = vec![0; len];
     reader.read_exact(&mut body).map_err(|_| 400u16)?;
     let keep_alive = version == "HTTP/1.1"
@@ -180,25 +190,44 @@ fn serve(inst: &Arc<Instance>, mut stream: TcpStream) {
             break;
         }
         reader.get_mut().rearm();
-        let (mut response, keep_alive) = match read_request(&mut reader) {
+        if let Some(metrics) = &inst.native_metrics {
+            metrics.begin();
+        }
+        let request = {
+            let _read = span(Stage::FrameRead);
+            read_request(&mut reader)
+        };
+        let bearer = inst.native_metrics.is_some()
+            && request.as_ref().ok().and_then(|req| req.as_ref()).is_some_and(|req| bearer_token(req).is_some());
+        let (mut response, keep_alive) = match request {
             Ok(Some(req)) => (dispatch(inst, &req), req.keep_alive && n + 1 < REQUESTS_PER_CONNECTION),
-            Ok(None) => break,
+            Ok(None) => {
+                if let Some(metrics) = &inst.native_metrics {
+                    metrics.discard();
+                }
+                break;
+            }
             Err(status) => (error(status, "invalid_http", "invalid or excessive HTTP request"), false),
         };
         if response.body.len() > transport::REPLY_MAX {
             response = error(500, "outcome_unknown", "response exceeded the output limit");
         }
         response.extra.push(("Cache-Control".into(), "no-store".into()));
-        if write_transport_response(&mut Deadline::new(&mut writer, &mut write_timeout), &response, false, keep_alive)
-            .is_err()
-            || !keep_alive
-        {
+        let written = {
+            let _write = span(Stage::FrameWrite);
+            write_transport_response(&mut Deadline::new(&mut writer, &mut write_timeout), &response, false, keep_alive)
+        };
+        if let Some(metrics) = &inst.native_metrics {
+            metrics.finish_http(bearer);
+        }
+        if written.is_err() || !keep_alive {
             break;
         }
     }
 }
 
 fn credentials(header: Option<&str>) -> Option<(String, String)> {
+    let _decode = span(Stage::BasicDecode);
     let (scheme, token) = header?.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("basic") || token.is_empty() || token.len() > 4096 {
         return None;
@@ -211,29 +240,115 @@ fn credentials(header: Option<&str>) -> Option<(String, String)> {
     Some((user.into(), password.into()))
 }
 
+fn bearer_token(req: &Request) -> Option<&str> {
+    let (scheme, token) = req.authorization.as_deref()?.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("bearer").then_some(token)
+}
+
+fn authenticate(sess: &mut Session, req: &Request) -> Result<Option<User>> {
+    if let Some(token) = bearer_token(req) {
+        let lease = {
+            let _token = span(Stage::Token);
+            sess.inst.http_sessions.lookup(token)?
+        };
+        sess.resume_http(lease)?;
+        return Ok(None);
+    }
+    let (user, pass) = credentials(req.authorization.as_deref()).ok_or_else(http_sessions::invalid)?;
+    transport::login(sess, &user, &pass).map(Some).map_err(|err| match err {
+        KivaError::Denied(_) | KivaError::NotFound(_) => http_sessions::invalid(),
+        other => other,
+    })
+}
+
 fn dispatch(inst: &Arc<Instance>, req: &Request) -> Response {
     if req.path == ["health"] && req.method == "GET" {
         return Response::json(200, json!({"status":"ok", "mode":"hierarchical"}));
     }
-    let Some((user, pass)) = credentials(req.authorization.as_deref()) else { return unauthorized() };
-    let mut sess = transport::session(inst);
-    if let Err(err) = transport::login(&mut sess, &user, &pass) {
-        return if matches!(err, KivaError::Denied(_) | KivaError::NotFound(_)) {
-            unauthorized()
-        } else {
-            public_error(err)
-        };
-    }
+    dispatch_authenticated(inst, req).unwrap_or_else(public_error)
+}
+
+fn dispatch_authenticated(inst: &Arc<Instance>, req: &Request) -> Result<Response> {
+    let mut sess = {
+        let _session = span(Stage::Session);
+        transport::session(inst)
+    };
+    let verified = authenticate(&mut sess, req)?;
     let path: Vec<_> = req.path.iter().map(String::as_str).collect();
     let class = match (req.method.as_str(), path.as_slice()) {
         ("GET", ["v2", "workspaces", _, "projects", _, "collections", _, "keys", _]) => Class::Read,
         (_, ["v2", "workspaces", _, "projects", _, "collections", _, "api" | "keys" | "batch", ..]) => Class::Data,
         _ => Class::Control,
     };
-    let Ok(_permit) = inst.native_admission.enter_bounded(class, transport::WAIT) else {
-        return error(503, "server_busy", "request was refused before execution");
+    let queued = span(Stage::DataQueue);
+    let _permit = inst.native_admission.enter_bounded(class, transport::WAIT)?;
+    drop(queued);
+    if let ["v2", "auth", action] = path.as_slice() {
+        return auth_route(&sess, verified.as_ref(), req, action);
+    }
+    route(&mut sess, req, &path)
+}
+
+fn auth_route(sess: &Session, verified: Option<&User>, req: &Request, action: &str) -> Result<Response> {
+    let sessions = &sess.inst.http_sessions;
+    if action != "revoke" && !req.body.is_empty() {
+        return Err(invalid("this session operation does not take a body"));
+    }
+    let require_lease = || sess.http_lease.as_deref().ok_or_else(http_sessions::invalid);
+    let require_admin = |user: &User| {
+        if user.role != Role::Admin {
+            return Err(KivaError::Denied("administrator required".into()));
+        }
+        Ok(())
     };
-    route(&mut sess, req, &path).unwrap_or_else(public_error)
+    match (req.method.as_str(), action) {
+        ("POST", "login") => {
+            let verified = verified.ok_or_else(http_sessions::invalid)?;
+            let (token, lease) = sess.with_http_account(false, |user| {
+                if user.credential_generation() != verified.credential_generation() {
+                    return Err(http_sessions::invalid());
+                }
+                sessions.issue(user)
+            })?;
+            Ok(Response::json(201, json!({"access_token": token, "token_type": "Bearer", "session": lease.info()})))
+        }
+        ("GET", "session") => {
+            let lease = require_lease()?;
+            sess.with_http_account(false, |_| Ok(Response::json(200, lease.info())))
+        }
+        ("POST", "logout") => {
+            let lease = require_lease()?;
+            sess.with_http_account(true, |_| sessions.logout(lease))?;
+            Ok(Response::json(200, json!({"revoked": true})))
+        }
+        ("POST", "revoke") => {
+            let body = json_body(req)?;
+            let account = body["account"]
+                .as_str()
+                .filter(|name| crate::auth::valid_username(name))
+                .ok_or_else(|| invalid("valid account name is required"))?;
+            let revoked = sess.with_http_account(true, |user| {
+                require_admin(user)?;
+                sessions.revoke_account(account)
+            })?;
+            Ok(Response::json(200, json!({"revoked": revoked})))
+        }
+        ("GET", "metrics") => sess.with_http_account(false, |user| {
+            require_admin(user)?;
+            let timings: Vec<_> = sess
+                .inst
+                .native_timings()
+                .into_iter()
+                .filter(|t| t.samples > 0)
+                .map(|t| json!({"operation":t.operation,"stage":t.stage,"samples":t.samples,"nanos":t.nanos}))
+                .collect();
+            Ok(Response::json(200, json!({"sessions": sessions.metrics()?, "timings": timings})))
+        }),
+        (_, "login" | "session" | "logout" | "revoke" | "metrics") => {
+            Ok(error(405, "method_not_allowed", "unsupported method on this resource"))
+        }
+        _ => Ok(missing()),
+    }
 }
 
 fn json_body(req: &Request) -> Result<Json> {
@@ -260,7 +375,10 @@ fn route(sess: &mut Session, req: &Request, path: &[&str]) -> Result<Response> {
         }
         ["v2", "workspaces", w, "projects", p, "collections", c, action @ ..] if !action.is_empty() => {
             let address = [name(w)?, name(p)?, name(c)?].join(".");
-            select(sess, &address)?;
+            {
+                let _path = span(Stage::HierarchyPath);
+                select(sess, &address)?;
+            }
             return data(sess, req, action);
         }
         _ => return Ok(missing()),
@@ -357,7 +475,9 @@ fn data(sess: &mut Session, req: &Request, action: &[&str]) -> Result<Response> 
             }
             let out = sess.execute_admitted(source);
             if out.has_err() {
-                return Ok(if out.text().contains("permission denied") {
+                return Ok(if out.text().contains(http_sessions::INVALID) {
+                    unauthorized()
+                } else if out.text().contains("permission denied") {
                     error(403, "forbidden", "operation is forbidden")
                 } else {
                     error(500, "outcome_unknown", "collection operation could not be confirmed")
@@ -367,5 +487,6 @@ fn data(sess: &mut Session, req: &Request, action: &[&str]) -> Result<Response> 
         }
         _ => return Ok(error(405, "method_not_allowed", "unsupported managed collection operation")),
     };
+    let _encode = span(Stage::Encode);
     Ok(Response::json(200, value))
 }

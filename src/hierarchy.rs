@@ -277,7 +277,11 @@ impl Session {
         if !self.local && !self.inst.auth_required() {
             return Err(KivaError::Denied("hierarchy preview requires TCP authentication".into()));
         }
-        let user = auth::get_user(&self.inst.system, &ctx.name)?.ok_or_else(hidden)?;
+        let user = auth::get_user(&self.inst.system, &ctx.name)?;
+        if let Some(lease) = &self.http_lease {
+            return user.filter(|user| lease.matches(user)).ok_or_else(crate::http_sessions::invalid);
+        }
+        let user = user.ok_or_else(hidden)?;
         let valid = self.hierarchy_subject.as_ref().map_or_else(
             || ctx.role == Role::Admin && user.role == Role::Admin && !self.inst.auth_required(),
             |subject| subject == &user.hierarchy_subject,
@@ -286,6 +290,14 @@ impl Session {
             return Err(hidden());
         }
         Ok(user)
+    }
+
+    /// Runs session administration against the same barrier as managed
+    /// routing, account changes and commits. Revocation takes it exclusively.
+    pub(crate) fn with_http_account<T>(&self, exclusive: bool, action: impl FnOnce(&User) -> Result<T>) -> Result<T> {
+        let _guard = lock_layout(&self.inst, true, exclusive)?;
+        self.check_managed_session()?;
+        action(&self.hierarchy_user()?)
     }
 
     fn hierarchy_access(&self, user: &User, managed: bool) -> Result<Access> {

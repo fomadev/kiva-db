@@ -819,3 +819,72 @@ The historical compatibility suites still run in the default test suite.
 The existing seven ignored performance workloads remain opt-in. External
 driver adaptation, push, backup, restore, replication, doctor, reattachment
 of retired resources and final migration remain future work.
+
+## Phase 7B.2 REST authentication and performance
+
+**NOT READY for production.** The managed listener has separate paths for
+Basic and Bearer authentication. Both resolve the same live account and
+managed data permissions.
+
+| Coverage | Regression checks |
+| --- | --- |
+| SESSION01–SESSION10 | Valid and invalid login and token, absolute expiry, logout, administrator revocation, replacement of the stored verifier, deletion and recreation of an account, TLS and restart |
+| SESSION11–SESSION13 | Global and per-account capacity, cleanup at expiry, concurrent use of a token across distinct collections |
+| AUTH01–AUTH05 | Live grant changes, post-revocation batch refusal, revocation before native commit, collection retirement and recreation, homonyms and Viewer restrictions |
+| SEC01–SEC05 | Audit output contains no password or token, pinned TLS, malformed headers, concurrent invalid password attempts and timed admission |
+| CROSS01, COMPAT01 | Identical values are visible across protocols and Basic continues to authenticate ordinary REST calls |
+
+### REST request audit and baseline
+
+The managed HTTP parser in `http_managed.rs` reads and checks framing and
+decodes path components under a whole-frame deadline. The adapter takes
+the header credentials, creates a fresh `session.rs` context, and selects
+authentication. Basic decodes credentials and uses the Authentication FIFO
+lane in `native_admission.rs`. `managed_transport.rs` calls the unchanged
+password verifier in `auth.rs`. Bearer validates the lease in
+`http_sessions.rs` and reads current account data. Both paths enter a work
+lane, resolve the path in `hierarchy.rs`, acquire the layout barrier and
+run current grants from `hierarchy_auth.rs`. The registry leases the
+selected engine. The HTTP adapter JSON-encodes the result and writes it via
+`http.rs` and `server.rs`. `instance.rs` owns the process-local registry.
+Per-connection TLS from `tls.rs` and the parser bounds introduced in
+Phase 7B still apply.
+
+Before adding leases, a Release loopback run of 24 measured GET attempts
+per client reproduced 298 REST Basic GET/s at 128 clients. TCP reached
+11,414 and RESP reached 10,734 in that run. A separate opt-in timing pass
+with the Basic path measured these means:
+
+| Basic stage mean in ms | 1 client | 8 clients | 32 clients | 128 clients |
+| --- | ---: | ---: | ---: | ---: |
+| Password verification | 9.973 | 12.361 | 12.857 | 12.546 |
+| Authentication queue | 0.000 | 10.890 | 89.226 | 392.847 |
+| Session construction | 0.001 | 0.001 | 0.002 | 0.002 |
+| Path selection | 0.024 | 0.067 | 0.107 | 0.128 |
+| Collection engine acquisition | 0.006 | 0.003 | 0.006 | 0.008 |
+| Operation execution | 0.042 | 0.058 | 0.147 | 0.143 |
+| JSON encoding | 0.003 | 0.004 | 0.005 | 0.005 |
+| Response write | 0.034 | 0.090 | 0.118 | 0.108 |
+
+These aggregates include a setup write per client. Timing spans nest.
+Frame-read time includes time waiting for the client to send bytes.
+`http_headers` includes header parsing and reads. `server.native_metrics`
+enables the fixed stage counters at restart. The administrative endpoint
+reports sums and sample counts without identifiers. The benchmark's
+`--metrics` flag collects these counters in a separate run.
+
+The [benchmark harness](../../examples/hierarchy_adapters_bench.py) compares
+persistent HTTP Basic, HTTP Bearer, TCP and RESP with 1, 8, 32 and 128
+clients. It uses two accounts and two collections of different sizes, with
+warmup and independent repetitions. Its CSV reports setup p95, operation
+p50/p95/p99, throughput, refusals, server CPU time, active RSS and open
+descriptors. Run the same workload with and without `--tls`. The shared
+128-connection cap rules out a 256-connection run. The seven pre-existing
+ignored workloads are opt-in benchmarks and stay outside the default
+regression suite.
+
+The password lane bounds concurrent verification and queue residence. It is
+a process-wide resource budget and accepts requests across client addresses.
+Basic retains the existing account lookup and password verification timing.
+The Bearer path measures a fixed-size token digest lookup and then checks the
+live account under the layout barrier.

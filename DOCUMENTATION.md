@@ -4101,7 +4101,7 @@ An error comes back with status 1 and the message as payload, as for every reque
 * `types` is `"plain"` or `"extended"`; another value is refused. Aggregates, `similar` and the semantic cache answer plain JSON. Redis clients always get plain JSON.
 
 ## Chapter 21 — The REST API
-For managed collection routes and opt-in activation, see the [hierarchical REST and RESP guide](docs/architecture/HIERARCHICAL_REST_RESP.md).
+For managed collections, HTTP Basic and revocable Bearer sessions, see the [hierarchical REST and RESP guide](docs/architecture/HIERARCHICAL_REST_RESP.md).
 
 The REST API lets anything that speaks HTTP use KivaDB: a browser, `curl`, any programming language. It listens on port **8080**.
 

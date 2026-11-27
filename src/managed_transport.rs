@@ -82,11 +82,12 @@ pub(crate) fn session(inst: &Arc<Instance>) -> Session {
     session
 }
 
-pub(crate) fn login(sess: &mut Session, user: &str, password: &str) -> Result<()> {
+pub(crate) fn login(sess: &mut Session, user: &str, password: &str) -> Result<crate::auth::User> {
     let inst = sess.inst.clone();
+    let queued = crate::native_timing::span(crate::native_timing::Stage::AuthQueue);
     let _permit = inst.native_admission.enter_bounded(Class::Authentication, WAIT)?;
-    sess.login(user, password)?;
-    Ok(())
+    drop(queued);
+    sess.login(user, password)
 }
 
 pub(crate) fn name(value: &str) -> Result<&str> {

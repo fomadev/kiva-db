@@ -444,3 +444,12 @@ resolves the complete resource path per request. RESP selects a stable
 collection identity per connection using `KIVA.USE`. Both bind dedicated
 listeners behind explicit flags. The [adapter guide](HIERARCHICAL_REST_RESP.md)
 covers activation, operations, limits, error semantics, and TLS.
+
+### Managed REST authentication
+
+An optional REST lease binds a random token fingerprint to the immutable
+account ID and a fingerprint of its stored password verifier. Each HTTP
+request reconstructs its own account context. The shared hierarchy barrier
+covers authorization through write commit. Logout and administrative token
+revocation use the exclusive side of that barrier. HTTP Basic continues to
+use the managed password admission lane. See the [REST session guide](HIERARCHICAL_REST_RESP.md#rest-authentication-and-sessions).

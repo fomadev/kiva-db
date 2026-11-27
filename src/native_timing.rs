@@ -23,9 +23,17 @@ pub(crate) enum Stage {
     Disk,
     Encode,
     FrameWrite,
+    HttpHeaders,
+    BasicDecode,
+    Password,
+    AuthQueue,
+    DataQueue,
+    Session,
+    HierarchyPath,
+    Token,
 }
 
-const STAGES: [&str; 14] = [
+const STAGES: [&str; 22] = [
     "frame_read",
     "decode",
     "queue",
@@ -40,8 +48,16 @@ const STAGES: [&str; 14] = [
     "disk",
     "encode",
     "frame_write",
+    "http_headers",
+    "basic_decode",
+    "password",
+    "auth_queue",
+    "data_queue",
+    "session",
+    "hierarchy_path",
+    "token",
 ];
-const KINDS: [&str; 7] = ["get", "set", "del", "exec", "api", "auth", "control"];
+const KINDS: [&str; 9] = ["get", "set", "del", "exec", "api", "auth", "control", "http_basic", "http_bearer"];
 
 #[derive(Clone, Copy, Default)]
 struct Counter {
@@ -112,6 +128,18 @@ impl NativeMetrics {
             CMD_AUTH => 5,
             _ => 6,
         };
+        self.finish_row(row);
+    }
+
+    pub(crate) fn discard(&self) {
+        CURRENT.with(Cell::take);
+    }
+
+    pub(crate) fn finish_http(&self, bearer: bool) {
+        self.finish_row(if bearer { 8 } else { 7 });
+    }
+
+    fn finish_row(&self, row: usize) {
         if let Some(timings) = CURRENT.with(Cell::take) {
             for (total, count) in self.totals[row].iter().zip(timings) {
                 if count.samples != 0 {

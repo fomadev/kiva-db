@@ -130,6 +130,17 @@ impl User {
         h.len() == self.hash.len() && h.iter().zip(&self.hash).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
     }
 
+    /// Changes whenever the stored password verifier is replaced.
+    pub(crate) fn credential_generation(&self) -> [u8; 32] {
+        use sha2::Digest;
+        let mut fingerprint = Sha256::new();
+        fingerprint.update((self.salt.len() as u64).to_be_bytes());
+        fingerprint.update(&self.salt);
+        fingerprint.update(self.iterations.to_be_bytes());
+        fingerprint.update(&self.hash);
+        fingerprint.finalize().into()
+    }
+
     pub fn has_empty_password(&self) -> bool {
         self.verify("")
     }

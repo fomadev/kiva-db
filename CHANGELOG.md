@@ -3,6 +3,10 @@
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
 ## [Unreleased]
+
+- Adds bounded, revocable Bearer sessions and aggregate timing for the opt-in
+  hierarchical REST adapter. Basic authentication and live grant checks
+  remain available.
 - Adds opt-in hierarchical REST and Redis RESP listeners that share managed
   permissions, collection identities and data with native TCP. See the
   [adapter guide](docs/architecture/HIERARCHICAL_REST_RESP.md) for coverage.

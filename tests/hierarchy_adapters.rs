@@ -15,12 +15,19 @@ const A: &str = "/v2/workspaces/Fordima/projects/app/collections/users";
 const B: &str = "/v2/workspaces/Trading/projects/app/collections/users";
 
 fn provision(dir: &TempDir, max_clients: usize) {
+    provision_with(dir, max_clients, &[]);
+}
+
+fn provision_with(dir: &TempDir, max_clients: usize, settings: &[&str]) {
     let inst = instance(dir);
     let mut admin = Session::new(inst.clone(), true, None);
     ok(&mut admin, "modify user kiva password test-pass");
     ok(&mut admin, "create user editor identified by test-pass role editor");
     ok(&mut admin, "create user viewer identified by test-pass role viewer");
     ok(&mut admin, &format!("config set server.max_clients {max_clients}"));
+    for command in settings {
+        ok(&mut admin, command);
+    }
     ok(&mut admin, "config set semantic.cache.enabled true");
     ok(&mut admin, "config set auth_required true");
     admin.login("kiva", "test-pass").unwrap();
@@ -103,8 +110,19 @@ fn http(reader: &mut BufReader<TcpStream>, user: &str, method: &str, path: &str,
     let auth = if user.is_empty() {
         String::new()
     } else {
-        format!("Authorization: Basic {}\r\n", b64_encode(format!("{user}:test-pass").as_bytes()))
+        format!("Basic {}", b64_encode(format!("{user}:test-pass").as_bytes()))
     };
+    authenticated_http(reader, &auth, method, path, body)
+}
+
+fn authenticated_http(
+    reader: &mut BufReader<TcpStream>,
+    auth: &str,
+    method: &str,
+    path: &str,
+    body: Json,
+) -> (u16, Json) {
+    let auth = if auth.is_empty() { String::new() } else { format!("Authorization: {auth}\r\n") };
     let body = if body.is_null() { String::new() } else { body.to_string() };
     write!(
         reader.get_mut(),
@@ -113,6 +131,15 @@ fn http(reader: &mut BufReader<TcpStream>, user: &str, method: &str, path: &str,
     )
     .unwrap();
     http_reply(reader)
+}
+
+fn login(reader: &mut BufReader<TcpStream>, user: &str) -> String {
+    let (status, body) = http(reader, user, "POST", "/v2/auth/login", Json::Null);
+    assert_eq!(status, 201, "{body}");
+    let token = body["access_token"].as_str().unwrap();
+    assert_eq!(token.len(), 64);
+    assert_eq!(body["session"]["account"], user);
+    format!("Bearer {token}")
 }
 
 fn send_resp(stream: &mut impl Write, args: &[&str]) {
@@ -291,6 +318,8 @@ fn adapters_accept_pinned_tls_and_share_concurrent_durable_writes() {
         BufReader::new(conn.stream)
     };
     let mut rest = tls(server.rest);
+    let token = login(&mut rest, "kiva");
+    assert_eq!(authenticated_http(&mut rest, &token, "GET", "/v2/auth/session", Json::Null).0, 200);
     let mut redis = tls(server.resp);
     let mut native = server.native();
     assert_eq!(resp(&mut redis, &["AUTH", "kiva", "test-pass"]), "+OK");
@@ -318,6 +347,7 @@ fn adapters_accept_pinned_tls_and_share_concurrent_durable_writes() {
     }
     let reopened = Server::open(&dir);
     let mut rest = connect(reopened.rest);
+    assert_eq!(authenticated_http(&mut rest, &token, "GET", "/v2/auth/session", Json::Null).0, 401);
     assert_eq!(http(&mut rest, "kiva", "GET", &format!("{A}/keys/durable"), Json::Null).1["value"], "yes");
 }
 
@@ -331,4 +361,145 @@ fn adapters_share_the_connection_limit_with_native_tcp() {
     assert_eq!(http(&mut rest, "", "GET", "/health", Json::Null).0, 200);
     let mut refused = connect(server.resp);
     assert!(line(&mut refused).starts_with("-BUSYERR "));
+}
+
+#[test]
+fn http_sessions_follow_live_account_and_collection_identity() {
+    let dir = TempDir::new("hierarchy_http_identity");
+    provision(&dir, 128);
+    let server = Server::open(&dir);
+    let mut rest = connect(server.rest);
+    let mut native = server.native();
+    let key_a = format!("{A}/keys/test");
+    let key_b = format!("{B}/keys/test");
+    let bad = format!("Basic {}", b64_encode(b"editor:wrong-password"));
+    assert_eq!(authenticated_http(&mut rest, &bad, "POST", "/v2/auth/login", Json::Null).0, 401);
+    assert_eq!(authenticated_http(&mut rest, "Bearer malformed", "GET", &key_a, Json::Null).0, 401);
+
+    let editor = login(&mut rest, "editor");
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", "/v2/auth/session", Json::Null).1["account"], "editor");
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", "/v2/auth/metrics", Json::Null).0, 403);
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", &key_b, Json::Null).0, 404);
+    assert_eq!(authenticated_http(&mut rest, &editor, "PUT", &key_a, json!({"type":"int","value":7})).0, 200);
+    let viewer = login(&mut rest, "viewer");
+    assert!(matches!(
+        authenticated_http(&mut rest, &viewer, "PUT", &key_a, json!({"type":"int","value":8})).0,
+        403 | 404
+    ));
+    native.exec("hierarchy revoke editor write collection Fordima.app.users").unwrap();
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", &key_a, Json::Null).0, 404);
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", "/v2/auth/session", Json::Null).0, 200);
+    native.exec("hierarchy grant editor write collection Fordima.app.users").unwrap();
+
+    // Replace the verifier persisted by account administration while the listener runs.
+    let mut user = kivadb::auth::get_user(&server.inst.system, "editor").unwrap().unwrap();
+    user.set_password("rotated-password").unwrap();
+    kivadb::auth::save_user(&server.inst.system, &user).unwrap();
+    assert_eq!(authenticated_http(&mut rest, &editor, "GET", &key_a, Json::Null).0, 401);
+    let rotated = format!("Basic {}", b64_encode(b"editor:rotated-password"));
+    let (status, body) = authenticated_http(&mut rest, &rotated, "POST", "/v2/auth/login", Json::Null);
+    assert_eq!(status, 201);
+    let renewed = format!("Bearer {}", body["access_token"].as_str().unwrap());
+    native.exec("drop user editor").unwrap();
+    native.exec("create user editor identified by rotated-password role editor").unwrap();
+    assert_eq!(authenticated_http(&mut rest, &renewed, "GET", &key_a, Json::Null).0, 401);
+    let (status, body) = authenticated_http(&mut rest, &rotated, "POST", "/v2/auth/login", Json::Null);
+    assert_eq!(status, 201);
+    let recreated = format!("Bearer {}", body["access_token"].as_str().unwrap());
+    assert_eq!(authenticated_http(&mut rest, &recreated, "GET", &key_a, Json::Null).0, 404);
+
+    native.exec("hierarchy grant viewer read collection Fordima.app.users").unwrap();
+    assert_eq!(http(&mut rest, "kiva", "DELETE", A, Json::Null).0, 200);
+    let parent = A.rsplit_once('/').unwrap().0;
+    assert_eq!(http(&mut rest, "kiva", "POST", parent, json!({"name":"users"})).0, 201);
+    assert_eq!(authenticated_http(&mut rest, &viewer, "GET", &key_a, Json::Null).0, 404);
+
+    let audit = std::fs::read_to_string(dir.path().join("audit.log")).unwrap();
+    for secret in [&editor, &viewer, &renewed, &recreated] {
+        assert!(!audit.contains(secret.strip_prefix("Bearer ").unwrap()));
+    }
+    assert!(!audit.contains("rotated-password"));
+}
+
+#[test]
+fn http_sessions_are_bounded_and_revoked_across_connections() {
+    let dir = TempDir::new("hierarchy_http_revoke");
+    provision_with(
+        &dir,
+        128,
+        &[
+            "config set http.session_capacity 2",
+            "config set http.sessions_per_account 1",
+            "config set server.native_metrics true",
+        ],
+    );
+    let server = Server::open(&dir);
+    let mut rest = connect(server.rest);
+    let mut second = connect(server.rest);
+    let admin = login(&mut rest, "kiva");
+    assert_eq!(http(&mut rest, "kiva", "POST", "/v2/auth/login", Json::Null).0, 429);
+    let editor = login(&mut rest, "editor");
+    assert_eq!(http(&mut rest, "viewer", "POST", "/v2/auth/login", Json::Null).0, 429);
+    let write = |stream: &mut BufReader<TcpStream>, path: &str, value| {
+        authenticated_http(
+            &mut *stream,
+            &admin,
+            "PUT",
+            &format!("{path}/keys/scoped"),
+            json!({"type":"int","value":value}),
+        )
+    };
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            write(&mut rest, A, 1)
+        });
+        barrier.wait();
+        assert_eq!(write(&mut second, B, 2).0, 200);
+        assert_eq!(first.join().unwrap().0, 200);
+    });
+    let mut native = server.native();
+    assert_eq!(
+        native.collection("Fordima", "app", "users").unwrap().get("scoped").unwrap(),
+        Some(Value::Num("1".into()))
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let server = &server;
+            scope.spawn(move || {
+                let mut client = connect(server.rest);
+                let wrong = format!("Basic {}", b64_encode(b"viewer:wrong-attempt"));
+                assert_eq!(authenticated_http(&mut client, &wrong, "POST", "/v2/auth/login", Json::Null).0, 401);
+            });
+        }
+    });
+    let stats = authenticated_http(&mut rest, &admin, "GET", "/v2/auth/metrics", Json::Null).1;
+    let timings = stats["timings"].as_array().unwrap();
+    assert!(timings.iter().any(|row| row["operation"] == "http_basic" && row["stage"] == "password"));
+    assert!(timings.iter().any(|row| row["operation"] == "http_bearer" && row["stage"] == "token"));
+    assert!(!timings.iter().any(|row| row["operation"] == "http_bearer" && row["stage"] == "password"));
+    assert_eq!(stats["sessions"]["active"], 2);
+    assert_eq!(stats["sessions"]["refused"], 2);
+
+    assert_eq!(authenticated_http(&mut second, &editor, "POST", "/v2/auth/logout", Json::Null).0, 200);
+    let editor_batch = format!("{A}/batch");
+    assert_eq!(
+        authenticated_http(
+            &mut rest,
+            &editor,
+            "POST",
+            &editor_batch,
+            json!({"operations":[{"op":"put","key":"scoped","type":"int","value":3}]})
+        )
+        .0,
+        401
+    );
+    assert_eq!(native.get("scoped").unwrap(), Some(Value::Num("1".into())));
+    let replacement = login(&mut rest, "editor");
+    assert_eq!(
+        authenticated_http(&mut rest, &admin, "POST", "/v2/auth/revoke", json!({"account":"editor"})).1["revoked"],
+        1
+    );
+    assert_eq!(authenticated_http(&mut second, &replacement, "GET", "/v2/auth/session", Json::Null).0, 401);
 }
