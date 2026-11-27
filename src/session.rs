@@ -74,6 +74,8 @@ pub struct Session {
     pub(crate) hierarchy: Option<crate::hierarchy::Context>,
     pub(crate) hierarchy_data: bool,
     pub(crate) native_hierarchy: bool,
+    pub(crate) adapter_value_limit: Option<usize>,
+    adapter_staged_bytes: usize,
     pub(crate) managed_dispatch: Option<(bool, bool)>,
     pub(crate) managed_txn_engine: Option<(crate::catalog::CollectionId, Arc<Engine>)>,
 
@@ -110,6 +112,8 @@ impl Session {
             hierarchy: None,
             hierarchy_data: false,
             native_hierarchy: false,
+            adapter_value_limit: None,
+            adapter_staged_bytes: 0,
             managed_dispatch: None,
             managed_txn_engine: None,
             hierarchy_subject: None,
@@ -532,7 +536,7 @@ impl Session {
         }
         Ok(self
             .engine
-            .get(key)?
+            .get_limited(key, self.adapter_value_limit)?
             .map(|(v, e)| (v, Meta { expires_at: e.expires_at, msgpack: e.is_msgpack(), timestamp: e.timestamp })))
     }
 
@@ -608,6 +612,21 @@ impl Session {
             counter.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(txn) = self.txn.as_mut() {
+            if let Some(limit) = self.adapter_value_limit {
+                let mut charged = self.adapter_staged_bytes;
+                for op in &ops {
+                    match op {
+                        BatchOp::Put { key, value, .. } => {
+                            charged += key.len() + value.encode_stored(false)?.0.len();
+                        }
+                        BatchOp::Del { key } => charged += key.len(),
+                    }
+                    if charged > limit {
+                        return Err(KivaError::Other("ERR_ADAPTER_LIMIT: transaction exceeds byte budget".into()));
+                    }
+                }
+                self.adapter_staged_bytes = charged;
+            }
             for op in ops {
                 match op {
                     BatchOp::Put { key, value, expires_at, msgpack } => {
@@ -648,6 +667,7 @@ impl Session {
         if self.txn.is_some() {
             return Err(KivaError::Invalid("a transaction is already active".into()));
         }
+        self.adapter_staged_bytes = 0;
         let id = self.inst.next_id();
         let begin_seq = self.engine.txn_begin();
         self.txn = Some(Txn { id, begin_seq, writes: BTreeMap::new(), savepoints: Vec::new() });

@@ -435,3 +435,12 @@ follow release of the lane and layout guards.
 Compaction still uses the exclusive instance barrier. Per-store compaction
 would need to coordinate the generation journal, registry eviction, layout
 moves and transaction pins across the swap. That work remains separate.
+
+### Managed REST and RESP adapters
+
+The optional adapters reuse authenticated native sessions and the managed
+layout barrier, grant checks, engine leases, and transaction path. REST
+resolves the complete resource path per request. RESP selects a stable
+collection identity per connection using `KIVA.USE`. Both bind dedicated
+listeners behind explicit flags. The [adapter guide](HIERARCHICAL_REST_RESP.md)
+covers activation, operations, limits, error semantics, and TLS.

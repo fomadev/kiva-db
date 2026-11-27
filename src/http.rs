@@ -5,6 +5,10 @@
 //! REST API, Prometheus metrics, interactive documentation and WebSocket
 //! notifications, on a small dependency-free HTTP/1.1 server.
 
+#[path = "http_managed.rs"]
+mod managed;
+pub use managed::start_hierarchical_http;
+
 use crate::api::Types;
 use crate::error::{KivaError, Result};
 use crate::exec::validate_key_name;
@@ -159,6 +163,10 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
 }
 
 fn write_response(stream: &mut TcpStream, resp: &Response, cors: bool) {
+    let _ = write_transport_response(stream, resp, cors, false);
+}
+
+fn write_transport_response(w: &mut impl Write, resp: &Response, cors: bool, keep_alive: bool) -> std::io::Result<()> {
     let reason = match resp.status {
         200 => "OK",
         204 => "No Content",
@@ -168,14 +176,19 @@ fn write_response(stream: &mut TcpStream, resp: &Response, cors: bool) {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        413 => "Payload Too Large",
+        422 => "Unprocessable Content",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         429 => "Too Many Requests",
         _ => "Internal Server Error",
     };
     let mut head = format!(
-        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nServer: KivaDB/{VERSION}\r\n",
+        "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: {}\r\nServer: KivaDB/{VERSION}\r\n",
         resp.status,
         resp.content_type,
-        resp.body.len()
+        resp.body.len(),
+        if keep_alive { "keep-alive" } else { "close" }
     );
     if cors {
         head.push_str("Access-Control-Allow-Origin: *\r\n");
@@ -186,9 +199,9 @@ fn write_response(stream: &mut TcpStream, resp: &Response, cors: bool) {
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     head.push_str("\r\n");
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(&resp.body);
-    let _ = stream.flush();
+    w.write_all(head.as_bytes())?;
+    w.write_all(&resp.body)?;
+    w.flush()
 }
 
 fn handle(inst: &Arc<Instance>, mut stream: TcpStream, peer: std::net::SocketAddr, rates: &RateTable) {

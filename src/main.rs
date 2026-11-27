@@ -50,6 +50,8 @@ SHELL OPTIONS:
 
 SERVER OPTIONS (start, serve):
       --hierarchical-tcp      Serve initialized managed collections using hierarchy/1
+      --hierarchical-http     Enable managed HTTP /v2 on that same instance
+      --hierarchical-resp     Enable managed RESP with KIVA.USE on that same instance
       --port <n>              TCP port (default: [network] port, 2911)
       --bind <address>        Listen address (default: [network] bind, 127.0.0.1)
       --http-port <n>         REST API port (default: [http] port, 8080)
@@ -69,6 +71,8 @@ COMMON OPTIONS:
 struct Args {
     serve: bool,
     hierarchical_tcp: bool,
+    hierarchical_http: bool,
+    hierarchical_resp: bool,
     hierarchical_client: bool,
     action: Option<&'static str>,
     migration: Option<String>,
@@ -172,6 +176,8 @@ fn parse_args() -> Args {
             "--connect" => args.connect = Some(value(&mut it, "--connect")),
             "--no-listen" => args.no_listen = true,
             "--hierarchical-tcp" => args.hierarchical_tcp = true,
+            "--hierarchical-http" => args.hierarchical_http = true,
+            "--hierarchical-resp" => args.hierarchical_resp = true,
             "--hierarchical-client" => args.hierarchical_client = true,
             "--hierarchy-preview" => args.shell.hierarchy_preview = true,
             "--skip-auth" => args.opts.skip_auth = true,
@@ -257,6 +263,35 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
     // port opens: whoever sees a port open, `kivadb tls` included, finds the
     // certificate this server uses.
     let tls = inst.tls();
+    let (resp_on, resp_port) = {
+        let c = inst.cfg();
+        (
+            c.get_bool("resp", "enabled") && !args.no_resp,
+            args.resp_port.or_else(|| env_port("KIVADB_RESP_PORT")).unwrap_or(c.get_u64("resp", "port") as u16),
+        )
+    };
+    // Publish the native port for background start only after every
+    // requested managed listener successfully bound its socket.
+    let start_managed = |enabled, launcher: fn(&Arc<Instance>, &str, u16) -> kivadb::Result<u16>, port| {
+        if enabled {
+            launcher(&inst, &bind, port).map(Some)
+        } else {
+            Ok(None)
+        }
+    };
+    let managed = (|| -> kivadb::Result<_> {
+        let http = start_managed(args.hierarchical_http, http::start_hierarchical_http, http_port)?;
+        let resp = start_managed(args.hierarchical_resp, kivadb::resp::start_hierarchical_resp, resp_port)?;
+        Ok((http, resp))
+    })();
+    let (managed_http, managed_resp) = match managed {
+        Ok(ports) => ports,
+        Err(e) => {
+            eprintln!("Error: cannot start managed adapter: {e}");
+            inst.shutdown();
+            return 1;
+        }
+    };
     let tcp_port = match server::start_tcp(&inst, &bind, port) {
         Ok(p) => p,
         Err(e) => {
@@ -290,18 +325,17 @@ fn serve(inst: Arc<Instance>, args: &Args) -> i32 {
             Err(e) => eprintln!("[WARN] REST API not started: {e}"),
         }
     }
-    let (resp_on, resp_port) = {
-        let c = inst.cfg();
-        (
-            c.get_bool("resp", "enabled") && !args.no_resp,
-            args.resp_port.or_else(|| env_port("KIVADB_RESP_PORT")).unwrap_or(c.get_u64("resp", "port") as u16),
-        )
-    };
     if resp_on && !args.hierarchical_tcp {
         match kivadb::resp::start_resp(&inst, &bind, resp_port) {
             Ok(p) => println!("  Redis (RESP) : {bind}:{p}  (redis-cli and Redis client libraries)"),
             Err(e) => eprintln!("[WARN] Redis-compatible listener not started: {e}"),
         }
+    }
+    if let Some(p) = managed_http {
+        println!("  Managed HTTP : {bind}:{p} (/v2)");
+    }
+    if let Some(p) = managed_resp {
+        println!("  Managed RESP : {bind}:{p} (KIVA.USE)");
     }
     println!("  Auth         : {}", if inst.auth_required() { "required" } else { "disabled (local use)" });
     if inst.opts.skip_auth {
@@ -467,6 +501,12 @@ fn start(home: &Path, args: &Args) -> i32 {
     cmd.arg("serve").arg("--home").arg(home);
     if args.hierarchical_tcp {
         cmd.arg("--hierarchical-tcp");
+    }
+    if args.hierarchical_http {
+        cmd.arg("--hierarchical-http");
+    }
+    if args.hierarchical_resp {
+        cmd.arg("--hierarchical-resp");
     }
     if let Some(p) = args.port {
         cmd.arg("--port").arg(p.to_string());
@@ -733,6 +773,15 @@ fn finish(notice: &Option<update::Notice>, code: i32) -> ! {
 fn main() {
     update::clean_previous();
     let mut args = parse_args();
+    if (args.hierarchical_http || args.hierarchical_resp)
+        && (!args.hierarchical_tcp || !(args.serve || args.action == Some("start")) || args.connect.is_some())
+    {
+        fail("managed adapter flags require serve or start with --hierarchical-tcp");
+    }
+    if (args.hierarchical_http && args.no_http) || (args.hierarchical_resp && args.no_resp) {
+        fail("conflicting managed adapter flags");
+    }
+
     let home = args.home.clone().unwrap_or_else(default_home);
     // The interactive history lives next to the data (or in the default home for --connect).
     args.shell.history = Some(home.join("history.txt"));

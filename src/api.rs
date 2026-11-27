@@ -508,12 +508,42 @@ pub(crate) fn handle_native_hierarchy(sess: &mut Session, req: &Json) -> Result<
         "begin" => Ok(json!({"transaction": sess.begin()?})),
         "commit" => Ok(json!({"written": sess.commit()?})),
         "rollback" => Ok(json!({"rolled_back": sess.rollback()})),
+        "put" | "add" | "del" if sess.adapter_value_limit.is_some() => {
+            sess.begin()?;
+            let response = handle_data(sess, req, op)?;
+            sess.commit()?;
+            Ok(response)
+        }
         _ => handle_data(sess, req, op),
     });
     if result.is_err() && matches!(op, "put" | "add" | "del") {
         sess.rollback();
     }
     result
+}
+
+/// Atomically apply an HTTP batch on the selected stable collection.
+pub(crate) fn handle_hierarchy_batch(sess: &mut Session, body: &Json) -> Result<Json> {
+    sess.use_zone();
+    let ops = body["operations"]
+        .as_array()
+        .filter(|list| (1..=64).contains(&list.len()))
+        .ok_or_else(|| invalid("expected 1 to 64 operations"))?;
+    if ops.iter().any(|req| !matches!(req["op"].as_str(), Some("put" | "del"))) {
+        return Err(invalid("batch supports put and del"));
+    }
+    sess.with_managed_engine("batch", Need::Write, |sess| {
+        sess.begin()?;
+        let results =
+            ops.iter().map(|req| handle_data(sess, req, req["op"].as_str().unwrap())).collect::<Result<Vec<_>>>();
+        match results {
+            Ok(rows) => Ok(json!({"written": sess.commit()?, "results": rows})),
+            Err(err) => {
+                sess.rollback();
+                Err(err)
+            }
+        }
+    })
 }
 
 fn handle_data(sess: &mut Session, req: &Json, op: &str) -> Result<Json> {
@@ -695,12 +725,17 @@ fn handle_data(sess: &mut Session, req: &Json, op: &str) -> Result<Json> {
             let limit = req["limit"].as_u64().unwrap_or(100).clamp(1, 10_000) as usize;
             let opts = read_opts(req, &q, limit)?;
             let mut rows = Vec::new();
+            let mut budget = crate::managed_transport::REPLY_MAX;
             let (plan, _) = sess.engine.read_query_values(&q, &opts, |k, doc| {
                 let value = match types {
                     Types::Plain => doc.into_json_doc().unwrap_or_default(),
                     Types::Extended => value_to_wire(&doc, types),
                 };
-                rows.push(json!({ "key": k, "value": value }));
+                let row = json!({ "key": k, "value": value });
+                if sess.adapter_value_limit.is_some() {
+                    crate::managed_transport::charge_json(&mut budget, &row)?;
+                }
+                rows.push(row);
                 Ok(())
             })?;
             Ok(json!({ "rows": rows, "plan": plan_json(&plan) }))

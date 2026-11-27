@@ -378,7 +378,7 @@ remains available for historical homes.
 
 The process-crash tests preserve a committed value across an interrupted
 response. Sudden power-loss behavior, long-running production workloads,
-REST, RESP, released drivers, backup/restore, replication, doctor and
+released drivers, backup/restore, replication, doctor and
 migration cutover remain open.
 
 ### Phase 7A Release measurements
@@ -801,3 +801,21 @@ The local Release example rerun checks the shared routing path without TCP.
 | 32 | 5.61 / 8.03 / 19.60 | 3,845.47 / 4,640.84 / 4,640.84 |
 | 128 | 5.58 / 8.21 / 192.18 | 7,152.99 / 9,060.31 / 9,060.31 |
 | 1,000 | 5.71 / 6.16 / 34.38 | 59,774.71 / 80,152.13 / 80,152.13 |
+
+## Phase 7B REST and RESP
+
+**NOT READY for production.** The [adapter guide](../architecture/HIERARCHICAL_REST_RESP.md)
+covers startup, authorization, compatibility and operational limits.
+
+| Coverage | Regression checks |
+| --- | --- |
+| REST01–REST07 | Basic authentication, collection create and retire, homonyms, typed binary values, Viewer restrictions, indistinguishable missing and hidden resources, and revoked access |
+| REST08–REST12 | Invalid escape, oversized body, pinned TLS, concurrent writes from separate transports, and a rolled-back batch |
+| RESP01–RESP10, RESP12 | AUTH, explicit selection, isolation, GET/SET/DEL, TTL, MULTI/EXEC, pipelines, revoked grants, malformed frames, and disconnect before EXEC |
+| RESP11 | Shared connection cap, queue capacity, lane isolation and removal of expired waiters |
+| CROSS01–CROSS06 | Shared data, grant revocation during an open RESP transaction, stale identity after re-creation, and persistence after restart |
+
+The historical compatibility suites still run in the default test suite.
+The existing seven ignored performance workloads remain opt-in. External
+driver adaptation, push, backup, restore, replication, doctor, reattachment
+of retired resources and final migration remain future work.

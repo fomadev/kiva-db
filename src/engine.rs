@@ -2886,10 +2886,17 @@ impl Engine {
     // -- reads --------------------------------------------------------------
 
     pub fn get(&self, key: &str) -> Result<Option<(Value, Entry)>> {
+        self.get_limited(key, None)
+    }
+
+    pub(crate) fn get_limited(&self, key: &str, limit: Option<usize>) -> Result<Option<(Value, Entry)>> {
         let mut inner = self.lock();
         let Some(e) = inner.live(key, now_ms()) else {
             return Ok(None);
         };
+        if limit.is_some_and(|limit| e.raw_size as usize > limit) {
+            return Err(KivaError::Other("ERR_ADAPTER_LIMIT: value exceeds managed adapter limit".into()));
+        }
         let v = inner.value_of(key, &e)?;
         Ok(Some((v, e)))
     }
@@ -2949,6 +2956,14 @@ impl Engine {
         } else {
             it.take(take).map(|(k, e)| (k.clone(), e.clone())).collect()
         }
+    }
+
+    pub(crate) fn scan_page(&self, offset: usize, count: usize) -> (Vec<(String, Entry)>, usize) {
+        let inner = self.lock();
+        let now = now_ms();
+        let mut rows = inner.index.iter().filter(|(_, entry)| !entry.is_expired(now)).skip(offset);
+        let page = rows.by_ref().take(count).map(|(key, entry)| (key.clone(), entry.clone())).collect();
+        (page, if rows.next().is_some() { offset.saturating_add(count) } else { 0 })
     }
 
     /// Keys matching a glob pattern, in key order.

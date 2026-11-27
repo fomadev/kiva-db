@@ -44,10 +44,8 @@ pub fn start_tcp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
                 break;
             }
             let Ok(stream) = conn else { continue };
-            let max = inst.cfg().get_u64("server", "max_clients") as usize;
-            let max = if inst.hierarchical_tcp { max.min(128) } else { max };
-            let slot = ClientSlot(inst.clone());
-            if inst.clients.fetch_add(1, Ordering::SeqCst) >= max {
+            let (slot, allowed) = ClientSlot::claim(&inst);
+            if !allowed {
                 let mut stream = stream;
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                 let _ = stream.write_all(b"Error: max clients reached\n");
@@ -63,7 +61,16 @@ pub fn start_tcp(inst: &Arc<Instance>, bind: &str, port: u16) -> Result<u16> {
     Ok(port)
 }
 
-struct ClientSlot(Arc<Instance>);
+pub(crate) struct ClientSlot(pub(crate) Arc<Instance>);
+
+impl ClientSlot {
+    pub(crate) fn claim(inst: &Arc<Instance>) -> (Self, bool) {
+        let max = inst.cfg().get_u64("server", "max_clients") as usize;
+        let max = if inst.hierarchical_tcp { max.min(128) } else { max };
+        let allowed = inst.clients.fetch_add(1, Ordering::SeqCst) < max;
+        (Self(inst.clone()), allowed)
+    }
+}
 
 impl Drop for ClientSlot {
     fn drop(&mut self) {
@@ -307,15 +314,19 @@ const NATIVE_REPLY_MAX: usize = 4 * 1024 * 1024;
 
 /// Bound the whole frame. Cache the socket setting across ordinary
 /// frames, then shorten it as the absolute deadline approaches.
-struct Deadline<'a> {
+pub(crate) struct Deadline<'a> {
     stream: &'a mut TcpStream,
     configured: &'a mut Option<Duration>,
     expires: Instant,
 }
 
 impl<'a> Deadline<'a> {
-    fn new(stream: &'a mut TcpStream, configured: &'a mut Option<Duration>) -> Self {
+    pub(crate) fn new(stream: &'a mut TcpStream, configured: &'a mut Option<Duration>) -> Self {
         Self { stream, configured, expires: Instant::now() + NATIVE_TIMEOUT }
+    }
+
+    pub(crate) fn rearm(&mut self) {
+        self.expires = Instant::now() + NATIVE_TIMEOUT;
     }
 
     fn remaining(&self) -> std::io::Result<Duration> {

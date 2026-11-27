@@ -3,6 +3,9 @@
 Every version of KivaDB, newest first. Version numbers follow [Semantic Versioning](https://semver.org): MAJOR for incompatible changes, MINOR for new features, PATCH for compatible improvements and fixes.
 
 ## [Unreleased]
+- Adds opt-in hierarchical REST and Redis RESP listeners that share managed
+  permissions, collection identities and data with native TCP. See the
+  [adapter guide](docs/architecture/HIERARCHICAL_REST_RESP.md) for coverage.
 
 - Splits hierarchical TCP reads, data work, authentication and control
   into bounded FIFO admission lanes. Full lanes return an explicit

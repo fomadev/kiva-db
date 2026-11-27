@@ -203,6 +203,23 @@ pub fn accept(
     stream: TcpStream,
     refusal: &dyn Fn(u8) -> Vec<u8>,
 ) -> Option<(TcpStream, SocketAddr)> {
+    accept_connection(inst, stream, refusal, false)
+}
+
+pub(crate) fn accept_managed(
+    inst: &Arc<Instance>,
+    stream: TcpStream,
+    refusal: &dyn Fn(u8) -> Vec<u8>,
+) -> Option<(TcpStream, SocketAddr)> {
+    accept_connection(inst, stream, refusal, true)
+}
+
+fn accept_connection(
+    inst: &Arc<Instance>,
+    stream: TcpStream,
+    refusal: &dyn Fn(u8) -> Vec<u8>,
+    managed_adapter: bool,
+) -> Option<(TcpStream, SocketAddr)> {
     let peer = stream.peer_addr().ok()?;
     let mut first = [0u8; 1];
     // A client that connects and says nothing for a minute is let go.
@@ -213,7 +230,7 @@ pub fn accept(
     }
     let _ = stream.set_read_timeout(None);
     if first[0] != HANDSHAKE {
-        let required = inst.cfg().get_bool("tls", "required");
+        let required = managed_adapter || inst.cfg().get_bool("tls", "required");
         if required && !peer.ip().is_loopback() {
             let mut s = stream;
             let _ = s.write_all(&refusal(first[0]));
@@ -223,7 +240,11 @@ pub fn accept(
             let _ = s.shutdown(Shutdown::Write);
             let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
             let mut sink = [0u8; 4096];
-            while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
+            if managed_adapter {
+                let _ = s.read(&mut sink);
+            } else {
+                while matches!(s.read(&mut sink), Ok(n) if n > 0) {}
+            }
             return None;
         }
         return Some((stream, peer));
